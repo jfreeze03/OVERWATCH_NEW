@@ -10,13 +10,14 @@ from __future__ import annotations
 import html
 import zlib
 from collections import defaultdict
+from datetime import timedelta
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 from app.logic.decision import LANE_ACTNOW_CONF, LANE_CONF_FLOOR
-from app.logic.formulas import humanize_duration, md_dollars
+from app.logic.formulas import account_today, humanize_duration, md_dollars
 from app.logic.task_graph import TaskGraphShape, canonical_task_name
 from app.ui import palette
 from app.ui.sizing import CHART_H_MD, CHART_H_SM
@@ -885,9 +886,9 @@ def spend_trend(
 
     The old gradient area read as "abstract wash" — nobody could say what it
     meant (owner feedback, twice). Bars answer "how much did THAT day cost";
-    the average line answers "which way is it heading"; the newest day
-    renders dimmed because metering lags up to 24h — partial, not a crash
-    (the question every viewer asked of the old chart). The forecast range
+    the average line (7 CALENDAR days) answers "which way is it heading"; today's
+    bar (account clock) renders dimmed because metering lags up to 24h — partial,
+    not a crash (the question every viewer asked of the old chart). The forecast range
     lives in the Projected month-end KPI, not as a floating rectangle here.
     Dataset embeds ONCE on the layer (most-viewed chart, page-payload rule).
 
@@ -908,8 +909,18 @@ def spend_trend(
     if data.empty:
         _empty_note()
         return None
-    data["AVG7"] = data["USD"].rolling(7, min_periods=3).mean().round(2)
-    data["PROVISIONAL"] = data["Day"] == data["Day"].max()
+    # R1-216: the 7-day average and the weekly pace are CALENDAR quantities. A sparse series (a
+    # proc's CALL days only; no row on a day without CALLs) averaged 7 ROWS (two-plus weeks for a
+    # Mon/Wed/Fri proc) and compared row blocks, so its "7-day avg" and pace were wrong. Average a
+    # zero-filled daily calendar instead -- a missing day on these feeds is a day with no spend, not
+    # an unknown -- and map it back onto the (still sparse) bars.
+    _day = data["Day"].dt.normalize()
+    cal = data.groupby(_day)["USD"].sum().asfreq("D", fill_value=0.0)
+    data["AVG7"] = _day.map(cal.rolling(7, min_periods=3).mean()).round(2)
+    # Partial = TODAY on the account clock (the rule anomaly.complete_days_only and Overview's
+    # daily_complete use), never merely the newest row: a closed Last-month window's Aug 31, or a
+    # proc that last ran days ago, is complete and must not be dimmed or dropped from the pace.
+    data["PROVISIONAL"] = data["Day"].dt.date >= account_today()
     data["DayStr"] = data["Day"].dt.strftime("%Y-%m-%d")   # UI23: stable click key
     bar_size = max(4, min(20, int(660 / max(len(data), 1))))
     enc_x = alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"]))
@@ -981,16 +992,23 @@ def spend_trend(
     # r6-bug7: pace over COMPLETE days only. The newest day is PROVISIONAL (metering lags
     # up to 24h; the chart dims it and the caption disclaims it), so including it in the
     # trailing-7 mean understated the recent week and printed a phantom negative "pace"
-    # on flat spend. Compare the last two COMPLETE 7-day windows instead.
+    # on flat spend. Compare the last two COMPLETE 7-day windows instead. R1-216: CALENDAR
+    # weeks anchored on the newest complete day (anchor-6..anchor vs anchor-13..anchor-7 over
+    # the zero-filled calendar), never the last 7 vs prior 7 ROWS of a sparse series.
     complete = data[~data["PROVISIONAL"]]
-    if len(complete) >= 14:
-        last7 = float(complete["USD"].tail(7).mean())
-        prior7 = float(complete["USD"].iloc[-14:-7].mean())
-        if prior7 > 0:
-            note += f", pace {(last7 - prior7) / prior7 * 100:+.0f}% vs the prior week"
+    if not complete.empty:
+        anchor = complete["Day"].dt.normalize().max()
+        week, one_day = timedelta(days=7), timedelta(days=1)
+        if (anchor - cal.index[0]).days + 1 >= 14:
+            last7 = float(cal.loc[anchor - week + one_day:anchor].sum()) / 7
+            prior7 = float(cal.loc[anchor - 2 * week + one_day:anchor - week].sum()) / 7
+            if prior7 > 0:
+                note += f", pace {(last7 - prior7) / prior7 * 100:+.0f}% vs the prior week"
     if _has_markers:
         note += "; dashed rules mark flagged days (hover for what)"
-    st.caption(note + ". Newest day is dimmed: metering lags up to 24h, so it is partial, not a drop.")
+    # The partial-day disclaimer only when a bar IS dimmed (today is in the window).
+    st.caption(note + (". Newest day is dimmed: metering lags up to 24h, so it is partial, not a drop."
+                       if bool(data["PROVISIONAL"].any()) else "."))
     return picked_day
 
 def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top_n: int = 10,
@@ -1180,13 +1198,16 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
 
 
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10,
-              *, takeaway: bool = False, value_fmt: str = ",.0f", unit: str = "") -> None:
+              *, takeaway: bool = False, value_fmt: str = ",.0f", unit: str = "",
+              additive: bool = True) -> None:
     # value_fmt defaults to integer (",.0f") for the count callers (statements, failures);
     # pass a fractional format (e.g. ",.1f") for a rate metric like avg seconds/query, else
     # the axis/tooltip/takeaway round a genuine 0.4s to "0".
     # `unit`: a DURATION unit (sec/s/ms/min/h) humanizes the tooltip + takeaway to Hr/Min/Sec so a
     # bar-chart duration matches the tables/KPIs ("1h 40m", not raw "6008"); the numeric x-axis stays
     # a bar-length scale (Altair axes can't render Hr/Min/Sec). Non-duration units are unchanged.
+    # `additive=False` (R1-217): the value is a per-row RATE (e.g. average queue seconds per query),
+    # so a column sum is not a quantity -- the takeaway names the top bar without a "(x% of total)".
     data = df[[label_col, value_col]].head(top_n).copy()
     data.columns = ["Label", "Value"]
     data["Value"] = pd.to_numeric(data["Value"], errors="coerce").fillna(0.0)
@@ -1216,8 +1237,10 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         _full_total = float(pd.to_numeric(df[value_col], errors="coerce").fillna(0).sum())
         if _full_total > 0:
             top = data.loc[data["Value"].idxmax()]
+            # A sum of per-warehouse averages is no quantity ("39% of 31s" when the pooled average was
+            # 10.4s): a non-additive metric passes total 0, which _share_note renders as "Top: X v."
             st.caption(_share_note(
-                str(top["Label"]), float(top["Value"]), _full_total, dollars=False,
+                str(top["Label"]), float(top["Value"]), _full_total if additive else 0.0, dollars=False,
                 value_fmt=value_fmt,
                 value_fn=(lambda v: _fmt_metric_value(v, unit)) if _dur else None))
     st.altair_chart(chart, width="stretch")

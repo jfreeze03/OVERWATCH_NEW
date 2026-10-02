@@ -157,17 +157,159 @@ FROM (
 -- suspend halts the whole chain (extract -> V27 marts -> ops-diag), so the
 -- minute-7 TASK_LOAD_HOURLY watermark DELETE cannot trim the freshly-filled
 -- 90d OW_QH_EXTRACT mid-run and destroy up to ~87d of ops-diag history.
+-- !! IF THIS WORKSHEET STOPS BEFORE THE END (a timeout, Stop, any error) !!
+-- run the ALTER TASK ... RESUME and SYSTEM$TASK_DEPENDENTS_ENABLE statements
+-- just above this file's final verify SELECT, or snowflake/loader_chain_check.sql
+-- step 0. Until you do, the WHOLE hourly graph stays suspended: no loads, no
+-- alert scan, no Teams delivery (the V041 stranding class).
+-- Each load below is its own guarded block (R1-231). A loader's own verdict is
+-- kept: the block reads the CALL's return value (the V064 reconcile idiom,
+-- RESULT_SCAN(LAST_QUERY_ID())) and its pane reads 'ok: <call> -> <verdict>'.
+-- A failure verdict ('MARTS WITH ERRORS: ...' from SP_LOAD_MARTS_V27, or
+-- '(extract committed: false)' from SP_LOAD_QH_EXTRACT) or an ERROR becomes a
+-- 'FAILED: ...' pane plus an APP_ERROR_LOG row (PAGE 'Backfill365'), so Run
+-- All still reaches the RESUME, and the LAST result pane counts the failures.
+-- A statement timeout or a Stop cannot be caught that way -- hence the note
+-- above. One block per CALL on purpose: a single block around all of them
+-- would be ONE statement carrying the whole window against WH_ALFA_ADMIN's
+-- 300s STATEMENT_TIMEOUT_IN_SECONDS.
+SET backfill_started = CURRENT_TIMESTAMP();   -- scopes the failure count in the last pane to THIS run
 ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY SUSPEND;
 
-CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(90);
-CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
-CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(90);
-CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 365);
-CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(120);
--- V075: security detail is intentionally bounded to 90d even in the 365d pack.
-CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(90);
+EXECUTE IMMEDIATE $$
+DECLARE
+    rv VARCHAR;
+    emsg VARCHAR;
+BEGIN
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(90);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NULL OR rv ILIKE 'MARTS WITH ERRORS%' OR rv ILIKE '%extract committed: false%') THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_QH_EXTRACT(90)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_QH_EXTRACT(90) -> ' || COALESCE(rv, 'no verdict returned');
+    END IF;
+    RETURN 'ok: SP_LOAD_QH_EXTRACT(90) -> ' || rv;
+EXCEPTION
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_QH_EXTRACT(90)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_QH_EXTRACT(90) - ' || emsg;
+END;
+$$;
+EXECUTE IMMEDIATE $$
+DECLARE
+    rv VARCHAR;
+    emsg VARCHAR;
+BEGIN
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NULL OR rv ILIKE 'MARTS WITH ERRORS%' OR rv ILIKE '%extract committed: false%') THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_MARTS_V27(''HOURLY'', 90)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_MARTS_V27(''HOURLY'', 90) -> ' || COALESCE(rv, 'no verdict returned');
+    END IF;
+    RETURN 'ok: SP_LOAD_MARTS_V27(''HOURLY'', 90) -> ' || rv;
+EXCEPTION
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_MARTS_V27(''HOURLY'', 90)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_MARTS_V27(''HOURLY'', 90) - ' || emsg;
+END;
+$$;
+EXECUTE IMMEDIATE $$
+DECLARE
+    rv VARCHAR;
+    emsg VARCHAR;
+BEGIN
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(90);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NULL OR rv ILIKE 'MARTS WITH ERRORS%' OR rv ILIKE '%extract committed: false%') THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_OPS_DIAG(90)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_OPS_DIAG(90) -> ' || COALESCE(rv, 'no verdict returned');
+    END IF;
+    RETURN 'ok: SP_LOAD_OPS_DIAG(90) -> ' || rv;
+EXCEPTION
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_OPS_DIAG(90)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_OPS_DIAG(90) - ' || emsg;
+END;
+$$;
+EXECUTE IMMEDIATE $$
+DECLARE
+    rv VARCHAR;
+    emsg VARCHAR;
+BEGIN
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 365);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NULL OR rv ILIKE 'MARTS WITH ERRORS%' OR rv ILIKE '%extract committed: false%') THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_MARTS_V27(''DAILY'', 365)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_MARTS_V27(''DAILY'', 365) -> ' || COALESCE(rv, 'no verdict returned');
+    END IF;
+    RETURN 'ok: SP_LOAD_MARTS_V27(''DAILY'', 365) -> ' || rv;
+EXCEPTION
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_MARTS_V27(''DAILY'', 365)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_MARTS_V27(''DAILY'', 365) - ' || emsg;
+END;
+$$;
+EXECUTE IMMEDIATE $$
+DECLARE
+    rv VARCHAR;
+    emsg VARCHAR;
+BEGIN
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(120);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NULL OR rv ILIKE 'MARTS WITH ERRORS%' OR rv ILIKE '%extract committed: false%') THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_PLATFORM_SCORE(120)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_PLATFORM_SCORE(120) -> ' || COALESCE(rv, 'no verdict returned');
+    END IF;
+    RETURN 'ok: SP_LOAD_PLATFORM_SCORE(120) -> ' || rv;
+EXCEPTION
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_PLATFORM_SCORE(120)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_PLATFORM_SCORE(120) - ' || emsg;
+END;
+$$;
+-- V075: security detail stays bounded below the 365d pack, at the loader maximum of 180 days
+-- (v4.606; it was 90). FACT_SECURITY_LOGIN_DAILY keeps 180 days, and the Security page serves the
+-- new-network fact only when it is dense over the window plus the 90-day baseline before it (180
+-- days at a 90-day window). A 90-day fill failed that gate for every window until the hourly task
+-- had added the missing days, so the page fell back to a live LOGIN_HISTORY scan of up to 180 days.
+-- The 180-day call also reloads FACT_SECURITY_CHANGE from 180 days of QUERY_HISTORY (one-time).
+EXECUTE IMMEDIATE $$
+DECLARE
+    rv VARCHAR;
+    emsg VARCHAR;
+BEGIN
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(180);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NULL OR rv ILIKE 'MARTS WITH ERRORS%' OR rv ILIKE '%extract committed: false%') THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_SECURITY_FACTS(180)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_SECURITY_FACTS(180) -> ' || COALESCE(rv, 'no verdict returned');
+    END IF;
+    RETURN 'ok: SP_LOAD_SECURITY_FACTS(180) -> ' || rv;
+EXCEPTION
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_SECURITY_FACTS(180)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_SECURITY_FACTS(180) - ' || emsg;
+END;
+$$;
 -- Optional full-year sweep for the cheap daily marts (wh efficiency, graphs)
--- (fill the extract to the same width first):
+-- (fill the extract to the same width first; wrap each like the blocks above):
 -- CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(365);
 -- CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 365);
 
@@ -178,3 +320,24 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(90);
 ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
 SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
 
+-- Verify (the LAST result pane). Both counts 0 = every load in THIS run succeeded.
+--   BACKFILL_CALLS_FAILED: a guarded CALL above raised, or returned a failure
+--     verdict (its own pane shows which).
+--   LOADER_ARMS_FAILED: arm failures the loaders log and swallow without
+--     failing the CALL -- the optional mart arms, the query-fact and
+--     cloud-services arms of the extract load (PAGE ExtractLoader / MartLoader /
+--     SecurityLoader, ERROR_TYPE *_failed: the V064 reconcile's filter; a
+--     skipped/unavailable note is not a failure). The daily task graph is not
+--     suspended, so a loader failure it logs in the same minutes counts too --
+--     a real loader failure either way.
+-- FAILURES names each one -- fix the cause, then re-run this file
+-- (idempotent). Needs the SET above from the same worksheet session.
+SELECT COUNT_IF(PAGE = 'Backfill365') AS BACKFILL_CALLS_FAILED,
+       COUNT_IF(PAGE <> 'Backfill365') AS LOADER_ARMS_FAILED,
+       LISTAGG(PAGE || ' ' || COALESCE(CONTEXT, '?') || ': ' || COALESCE(LEFT(ERROR_MESSAGE, 160), '?'), ' | ')
+           WITHIN GROUP (ORDER BY LOGGED_AT) AS FAILURES
+FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+WHERE LOGGED_AT >= $backfill_started::TIMESTAMP_NTZ
+  AND (PAGE = 'Backfill365'
+       OR (PAGE IN ('ExtractLoader', 'MartLoader', 'SecurityLoader')
+           AND ERROR_TYPE ILIKE '%_failed%'));

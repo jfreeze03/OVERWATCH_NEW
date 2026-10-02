@@ -54,9 +54,13 @@ def test_triage_queue_anomaly_without_day_stays_blank():
 
 
 def test_control_room_filters_anomalies_to_latest_day():
+    # R1-202 moved the latest-day cut INSIDE anomaly_summary, BEFORE its top-10: filtering the
+    # already-capped list let 10+ stronger historical spikes evict yesterday's spike. The
+    # behaviour is locked in tests/test_control_room_review_r1.py; this pins the wiring.
     cr = _src("app/ui/pages/control_room.py")
-    assert '_latest = str(_wh_complete["DAY"].max())' in cr
-    assert 'str(a.get("day") or "") == _latest' in cr
+    assert '_latest = pd.to_datetime(_wh_complete["DAY"], errors="coerce").max()' in cr
+    assert "day_from=_latest.date(), day_to=_latest.date()" in cr
+    assert 'str(a.get("day") or "") == _latest' not in cr      # the post-cap filter is gone
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +93,13 @@ def test_bug4_health_read_distinguishes_error_from_empty():
 def test_bug7_spend_trend_pace_excludes_partial_day():
     ch = _src("app/ui/charts.py")
     assert 'complete = data[~data["PROVISIONAL"]]' in ch
-    assert "complete[\"USD\"].tail(7).mean()" in ch
+    # v4.606 R1-216: the pace compares CALENDAR weeks anchored on the newest COMPLETE day (the
+    # zero-filled `cal` series), not the last 7 ROWS -- a sparse proc trend's rows span weeks. The
+    # r6-bug7 intent (the partial day stays out of the pace) is unchanged: the anchor comes from
+    # `complete`. Behaviour locks: tests/test_p606_components.py.
+    assert 'anchor = complete["Day"].dt.normalize().max()' in ch
+    assert "cal.loc[anchor - week + one_day:anchor].sum()" in ch
+    assert "complete[\"USD\"].tail(7).mean()" not in ch
 
 
 def test_bug8_12_chargeback_pool_window_and_grain():

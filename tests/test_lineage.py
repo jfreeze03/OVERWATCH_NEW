@@ -147,3 +147,32 @@ def test_blast_radius_wired_into_entity_360():
     assert "safe to ALTER" in wb
     gsrc = (_ROOT / "app" / "data" / "graph_sql.py").read_text(encoding="utf-8")
     assert "def object_dependency_edges(" in gsrc and "def object_blast_consumers(" in gsrc
+
+
+def test_blast_radius_edge_cap_arms_the_truncation_canary(monkeypatch):
+    """R1-056: the edge fetch's builder LIMIT and run()'s max_rows must be ONE cap. With the builder's
+    10,000 default under max_rows=50000, query._with_row_cap kept the smaller trailing LIMIT, so a
+    >10k-edge account was cut by REFERENCED_FQN order and `truncated` (the '(lower bound)' tag) never
+    fired. The SQL run() would actually send must end in LIMIT max_rows+1."""
+    import re
+    from types import SimpleNamespace
+
+    from app.core.query import _with_row_cap
+    from app.ui import workbench as wb
+
+    seen: list[tuple[str, int]] = []
+
+    def fake_run(sql, *_a, key="", max_rows=None, **_k):
+        if key == "object_dep_edges":
+            seen.append((sql, max_rows))
+        return SimpleNamespace(ok=False, empty=True, df=pd.DataFrame(), error="stop", error_kind="absent",
+                               truncated=False, usable=lambda: False)
+
+    monkeypatch.setattr(wb, "run", fake_run)
+    monkeypatch.setattr(wb, "st", SimpleNamespace(markdown=lambda *_a, **_k: None,
+                                                  caption=lambda *_a, **_k: None))
+    wb._object_blast_radius_panel("DB.S.T")
+    ((sql, cap),) = seen
+    assert cap and cap >= 50000
+    sent = _with_row_cap(sql, cap)
+    assert re.search(rf"LIMIT {cap + 1}\s*$", sent), sent[-40:]

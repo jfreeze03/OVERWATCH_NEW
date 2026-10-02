@@ -329,8 +329,10 @@ def test_v159_reconcile_and_backfill_always_run_the_gated_arms():
                            r"DBA_MAINT_DB\.OVERWATCH\.TASK_LOAD_MARTS_V27_HOURLY\b(?!\s+(?:SUSPEND|RESUME)\b)",
                            p.read_text(encoding="utf-8"))]
     assert not later, f"TASK_LOAD_MARTS_V27_HOURLY was re-created later: {later}"
-    backfills = re.findall(r"^CALL DBA_MAINT_DB\.OVERWATCH\.SP_LOAD_MARTS_V27\('HOURLY', (\d+)\);",
-                           _read("snowflake/backfill_365.sql"), re.M)          # live CALLs, not commented ones
+    # live CALLs, not commented ones. `^\s*`: since R1-231 each backfill CALL sits indented inside its own
+    # guarded EXECUTE IMMEDIATE block (an error no longer halts Run All inside the task-suspend window).
+    backfills = re.findall(r"^\s*CALL DBA_MAINT_DB\.OVERWATCH\.SP_LOAD_MARTS_V27\('HOURLY', (\d+)\);",
+                           _read("snowflake/backfill_365.sql"), re.M)
     assert len(backfills) == 1
     backfill = int(backfills[0])
     assert clamp(int(task)) == 2 and clamp(None) == 2

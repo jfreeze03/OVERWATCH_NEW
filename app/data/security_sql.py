@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from app import companies
 from app.config import core_object, mart_object
 from app.core.sqlsafe import contains_filter, in_list, sql_literal
 from app.data.common import (
+    account_today_sql,
     and_where,
     bounded_days,
     resolve_effective_window,
@@ -14,6 +17,7 @@ from app.data.common import (
 from app.logic.client_support import NO_CLIENT_ID, SNOWFLAKE_RUN_DRIVERS, SNOWFLAKE_RUN_PROGRAM_PREFIXES
 from app.logic.identity_auth import SERVICE_TYPES
 from app.logic.policy_coverage import FAMILY_NAME_PATTERN, FAMILY_SUFFIX_PATTERN
+from app.logic.security import capped_window
 
 # --- Admin-role tiers (codified AS-IS per owner decision 2026-09-10; byte-identical to the
 # former inlined literals — one source of truth, no behaviour change). Two single-use sites
@@ -42,13 +46,36 @@ OFF_HOURS_END_HOUR = 6             # Central hour < this is off-hours
 OFF_HOURS_WEEKEND_ISO: tuple[int, ...] = (6, 7)
 
 
+#: Pre-LIMIT window totals that capped Security feeds carry beside their rows (UNCAPPED-AGGREGATE: a
+#: SQL LIMIT below run()'s row cap never sets res.truncated, so len() of the frame silently saturates at
+#: the LIMIT). KPIs, badges and captions read these; tables and the export pack drop them. The DDL/DCL
+#: feeds' three totals are listed in DDL_WINDOW_TOTAL_COLUMNS below and joined in here.
+WINDOW_TOTAL_COLUMNS: tuple[str, ...] = (
+    "TOTAL_USERS_WIN", "TOTAL_ENROLLED_WIN",                       # MFA gaps / single-factor logins
+    "TOTAL_BURSTS_WIN", "TOTAL_BROKE_WIN", "TOTAL_HIGH_WIN",       # account-takeover candidates
+    "TOTAL_PAIRS_WIN",                                             # new networks
+    "TOTAL_CHANGES_WIN", "GRANTED_WIN", "REVOKED_WIN",             # recent grant changes
+    "TOTAL_SCOPES_WIN", "TOTAL_GRANTS_WIN",                        # least-privilege scopes / shortlist
+    "TOTAL_PATHS_WIN", "TOTAL_PATH_USERS_WIN", "TOTAL_HIGH_RISK_USERS_WIN",
+    "TOTAL_SELF_ESCALATORS_WIN", "USER_PATH_RANK",                 # effective access
+    "TOTAL_GROUPS_WIN", "HIGH_RISK_GROUPS_WIN", "UNREGISTERED_GROUPS_WIN",   # DDL/DCL changes
+)
+
+
+def _limit_clause(limit: int | None, default: int) -> str:
+    """``LIMIT n`` for the export pack's larger reads (it passes its own row cap so run()'s n+1 check
+    can flag a truncated sheet); the on-page panels keep each builder's historical default."""
+    n = default if limit is None else max(1, min(int(limit), 100_000))
+    return f"LIMIT {n}"
+
+
 def _admin_roles_in(column: str, roles: tuple[str, ...]) -> str:
     """Emit ``<column> IN ('R1', 'R2', ...)`` — byte-identical to the former inlined
     single-line literals (single quotes, ', ' separators, exact role order)."""
     return f"{column} IN (" + ", ".join(f"'{r}'" for r in roles) + ")"
 
 
-def users_without_mfa(company: str = "ALL") -> str:
+def users_without_mfa(company: str = "ALL", *, limit: int | None = None) -> str:
     """Users lacking MFA who actually password-login — evidence from
     FACT_LOGIN_DAILY (loaded hourly), so the 30-day LOGIN_HISTORY scan runs
     once in the loader instead of on every page view. The page falls back to
@@ -77,16 +104,17 @@ SELECT
     U.LOGIN_NAME,
     U.LAST_SUCCESS_LOGIN,
     PL.PASSWORD_LOGINS_30D,
-    PL.LAST_PASSWORD_LOGIN
+    PL.LAST_PASSWORD_LOGIN,
+    COUNT(*) OVER () AS TOTAL_USERS_WIN
 FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
 JOIN password_logins PL ON PL.USER_NAME = U.NAME
 WHERE {where}
 ORDER BY PL.PASSWORD_LOGINS_30D DESC
-LIMIT 200
+{_limit_clause(limit, 200)}
 """
 
 
-def users_without_mfa_live(company: str = "ALL") -> str:
+def users_without_mfa_live(company: str = "ALL", *, limit: int | None = None) -> str:
     """Users lacking MFA who actually password-login (login-evidence based).
 
     Cross-checks LOGIN_HISTORY so SSO/key-pair-only users are not false
@@ -116,17 +144,20 @@ SELECT
     U.LOGIN_NAME,
     U.LAST_SUCCESS_LOGIN,
     PL.PASSWORD_LOGINS_30D,
-    PL.LAST_PASSWORD_LOGIN
+    PL.LAST_PASSWORD_LOGIN,
+    COUNT(*) OVER () AS TOTAL_USERS_WIN
 FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
 JOIN password_logins PL ON PL.USER_NAME = U.NAME
 WHERE {where}
 ORDER BY PL.PASSWORD_LOGINS_30D DESC
-LIMIT 200
+{_limit_clause(limit, 200)}
 """
 
 
-def failed_logins(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+def failed_logins(days: int, company: str = "ALL", *, bounds: tuple | None = None,
+                  limit: int | None = None) -> str:
     days = bounded_days(days, maximum=30)
+    bounds = capped_window(days, bounds, 30)[1]   # the 30d cap holds under calendar bounds too
     _scope = (resolve_effective_window(days, "EVENT_TIMESTAMP", bounds=bounds)[1]
               if bounds is not None
               else f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
@@ -147,7 +178,7 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
 WHERE {where}
 GROUP BY USER_NAME
 ORDER BY FAILED_ATTEMPTS DESC
-LIMIT 100
+{_limit_clause(limit, 100)}
 """
 
 
@@ -161,6 +192,7 @@ def single_factor_logins(days: int = 30, company: str = "ALL", *, bounds: tuple 
     no-second-factor, successful logins; the USERS join exposes HAS_MFA so the render
     separates the genuine bypass (enrolled) from the not-yet-enrolled. Read-only."""
     days = bounded_days(days, maximum=30)
+    bounds = capped_window(days, bounds, 30)[1]   # the 30d cap holds under calendar bounds too
     _scope = (resolve_effective_window(days, "L.EVENT_TIMESTAMP", bounds=bounds)[1]
               if bounds is not None
               else f"L.EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
@@ -192,7 +224,9 @@ SELECT S.USER_NAME,
        S.DISTINCT_IPS,
        S.FIRST_SEEN,
        S.LAST_SEEN_AT,
-       U.LAST_SUCCESS_LOGIN
+       U.LAST_SUCCESS_LOGIN,
+       COUNT(*) OVER () AS TOTAL_USERS_WIN,
+       SUM(IFF(COALESCE(U.HAS_MFA, FALSE), 1, 0)) OVER () AS TOTAL_ENROLLED_WIN
 FROM single_factor S
 JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U
   ON U.NAME = S.USER_NAME AND U.DELETED_ON IS NULL
@@ -204,6 +238,10 @@ LIMIT 200
 # A brute-force "breakthrough" is a SUCCESS immediately preceded by a dense burst of failures;
 # this bounds how far back the burst can reach so scattered typos across days never qualify.
 _TAKEOVER_BURST_HOURS = 6
+# logic.insights.takeover_severity's High: a breakthrough with 10+ failures or 3+ failing IPs. The SQL
+# pre-LIMIT High total mirrors it (tests/test_security_c05_fixes.py locks the parity).
+TAKEOVER_HIGH_FAILURES = 10
+TAKEOVER_HIGH_FAIL_IPS = 3
 
 
 def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures: int = 5, *, bounds: tuple | None = None) -> str:
@@ -222,6 +260,7 @@ def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures:
     (day-grain FACT_SECURITY_LOGIN_DAILY can't express intra-window ordering). Scored by
     ``logic.insights.takeover_severity``. Read-only review — confirm before acting."""
     days = bounded_days(days, maximum=30)
+    bounds = capped_window(days, bounds, 30)[1]   # the 30d cap holds under calendar bounds too
     min_failures = max(2, min(int(min_failures), 100))
     _scope = (resolve_effective_window(days, "EVENT_TIMESTAMP", bounds=bounds)[1]
               if bounds is not None
@@ -290,7 +329,13 @@ SELECT f.USER_NAME,
        -- _MIN suffix (not the MINS_TO_ prefix) so the shared table machinery auto-humanizes this
        -- duration to Hr/Min instead of a raw minutes count (the prettifier drops _MIN -> "Breakthrough").
        DATEDIFF('minute', fb.BREAKTHROUGH_FROM, fb.FIRST_SUCCESS_AFTER) AS BREAKTHROUGH_MIN,
-       f.LAST_ERROR
+       f.LAST_ERROR,
+       -- pre-LIMIT totals: in a spray over 100+ users the burst count is the finding, not the LIMIT
+       COUNT(*) OVER () AS TOTAL_BURSTS_WIN,
+       SUM(IFF(fb.FIRST_SUCCESS_AFTER IS NOT NULL, 1, 0)) OVER () AS TOTAL_BROKE_WIN,
+       SUM(IFF(fb.FIRST_SUCCESS_AFTER IS NOT NULL
+               AND (f.FAILURES >= {TAKEOVER_HIGH_FAILURES} OR f.FAIL_IPS >= {TAKEOVER_HIGH_FAIL_IPS}),
+               1, 0)) OVER () AS TOTAL_HIGH_WIN
 FROM fails f
 LEFT JOIN first_break fb ON fb.USER_NAME = f.USER_NAME
 LEFT JOIN succ_total t ON t.USER_NAME = f.USER_NAME
@@ -332,9 +377,10 @@ LIMIT 300
 """
 
 
-def recent_role_grants(days: int, *, bounds: tuple | None = None) -> str:
+def recent_role_grants(days: int, *, bounds: tuple | None = None, limit: int | None = None) -> str:
     """Recently granted roles to users (account-wide governance view)."""
     days = bounded_days(days, maximum=90)
+    bounds = capped_window(days, bounds, 90)[1]   # the 90d cap holds under calendar bounds too
     _scope = (resolve_effective_window(days, "CREATED_ON", bounds=bounds)[1]
               if bounds is not None
               else f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
@@ -348,7 +394,7 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
 WHERE {_scope}
   AND DELETED_ON IS NULL
 ORDER BY CREATED_ON DESC
-LIMIT 200
+{_limit_clause(limit, 200)}
 """
 
 
@@ -634,9 +680,16 @@ LIMIT 1000
 """
 
 
-def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", schema_contains: str = "", *, bounds: tuple | None = None) -> str:
-    """Who changed what: DDL/DCL statements grouped by user and object type."""
-    days = bounded_days(days, maximum=30)
+def _recent_ddl_ctes(days: int, company: str, database: str, schema_contains: str,
+                     bounds: tuple | None) -> str:
+    """The ``grouped`` + company-``scoped`` CTEs shared by ``recent_ddl_changes`` and its uncapped
+    chart rollup ``recent_ddl_changes_rollup``, so the two can never disagree on scope or window.
+
+    The cap is the standard 90-day live QUERY_HISTORY clamp (it was 30), the same window
+    ``recent_ddl_changes_fact`` serves, so a stale-extract fallback no longer silently drops days
+    31-90 under the same label. Calendar bounds are capped to it too (they used to bypass it)."""
+    days = bounded_days(days)
+    bounds = capped_window(days, bounds, 90)[1]
     # C11: scope change evidence by ACTOR *or* OBJECT, not actor AND object. GRANT /
     # REVOKE and other account-level DDL carry a NULL DATABASE_NAME (dropped by the
     # database lens), and a cross-company change (a Trexis user's DDL in an ALFA
@@ -692,26 +745,67 @@ WITH grouped AS (
     SELECT g.*
     FROM grouped g
     WHERE {scope_where}
+)"""
+
+
+# The DDL/DCL detail feeds keep their newest-300 table cap, but every headline reads these pre-LIMIT
+# totals, computed over the registry-DEDUPED rows (a window beside the QUALIFY would count the registry
+# join's fan-out). UNCAPPED-AGGREGATE: never a count of the 300 newest groups. The page drops them
+# before display.
+DDL_WINDOW_TOTAL_COLUMNS: tuple[str, ...] = (
+    "TOTAL_GROUPS_WIN", "HIGH_RISK_GROUPS_WIN", "UNREGISTERED_GROUPS_WIN",
 )
-SELECT g.*,
-       CASE WHEN g.RISK_SCORE >= 90 THEN 'CRITICAL'
-            WHEN g.RISK_SCORE >= 70 THEN 'HIGH'
-            WHEN g.RISK_SCORE >= 45 THEN 'MEDIUM' ELSE 'LOW' END AS RISK_LEVEL,
-       CASE WHEN g.DATABASE_NAME IS NULL OR g.SCHEMA_NAME IS NULL THEN 'NOT_APPLICABLE'
-            WHEN r.CHANGE_SEEN_AT IS NOT NULL THEN 'REGISTERED'
-            ELSE 'UNREGISTERED' END AS CHANGE_REGISTRATION
-FROM scoped g
-LEFT JOIN {core_object('OBJECT_CHANGE_REGISTRY')} r
-  ON r.DATABASE_NAME = g.DATABASE_NAME
- AND r.SCHEMA_NAME = g.SCHEMA_NAME
- AND ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24
-QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY g.DAY, g.USER_NAME, g.ROLE_NAME, g.QUERY_TYPE,
-                 g.DATABASE_NAME, g.SCHEMA_NAME
-    ORDER BY r.CHANGE_SEEN_AT DESC NULLS LAST
-) = 1
-ORDER BY g.LAST_CHANGE DESC
-LIMIT 300
+_DDL_TOTALS_SELECT = """SELECT f.*,
+       COUNT(*) OVER () AS TOTAL_GROUPS_WIN,
+       SUM(IFF(UPPER(f.RISK_LEVEL) IN ('CRITICAL', 'HIGH'), 1, 0)) OVER () AS HIGH_RISK_GROUPS_WIN,
+       SUM(IFF(f.CHANGE_REGISTRATION = 'UNREGISTERED', 1, 0)) OVER () AS UNREGISTERED_GROUPS_WIN
+FROM final f
+ORDER BY f.LAST_CHANGE DESC
+LIMIT 300"""
+# The two DDL charts (statements/day by change kind, statements by user) aggregate the WHOLE scoped
+# window: one row per (DAY, QUERY_TYPE) and one per USER_NAME, never the newest 300 groups (the oldest
+# days used to vanish from the per-day chart once a window held more than 300 groups).
+_DDL_ROLLUP_SELECT = """SELECT IFF(GROUPING(s.USER_NAME) = 0, 'USER', 'DAY_TYPE') AS GRAIN,
+       s.DAY, s.QUERY_TYPE, s.USER_NAME,
+       SUM(s.STATEMENTS) AS STATEMENTS
+FROM scoped s
+GROUP BY GROUPING SETS ((s.DAY, s.QUERY_TYPE), (s.USER_NAME))"""
+
+
+def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+    """Who changed what: DDL/DCL statements grouped by user and object type (the newest 300 groups,
+    with the pre-LIMIT window totals in DDL_WINDOW_TOTAL_COLUMNS)."""
+    ctes = _recent_ddl_ctes(days, company, database, schema_contains, bounds)
+    return f"""{ctes}, final AS (
+    SELECT g.*,
+           CASE WHEN g.RISK_SCORE >= 90 THEN 'CRITICAL'
+                WHEN g.RISK_SCORE >= 70 THEN 'HIGH'
+                WHEN g.RISK_SCORE >= 45 THEN 'MEDIUM' ELSE 'LOW' END AS RISK_LEVEL,
+           CASE WHEN g.DATABASE_NAME IS NULL OR g.SCHEMA_NAME IS NULL THEN 'NOT_APPLICABLE'
+                WHEN r.CHANGE_SEEN_AT IS NOT NULL THEN 'REGISTERED'
+                ELSE 'UNREGISTERED' END AS CHANGE_REGISTRATION
+    FROM scoped g
+    LEFT JOIN {core_object('OBJECT_CHANGE_REGISTRY')} r
+      ON r.DATABASE_NAME = g.DATABASE_NAME
+     AND r.SCHEMA_NAME = g.SCHEMA_NAME
+     AND ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY g.DAY, g.USER_NAME, g.ROLE_NAME, g.QUERY_TYPE,
+                     g.DATABASE_NAME, g.SCHEMA_NAME
+        ORDER BY r.CHANGE_SEEN_AT DESC NULLS LAST
+    ) = 1
+)
+{_DDL_TOTALS_SELECT}
+"""
+
+
+def recent_ddl_changes_rollup(days: int, company: str = "ALL", database: str = "", schema_contains: str = "",
+                              *, bounds: tuple | None = None) -> str:
+    """Uncapped chart rollup for the live DDL/DCL panel (same scope and window as
+    ``recent_ddl_changes``): statements per (DAY, QUERY_TYPE) and per USER_NAME."""
+    ctes = _recent_ddl_ctes(days, company, database, schema_contains, bounds)
+    return f"""{ctes}
+{_DDL_ROLLUP_SELECT}
 """
 
 
@@ -722,6 +816,7 @@ def failed_login_reasons(days: int, company: str = "ALL", *, bounds: tuple | Non
     # decomposition of the failed-logins table directly above it; a wider (90d) window
     # here made the two panels disagree under one "90 days" scope and never reconcile.
     days = bounded_days(days, maximum=30)
+    bounds = capped_window(days, bounds, 30)[1]   # the 30d cap holds under calendar bounds too
     _scope = (resolve_effective_window(days, "EVENT_TIMESTAMP", bounds=bounds)[1]
               if bounds is not None
               else f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
@@ -762,6 +857,8 @@ def admin_role_activity(days: int, company: str = "ALL", *, bounds: tuple | None
     """Daily statement volume under break-glass admin roles. Routine work
     belongs on SNOW_SYSADMINS; this line should hug zero."""
     days = bounded_days(days)
+    # the 90d live QUERY_HISTORY cap holds under calendar bounds too ('Current year' used to scan ~273d)
+    bounds = capped_window(days, bounds, 90)[1]
     _scope = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
               if bounds is not None
               else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
@@ -846,7 +943,9 @@ def object_tag_probe() -> str:
     """#20: cheap existence probe for TAG_REFERENCES. The view is UNVERIFIED on this
     account (no prior reader in the repo), so callers run this with probe=True and
     degrade to an honest 'not available' branch when it errors, instead of a red row."""
-    return "SELECT TAG_NAME, DOMAIN FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES LIMIT 1"
+    # OBJECT_DELETED rides the probe: the coverage reads filter on it, so a view without the column
+    # fails here (an 'unavailable' state with the error) instead of mid-panel.
+    return "SELECT TAG_NAME, DOMAIN, OBJECT_DELETED FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES LIMIT 1"
 
 
 def object_tag_coverage(company: str = "ALL",
@@ -856,8 +955,10 @@ def object_tag_coverage(company: str = "ALL",
     For each governance tag key, what fraction of in-scope base tables carry it.
     ACCOUNT_USAGE.TABLES (the verified inventory) is the DENOMINATOR; TAG_REFERENCES
     (the tag-assignment side) is LEFT-joined so an untagged table still counts toward
-    TOTAL. A stale tag reference to a since-dropped table simply never matches a live
-    ``tbls`` row, so no OBJECT_DELETED filter is needed on the (unverified) tag view.
+    TOTAL. Only LIVE tag references count (``OBJECT_DELETED IS NULL``): TAG_REFERENCES keeps a
+    dropped table's row, and a CREATE OR REPLACE (or DROP + CREATE) without COPY TAGS leaves an
+    untagged table with the SAME name, which the old name-only join counted as tagged through its
+    predecessor's row (inflated score, missing from the worklist, a false 'clean').
     Scoped to DOMAIN='TABLE' — this account has no ACCOUNT_USAGE.WAREHOUSES/DATABASES
     views (see ``show_warehouses_sql``), so warehouse/database tag coverage has no
     honest denominator and is deliberately out of v1. Company scope via the
@@ -888,6 +989,7 @@ tagged AS (
         r.OBJECT_DATABASE, r.OBJECT_SCHEMA, r.OBJECT_NAME, UPPER(r.TAG_NAME) AS TAG_NAME
     FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES r
     WHERE r.DOMAIN = 'TABLE'
+      AND r.OBJECT_DELETED IS NULL
       AND UPPER(r.TAG_NAME) IN ({in_list})
 ),
 keys AS ({key_rows})
@@ -925,7 +1027,7 @@ def untagged_objects(company: str = "ALL", tag_name: str = "COST_OWNER",
 WITH tagged AS (
     SELECT DISTINCT r.OBJECT_DATABASE, r.OBJECT_SCHEMA, r.OBJECT_NAME
     FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES r
-    WHERE r.DOMAIN = 'TABLE' AND UPPER(r.TAG_NAME) = {sql_literal(key)}
+    WHERE r.DOMAIN = 'TABLE' AND r.OBJECT_DELETED IS NULL AND UPPER(r.TAG_NAME) = {sql_literal(key)}
 )
 SELECT
     t.TABLE_CATALOG || '.' || t.TABLE_SCHEMA || '.' || t.TABLE_NAME AS FQN,
@@ -1006,20 +1108,20 @@ def show_grants_to_share_sql(share_name: str) -> str:
     return f"SHOW GRANTS TO SHARE {ident}"
 
 
-def role_privilege_matrix() -> str:
+def role_privilege_matrix(*, limit: int | None = None) -> str:
     """Auditor sheet: privileges per role aggregated by object type."""
-    return """
+    return f"""
 SELECT GRANTEE_NAME AS ROLE_NAME, GRANTED_ON AS OBJECT_TYPE, PRIVILEGE,
        COUNT(*) AS GRANT_COUNT
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
 WHERE DELETED_ON IS NULL
 GROUP BY 1, 2, 3
 ORDER BY ROLE_NAME, GRANT_COUNT DESC
-LIMIT 5000
+{_limit_clause(limit, 5000)}
 """
 
 
-def unused_roles(days: int = 90) -> str:
+def unused_roles(days: int = 90, *, limit: int | None = None) -> str:
     """Roles never assumed in the window but still granted — revoke fodder."""
     days = bounded_days(days)
     return f"""
@@ -1035,7 +1137,7 @@ LEFT JOIN (
 WHERE r.DELETED_ON IS NULL AND q.ROLE_NAME IS NULL
   AND r.NAME NOT IN ('PUBLIC')
 ORDER BY GRANTED_TO_USERS DESC, r.CREATED_ON
-LIMIT 500
+{_limit_clause(limit, 500)}
 """
 
 
@@ -1075,20 +1177,20 @@ LIMIT 1000
 """
 
 
-def direct_role_grants() -> str:
+def direct_role_grants(*, limit: int | None = None) -> str:
     """Current role->user grants (auditors reconcile this against HR)."""
-    return """
+    return f"""
 SELECT GRANTEE_NAME AS USER_NAME, COUNT(*) AS ROLE_COUNT,
        LISTAGG(ROLE, ', ') WITHIN GROUP (ORDER BY ROLE) AS ROLES
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
 WHERE DELETED_ON IS NULL
 GROUP BY 1
 ORDER BY ROLE_COUNT DESC
-LIMIT 1000
+{_limit_clause(limit, 1000)}
 """
 
 
-def grant_changes(days: int = 90) -> str:
+def grant_changes(days: int = 90, *, limit: int | None = None) -> str:
     """Grants added or revoked in the window — the quarterly diff sheet."""
     days = bounded_days(days, 180)
     return f"""
@@ -1099,11 +1201,12 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
 WHERE CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
    OR DELETED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 ORDER BY CHANGED_AT DESC
-LIMIT 2000
+{_limit_clause(limit, 2000)}
 """
 
 
-def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500) -> str:
+def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500, *,
+                         onset: object = None) -> str:
     """Most-recent grant/revoke CHANGES across roles, users, and objects — the
     "who changed what for whom, and when" access-change feed (owner ask 2026-08-17).
 
@@ -1117,12 +1220,35 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     ``company`` scopes by the GRANTEE (owner ask 2026-08-17): a role granted to a
     Trexis user or a privilege granted to a %TRXS% role is Trexis. Role-grain grants
     use the role heuristic (role_clause); user-grain grants use user classification.
-    'ALL' = account-wide (both clauses collapse to no-op)."""
+    'ALL' = account-wide (both clauses collapse to no-op).
+
+    ``onset`` (an incident's start; the auto-investigation feed): the rows are cut to the
+    change registries' onset window (change_impact_sql._onset_window on CHANGED_AT: onset -
+    ONSET_LEAD_DAYS .. onset + ONSET_AFTER_DAYS) and ordered NEAREST onset first, so post-onset
+    churn can no longer push the pre-onset trigger past the LIMIT (a newest-first read from now
+    did). ``days`` is then ignored (as in the registries): the trailing cutoff gives way to a prune
+    bounded on BOTH sides from the onset (change_impact_sql._onset_prune_bounds: that window plus a
+    day of slack each side), so an old incident scans its onset's few days of GRANTS_*, not every
+    day since. TOTAL_CHANGES_WIN is the onset window's pre-LIMIT count. Without ``onset`` the SQL
+    is unchanged."""
     days = bounded_days(days, 365)
     limit = max(10, min(int(limit or 500), 2000))
-    cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+    onset_where, order_by = "", "CHANGED_AT DESC"
+    if onset is None:
+        cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+        span, arm_span = f"CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff}", f">= {cutoff}"
+    else:
+        # R1-060's twin for grants (holistic review): the registries' onset window + nearest-first
+        # order. The prune is two-sided from the onset literal -- a trailing cutoff wide enough to
+        # reach an old onset scanned up to 365 days of GRANTS_* to keep ~4.
+        from app.data.change_impact_sql import _onset_prune_bounds, _onset_window
+        _win = _onset_window("CHANGED_AT", onset)   # ValueError on a non-timestamp: no text reaches the SQL
+        onset_where, order_by = f"\n  AND {_win[0]}", f"{_win[1]}, CHANGED_AT DESC"
+        lo, hi = _onset_prune_bounds(onset)
+        span = f"CREATED_ON BETWEEN {lo} AND {hi} OR DELETED_ON BETWEEN {lo} AND {hi}"
+        arm_span = f"BETWEEN {lo} AND {hi}"
     u_scope = companies.user_scope_subquery(company, "GRANTEE_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS",
-                                            distinct_where=f"CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff}")   # grantee is a user
+                                            distinct_where=span)   # grantee is a user
     r_scope = companies.role_clause(company, "GRANTEE_NAME")   # grantee is a role
     # Owner finding 2026-08-17: every object CREATE (incl. the TMP_* stages/formats
     # procs make per run) records an OWNERSHIP grant BY the creating role TO itself
@@ -1143,6 +1269,7 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     # (CREATED_ON >= cutoff OR DELETED_ON >= cutoff) predicate is redundant with the IFF filter
     # but LOAD-BEARING for micro-partition pruning: the IFF-over-the-join-column alone cannot
     # prune, so this literal-cutoff predicate keeps the base scan pruned to relevant partitions.
+    # (Onset mode keeps the same shape with a two-sided ``span``: the BETWEEN literals prune.)
     ev = "(SELECT 'GRANTED' AS CHG UNION ALL SELECT 'REVOKED' AS CHG)"
     return f"""
 WITH changes AS (
@@ -1151,21 +1278,26 @@ WITH changes AS (
            GRANTED_BY AS CHANGED_BY, GRANTEE_NAME AS GRANTEE, ROLE AS WHAT
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
     CROSS JOIN {ev} ev
-    WHERE {and_where(f"(CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) >= {cutoff}", u_scope)}
+    WHERE {and_where(f"({span})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) {arm_span}", u_scope)}
     UNION ALL
     SELECT IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON), ev.CHG, 'Privilege -> role',
            GRANTED_BY, GRANTEE_NAME,
            PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
     CROSS JOIN {ev} ev
-    WHERE {and_where(f"(CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) >= {cutoff}", r_scope, self_own)}
+    WHERE {and_where(f"({span})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) {arm_span}", r_scope, self_own)}
 )
 SELECT CHANGED_AT, CHANGE, GRANT_TYPE,
        COALESCE(NULLIF(TRIM(CHANGED_BY), ''), '(system)') AS CHANGED_BY,
-       GRANTEE, WHAT
+       GRANTEE, WHAT,
+       -- pre-LIMIT window totals (the day_grants / day_ddl pattern): the KPI tiles read these, so a
+       -- 90/180-day window with more than {limit} changes reports the true count, not the display cap
+       COUNT(*) OVER () AS TOTAL_CHANGES_WIN,
+       SUM(IFF(CHANGE = 'GRANTED', 1, 0)) OVER () AS GRANTED_WIN,
+       SUM(IFF(CHANGE = 'REVOKED', 1, 0)) OVER () AS REVOKED_WIN
 FROM changes
-WHERE CHANGED_AT IS NOT NULL
-ORDER BY CHANGED_AT DESC
+WHERE CHANGED_AT IS NOT NULL{onset_where}
+ORDER BY {order_by}
 LIMIT {limit}
 """
 
@@ -1273,7 +1405,7 @@ WHERE a.QUERY_START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
 """
 
 
-def grant_scope_usage(days: int = 90, limit: int = 500) -> str:
+def grant_scope_usage(days: int = 90, limit: int | None = None) -> str:
     """rec#24: per (role, database, schema) — how many granted tables were used.
 
     GRANTED_TABLES = distinct tables (by name) the role holds a data privilege on
@@ -1282,8 +1414,15 @@ def grant_scope_usage(days: int = 90, limit: int = 500) -> str:
     drop->recreate that leaves two DELETED=FALSE ids for one name can neither
     double-count nor split a used table into a used+unused pair. The Python layer
     (logic/least_privilege.classify_grant_scopes) labels UNUSED / OVER-BROAD /
-    FOCUSED from the two counts. Worst (most unused) first."""
+    FOCUSED from the two counts. Worst (most unused) first.
+
+    No LIMIT of its own by default (the client_drivers precedent): it used to end LIMIT 500, below
+    run()'s default row cap, so a cut feed could never set res.truncated while the four KPIs counted
+    the kept rows and the least-unused scopes (often every UNUSED single-table scope) silently fell
+    off. run()'s cap is now the only cut and the page marks the KPIs as floors when it fires.
+    TOTAL_SCOPES_WIN is the pre-cap scope count for the 'showing N of M' caption."""
     days = bounded_days(days, 90)
+    _limit = f"\nLIMIT {max(1, int(limit))}" if limit else ""
     return f"""
 WITH {_TOUCHED_CTE.format(days=days)},
 {_TBL_CTE},
@@ -1307,22 +1446,29 @@ grant_tbl AS (
 SELECT ROLE_NAME,
        C AS DATABASE_NAME, S AS SCHEMA_NAME,
        COUNT(*) AS GRANTED_TABLES,
-       SUM(TOUCHED) AS TOUCHED_TABLES
+       SUM(TOUCHED) AS TOUCHED_TABLES,
+       COUNT(*) OVER () AS TOTAL_SCOPES_WIN
 FROM grant_tbl
 GROUP BY 1, 2, 3
 HAVING COUNT(*) >= 1
-ORDER BY (COUNT(*) - SUM(TOUCHED)) DESC, GRANTED_TABLES DESC
-LIMIT {limit}
+ORDER BY (COUNT(*) - SUM(TOUCHED)) DESC, GRANTED_TABLES DESC{_limit}
 """
 
 
-def unused_table_grants(days: int = 90, limit: int = 500) -> str:
+def unused_table_grants(days: int = 90, limit: int | None = None) -> str:
     """rec#24: the revoke shortlist — table grants on tables no query has read or
     modified in the window. One row per (role, privilege, table name); a name is
     listed only when NONE of its object ids was touched (MAX over ids), so a
     drop->recreate that leaves a stale untouched id can never surface a live,
-    in-use table's name as a revoke candidate. Review before revoking."""
+    in-use table's name as a revoke candidate. Review before revoking.
+
+    Worst scope first (most untouched grants per role x database x schema), then role/object: it was
+    ORDER BY role LIMIT 500, so a role late in the alphabet vanished from the shortlist and from its
+    REVOKE script, and a selected scope row could post-filter to empty with no notice. No LIMIT of
+    its own by default, so run()'s row cap is the only (detectable) cut; TOTAL_GRANTS_WIN is the
+    pre-cap total."""
     days = bounded_days(days, 90)
+    _limit = f"\nLIMIT {max(1, int(limit))}" if limit else ""
     return f"""
 WITH {_TOUCHED_CTE.format(days=days)},
 {_TBL_CTE},
@@ -1334,14 +1480,15 @@ grants AS (
       AND PRIVILEGE IN {_DATA_PRIVS}
       AND TABLE_CATALOG IS NOT NULL AND TABLE_SCHEMA IS NOT NULL
 )
-SELECT g.ROLE_NAME, g.PRIVILEGE, ANY_VALUE(t.FQN) AS OBJECT_NAME
+SELECT g.ROLE_NAME, g.PRIVILEGE, ANY_VALUE(t.FQN) AS OBJECT_NAME,
+       COUNT(*) OVER (PARTITION BY g.ROLE_NAME, t.C, t.S) AS SCOPE_UNUSED_GRANTS,
+       COUNT(*) OVER () AS TOTAL_GRANTS_WIN
 FROM grants g
 JOIN tbl t ON t.C = g.C AND t.S = g.S AND t.N = g.N
 LEFT JOIN touched u ON u.OBJECT_ID = t.OBJECT_ID
 GROUP BY g.ROLE_NAME, g.PRIVILEGE, t.C, t.S, t.N
 HAVING MAX(IFF(u.OBJECT_ID IS NULL, 0, 1)) = 0
-ORDER BY g.ROLE_NAME, OBJECT_NAME, g.PRIVILEGE
-LIMIT {limit}
+ORDER BY SCOPE_UNUSED_GRANTS DESC, g.ROLE_NAME, OBJECT_NAME, g.PRIVILEGE{_limit}
 """
 
 
@@ -1521,18 +1668,34 @@ LIMIT 200
 """
 
 
+#: The new-network panel's baseline: a (user, IP) pair is "new" only when it was not seen in the
+#: NETWORK_BASELINE_DAYS before the triage window STARTS (owner pick r25: a 90-day baseline).
+NETWORK_BASELINE_DAYS = 90
+
+
 def new_network_logins(days: int = 7, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """r25 #6 (owner pick): privileged logins from never-before-seen networks.
 
-    Baseline = 90 days of LOGIN_HISTORY for break-glass users (same role list
-    as admin_role_holders); a row surfaces only when a (user, IP) pair FIRST
-    appears inside the triage window. An IP quiet for 90+ days re-flags on
-    purpose — better a stale re-flag than a silent novel network.
+    Baseline = the 90 days of LOGIN_HISTORY BEFORE the triage window starts, for break-glass users
+    (same role list as admin_role_holders); a row surfaces only when a (user, IP) pair FIRST
+    appears inside the triage window. The history used to be a fixed last-90-days, so a 90-day (or
+    wider) window had NO baseline and listed every admin's routine office/VPN IP as new; it now
+    reaches back window + 90 days (at most 180, inside LOGIN_HISTORY's 365-day retention). An IP
+    quiet for 90+ days re-flags on purpose — better a stale re-flag than a silent novel network.
+    COUNT(*) OVER () is the pre-LIMIT pair total (the caption reads it, never len() of 200 rows).
     """
     days = bounded_days(days)
-    _first_seen_scope = (resolve_effective_window(days, "F.FIRST_SEEN", bounds=bounds)[1]
-                         if bounds is not None
-                         else f"F.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+    bounds = capped_window(days, bounds, 90)[1]
+    if bounds is not None:
+        _start, _ = bounds
+        _hist_start = f"'{(_start - timedelta(days=NETWORK_BASELINE_DAYS)).isoformat()}'"
+        _first_seen_scope = resolve_effective_window(days, "F.FIRST_SEEN", bounds=bounds)[1]
+        # the volume columns count the pair's logins INSIDE the window (Last month used to add September's)
+        _volume_scope = resolve_effective_window(days, "H.EVENT_TIMESTAMP", bounds=bounds)[1]
+    else:
+        _hist_start = f"DATEADD('day', -{days + NETWORK_BASELINE_DAYS}, CURRENT_TIMESTAMP())"
+        _first_seen_scope = f"F.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+        _volume_scope = ""
     admin_where = and_where(
         "DELETED_ON IS NULL",
         _admin_roles_in("ROLE", ADMIN_HOLDER_ROLES),
@@ -1550,7 +1713,7 @@ hist AS (
            L.EVENT_TIMESTAMP, L.IS_SUCCESS, L.FIRST_AUTHENTICATION_FACTOR
     FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY L
     JOIN admins A ON A.USER_NAME = L.USER_NAME
-    WHERE L.EVENT_TIMESTAMP >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+    WHERE L.EVENT_TIMESTAMP >= {_hist_start}
 ),
 first_seen AS (
     SELECT USER_NAME, CLIENT_IP, MIN(EVENT_TIMESTAMP) AS FIRST_SEEN
@@ -1563,10 +1726,11 @@ SELECT F.USER_NAME,
        COUNT(*) AS LOGINS,
        SUM(IFF(H.IS_SUCCESS = 'YES', 1, 0)) AS SUCCESSES,
        MAX(H.EVENT_TIMESTAMP) AS LAST_LOGIN,
-       MAX_BY(H.FIRST_AUTHENTICATION_FACTOR, H.EVENT_TIMESTAMP) AS AUTH_FACTOR
+       MAX_BY(H.FIRST_AUTHENTICATION_FACTOR, H.EVENT_TIMESTAMP) AS AUTH_FACTOR,
+       COUNT(*) OVER () AS TOTAL_PAIRS_WIN
 FROM first_seen F
 JOIN hist H ON H.USER_NAME = F.USER_NAME AND H.CLIENT_IP = F.CLIENT_IP
-WHERE {_first_seen_scope}
+WHERE {and_where(_first_seen_scope, _volume_scope)}
 GROUP BY F.USER_NAME, F.CLIENT_IP, F.FIRST_SEEN
 ORDER BY F.FIRST_SEEN DESC
 LIMIT 200
@@ -1819,7 +1983,13 @@ def security_exception_queue(company: str = "ALL", limit: int = 100) -> str:
     carry precise recent EVENT_TS and outrank the day-midnight IDENTITY/PRIVILEGE rows
     within a severity tier) evict another domain's findings entirely — scoring the starved
     domain as 100/Healthy, a false all-clear. Per-domain ranking means no arm can crowd out
-    another, and the cap is far above where domain_posture's penalty saturates (~20/domain)."""
+    another, and the cap is far above where domain_posture's penalty saturates (~20/domain).
+
+    The cap is for SCORING only. The displayed counts (each domain's 'N open', the page verdict's
+    'N open finding(s)', the 'Decision queue (n)' badge) read the uncapped totals below: window
+    functions in the SELECT are evaluated BEFORE QUALIFY, so they see every queued row — a week of
+    ~4,000 CHANGE RISK rows used to read '100 open'. DOMAIN_FINDINGS mirrors domain_posture's
+    impact rule (NULL -> 1, floor 1)."""
     limit = max(1, min(int(limit or 100), 300))
     value = str(company or "ALL").strip().upper()
     company_clause = "" if value == "ALL" else (
@@ -1833,7 +2003,10 @@ def security_exception_queue(company: str = "ALL", limit: int = 100) -> str:
     return f"""
 SELECT DOMAIN, COMPANY, ACTOR_COMPANY, OBJECT_COMPANY,
        ENTITY_TYPE, ENTITY_KEY, SEVERITY, TITLE, DETAIL,
-       IMPACT_COUNT, DETECTED_AT, CONFIDENCE, OWNER, ACTION_ID, STATUS
+       IMPACT_COUNT, DETECTED_AT, CONFIDENCE, OWNER, ACTION_ID, STATUS,
+       COUNT(*) OVER (PARTITION BY DOMAIN) AS DOMAIN_ROWS,
+       SUM(GREATEST(COALESCE(IMPACT_COUNT, 1), 1)) OVER (PARTITION BY DOMAIN) AS DOMAIN_FINDINGS,
+       COUNT(*) OVER () AS TOTAL_ROWS
 FROM {core_object('V_SECURITY_EXCEPTION_QUEUE')}
 WHERE {where}
 QUALIFY ROW_NUMBER() OVER (PARTITION BY DOMAIN ORDER BY {_sev_order}, DETECTED_AT DESC) <= {limit}
@@ -1993,22 +2166,54 @@ WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
 """
 
 
-def security_login_fact_coverage(days: int = 30) -> str:
-    """Coverage contract for the V075 login evidence fact."""
+def security_login_fact_coverage(days: int = 30, *, bounds: tuple | None = None, lookback: int = 0) -> str:
+    """Coverage contract for the V075 login evidence fact, measured over exactly the span a served
+    read covers: the trailing ``days`` window (or the calendar ``bounds``), extended back by
+    ``lookback`` baseline days (the new-network panel's 90). Pair it with
+    ``logic.security.coverage_required_days(days, bounds, lookback=...)``.
+
+    One 90-day density read used to gate a 7- or 30-day window, so a hole INSIDE the served window
+    passed on the other 80+ days and failed logins in the hole silently went uncounted under a mart
+    source label. LAST_DAY stays the fact's newest day (freshness), never the window's last.
+
+    COVERAGE_DAYS counts COMPLETE days only (before today), the exact days coverage_required_days
+    asks for. The span also holds today, and counting today's partition let it stand in for a missing
+    interior day: with today loaded, a 7-day window holed on one day still counted 7 of the 8 days
+    it reads and passed. Today is neither required nor counted.
+
+    The first day of a period-to-date window (no baseline) serves today alone: COVERAGE_DAYS is 0
+    there and so is the requirement, and freshness decides. LAST_DAY only sees days from the span
+    start on, so the fact serves once today's partition is loaded, and the live reader before that."""
     # DENSITY, not span — see login_fact_coverage. An interior gap must deflate COVERAGE_DAYS so
     # fact_coverage_complete keeps the page on the live path until the fact is genuinely dense.
     days = bounded_days(days, maximum=90)
-    return f"""
+    lookback = max(0, min(int(lookback or 0), NETWORK_BASELINE_DAYS))
+    if bounds is not None:
+        _start, _end = bounds
+        _first = (_start - timedelta(days=lookback)).isoformat()
+        # the requirement stops at the earlier of the range end and the account's today (Python
+        # account_today), so the count stops there too, on the same Central clock
+        return f"""
 SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
-       COUNT(DISTINCT DAY) AS COVERAGE_DAYS,
+       COUNT(DISTINCT IFF(DAY < LEAST('{_end.isoformat()}'::DATE, {account_today_sql()}), DAY, NULL))
+           AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
 FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
-WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE DAY >= '{_first}'
+"""
+    return f"""
+SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
+       COUNT(DISTINCT IFF(DAY < CURRENT_DATE(), DAY, NULL)) AS COVERAGE_DAYS,
+       MAX(LOAD_TS) AS LAST_LOAD
+FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
+WHERE DAY >= DATEADD('day', -{days + lookback}, CURRENT_DATE())
 """
 
 
 def failed_logins_fact(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, maximum=30)
+    # the 30d cap holds under calendar bounds too: 'Current year' read a fact the loader purges at 180d
+    bounds = capped_window(days, bounds, 30)[1]
     where = and_where(
         scope_window_where("DAY", days, bounds=bounds),
         "FAILURES > 0",
@@ -2033,6 +2238,8 @@ LIMIT 100
 
 def failed_login_reasons_fact(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, maximum=30)
+    # the 30d cap holds under calendar bounds too: 'Current year' read a fact the loader purges at 180d
+    bounds = capped_window(days, bounds, 30)[1]
     where = and_where(
         scope_window_where("DAY", days, bounds=bounds),
         "FAILURES > 0",
@@ -2058,10 +2265,20 @@ LIMIT 50
 
 
 def new_network_logins_fact(days: int = 7, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+    """Fact twin of ``new_network_logins``: the same baseline anchored at the window START (window +
+    90 days of FACT_SECURITY_LOGIN_DAILY, at most 180 — exactly the loader's retention). The page
+    serves it only when ``security_login_fact_coverage(..., lookback=90)`` proves that span dense."""
     days = bounded_days(days, maximum=90)
-    _first_seen_scope = (resolve_effective_window(days, "f.FIRST_SEEN", bounds=bounds)[1]
-                         if bounds is not None
-                         else f"f.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+    bounds = capped_window(days, bounds, 90)[1]
+    if bounds is not None:
+        _start, _ = bounds
+        _hist_start = f"'{(_start - timedelta(days=NETWORK_BASELINE_DAYS)).isoformat()}'"
+        _first_seen_scope = resolve_effective_window(days, "f.FIRST_SEEN", bounds=bounds)[1]
+        _volume_scope = resolve_effective_window(days, "h.DAY", bounds=bounds)[1]
+    else:
+        _hist_start = f"DATEADD('day', -{days + NETWORK_BASELINE_DAYS}, CURRENT_DATE())"
+        _first_seen_scope = f"f.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+        _volume_scope = f"h.DAY >= DATEADD('day', -{days}, CURRENT_DATE())"
     admin_where = and_where(
         "DELETED_ON IS NULL",
         _admin_roles_in("ROLE", ADMIN_HOLDER_ROLES),
@@ -2076,20 +2293,21 @@ WITH admins AS (
     SELECT f.USER_NAME, f.CLIENT_IP, MIN(f.FIRST_SEEN) AS FIRST_SEEN
     FROM {core_object('FACT_SECURITY_LOGIN_DAILY')} f
     JOIN admins a ON a.USER_NAME = f.USER_NAME
-    WHERE f.DAY >= DATEADD('day', -90, CURRENT_DATE())
+    WHERE f.DAY >= {_hist_start}
     GROUP BY 1, 2
 )
 SELECT f.USER_NAME, f.CLIENT_IP, f.FIRST_SEEN,
        SUM(h.LOGINS) AS LOGINS, SUM(h.SUCCESSES) AS SUCCESSES,
        MAX(h.LAST_SEEN) AS LAST_LOGIN,
-       MAX_BY(h.AUTH_FACTOR, h.LAST_SEEN) AS AUTH_FACTOR
+       MAX_BY(h.AUTH_FACTOR, h.LAST_SEEN) AS AUTH_FACTOR,
+       COUNT(*) OVER () AS TOTAL_PAIRS_WIN
 FROM first_seen f
 JOIN {core_object('FACT_SECURITY_LOGIN_DAILY')} h
   ON h.USER_NAME = f.USER_NAME AND h.CLIENT_IP = f.CLIENT_IP
- -- Bound the volume sums to the same 90-day window as the live new_network_logins path; the fact
- -- retains 180 days, so an unbounded join inflated LOGINS/SUCCESSES vs the live sibling for a
- -- (user, IP) with activity in the 90-180d band (bug-hunt 2026-08-30).
- AND h.DAY >= DATEADD('day', -90, CURRENT_DATE())
+ -- Bound the volume sums to the triage window, like the live new_network_logins path (whose pairs'
+ -- logins all fall inside it); the fact retains 180 days, so an unbounded join inflated LOGINS /
+ -- SUCCESSES for a pair with older activity (bug-hunt 2026-08-30).
+ AND {_volume_scope}
 WHERE {_first_seen_scope}
 GROUP BY 1, 2, 3
 ORDER BY f.FIRST_SEEN DESC
@@ -2097,9 +2315,13 @@ LIMIT 200
 """
 
 
-def recent_ddl_changes_fact(days: int, company: str = "ALL", database: str = "",
-                            schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+def _recent_ddl_fact_ctes(days: int, company: str, database: str, schema_contains: str,
+                          bounds: tuple | None) -> str:
+    """The ``grouped`` + company-``scoped`` CTEs shared by ``recent_ddl_changes_fact`` and its chart
+    rollup. Calendar bounds are capped to the 90-day window too (FACT_SECURITY_CHANGE is purged at
+    180 days, so an uncapped 'Current year' silently lost its first months)."""
     days = bounded_days(days, maximum=90)
+    bounds = capped_window(days, bounds, 90)[1]
     actor_company = companies.user_clause(company, "g.USER_NAME")
     object_company = companies.database_company_scope(company, "g.DATABASE_NAME")
     actor_or_object = (
@@ -2132,23 +2354,39 @@ WITH grouped AS (
     SELECT g.*
     FROM grouped g
     WHERE {scope_where}
+)"""
+
+
+def recent_ddl_changes_fact(days: int, company: str = "ALL", database: str = "",
+                            schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+    ctes = _recent_ddl_fact_ctes(days, company, database, schema_contains, bounds)
+    return f"""{ctes}, final AS (
+    SELECT g.*,
+           CASE WHEN g.DATABASE_NAME IS NULL OR g.SCHEMA_NAME IS NULL THEN 'NOT_APPLICABLE'
+                WHEN r.CHANGE_SEEN_AT IS NOT NULL THEN 'REGISTERED'
+                ELSE 'UNREGISTERED' END AS CHANGE_REGISTRATION
+    FROM scoped g
+    LEFT JOIN {core_object('OBJECT_CHANGE_REGISTRY')} r
+      ON r.DATABASE_NAME = g.DATABASE_NAME
+     AND r.SCHEMA_NAME = g.SCHEMA_NAME
+     AND ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY g.DAY, g.USER_NAME, g.ROLE_NAME, g.QUERY_TYPE,
+                     g.DATABASE_NAME, g.SCHEMA_NAME
+        ORDER BY r.CHANGE_SEEN_AT DESC NULLS LAST
+    ) = 1
 )
-SELECT g.*,
-       CASE WHEN g.DATABASE_NAME IS NULL OR g.SCHEMA_NAME IS NULL THEN 'NOT_APPLICABLE'
-            WHEN r.CHANGE_SEEN_AT IS NOT NULL THEN 'REGISTERED'
-            ELSE 'UNREGISTERED' END AS CHANGE_REGISTRATION
-FROM scoped g
-LEFT JOIN {core_object('OBJECT_CHANGE_REGISTRY')} r
-  ON r.DATABASE_NAME = g.DATABASE_NAME
- AND r.SCHEMA_NAME = g.SCHEMA_NAME
- AND ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24
-QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY g.DAY, g.USER_NAME, g.ROLE_NAME, g.QUERY_TYPE,
-                 g.DATABASE_NAME, g.SCHEMA_NAME
-    ORDER BY r.CHANGE_SEEN_AT DESC NULLS LAST
-) = 1
-ORDER BY g.LAST_CHANGE DESC
-LIMIT 300
+{_DDL_TOTALS_SELECT}
+"""
+
+
+def recent_ddl_changes_rollup_fact(days: int, company: str = "ALL", database: str = "",
+                                   schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+    """Uncapped chart rollup for the fact-served DDL/DCL panel (same scope and window as
+    ``recent_ddl_changes_fact``)."""
+    ctes = _recent_ddl_fact_ctes(days, company, database, schema_contains, bounds)
+    return f"""{ctes}
+{_DDL_ROLLUP_SELECT}
 """
 
 
@@ -2202,27 +2440,52 @@ WITH RECURSIVE role_tree (USER_NAME, DIRECT_ROLE, EFFECTIVE_ROLE, DEPTH, ACCESS_
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
     WHERE DELETED_ON IS NULL AND GRANTED_ON <> 'ROLE'
     GROUP BY 1
+), paths AS (
+    SELECT r.USER_NAME, r.DIRECT_ROLE, r.EFFECTIVE_ROLE, r.DEPTH, r.ACCESS_PATH,
+           COALESCE(p.PRIVILEGES, 0) AS PRIVILEGES,
+           COALESCE(p.OWNERSHIP_GRANTS, 0) AS OWNERSHIP_GRANTS,
+           COALESCE(p.MANAGE_GRANTS, 0) AS MANAGE_GRANTS,
+           COALESCE(p.SENSITIVE_PRIVILEGES, 0) AS SENSITIVE_PRIVILEGES,
+           LEAST(100, COALESCE(p.OWNERSHIP_GRANTS, 0) * 10
+                      + COALESCE(p.MANAGE_GRANTS, 0) * 25
+                      + COALESCE(p.SENSITIVE_PRIVILEGES, 0) * 20) AS RISK_SCORE,
+           -- Sec2: does this path inherit an admin role? (the self-escalation surface)
+           IFF(r.EFFECTIVE_ROLE IN ('SNOW_ACCOUNTADMINS', 'ACCOUNTADMIN', 'SNOW_SYSADMINS',
+                                    'SECURITYADMIN'), TRUE, FALSE) AS REACHES_ADMIN
+    FROM role_tree r
+    LEFT JOIN privilege_rollup p ON p.ROLE_NAME = r.EFFECTIVE_ROLE
+), ranked AS (
+    -- each user's own best path: an escalation path (manage grants / admin reach) first
+    SELECT x.*,
+           ROW_NUMBER() OVER (PARTITION BY x.USER_NAME
+                              ORDER BY IFF(x.MANAGE_GRANTS > 0 OR x.REACHES_ADMIN, 0, 1),
+                                       x.RISK_SCORE DESC, x.DEPTH) AS USER_PATH_RANK
+    FROM paths x
+), totals AS (
+    -- scope-wide KPI totals over EVERY path, before the 3000-row cap (UNCAPPED-AGGREGATE): the Users,
+    -- Effective paths, High-risk users and Can-self-escalate tiles read these, never len() of the cut
+    -- frame. High risk = RISK_SCORE >= 70 on some path; self-escalation = MANAGE GRANTS on some path
+    -- (logic.security.escalation_flags' SELF_ESCALATION).
+    SELECT COUNT(*) AS TOTAL_PATHS_WIN,
+           COUNT(DISTINCT USER_NAME) AS TOTAL_PATH_USERS_WIN,
+           COUNT(DISTINCT IFF(RISK_SCORE >= 70, USER_NAME, NULL)) AS TOTAL_HIGH_RISK_USERS_WIN,
+           COUNT(DISTINCT IFF(MANAGE_GRANTS > 0, USER_NAME, NULL)) AS TOTAL_SELF_ESCALATORS_WIN
+    FROM paths
 )
-SELECT r.USER_NAME, r.DIRECT_ROLE, r.EFFECTIVE_ROLE, r.DEPTH, r.ACCESS_PATH,
-       COALESCE(p.PRIVILEGES, 0) AS PRIVILEGES,
-       COALESCE(p.OWNERSHIP_GRANTS, 0) AS OWNERSHIP_GRANTS,
-       COALESCE(p.MANAGE_GRANTS, 0) AS MANAGE_GRANTS,
-       COALESCE(p.SENSITIVE_PRIVILEGES, 0) AS SENSITIVE_PRIVILEGES,
-       LEAST(100, COALESCE(p.OWNERSHIP_GRANTS, 0) * 10
-                  + COALESCE(p.MANAGE_GRANTS, 0) * 25
-                  + COALESCE(p.SENSITIVE_PRIVILEGES, 0) * 20) AS RISK_SCORE,
-       -- Sec2: does this path inherit an admin role? (the self-escalation surface)
-       IFF(r.EFFECTIVE_ROLE IN ('SNOW_ACCOUNTADMINS', 'ACCOUNTADMIN', 'SNOW_SYSADMINS',
-                                'SECURITYADMIN'), TRUE, FALSE) AS REACHES_ADMIN
-FROM role_tree r
-LEFT JOIN privilege_rollup p ON p.ROLE_NAME = r.EFFECTIVE_ROLE
--- r31: a MANAGE GRANTS-only path scores just manage*25=25, so on an account whose recursive
--- role expansion exceeds the 3000-row cap it could be truncated out by higher-scoring
--- ownership-heavy (non-escalating) paths — a self-escalation FALSE NEGATIVE, since
--- escalation_flags/the "can self-escalate" KPI only see returned rows. Float any manage-bearing
--- path to the top so the self-escalation signal always survives the cap.
-ORDER BY GREATEST(RISK_SCORE, IFF(COALESCE(p.MANAGE_GRANTS, 0) > 0, 100, 0)) DESC,
-         r.USER_NAME, r.DEPTH
+SELECT p.USER_NAME, p.DIRECT_ROLE, p.EFFECTIVE_ROLE, p.DEPTH, p.ACCESS_PATH,
+       p.PRIVILEGES, p.OWNERSHIP_GRANTS, p.MANAGE_GRANTS, p.SENSITIVE_PRIVILEGES,
+       p.RISK_SCORE, p.REACHES_ADMIN, p.USER_PATH_RANK,
+       t.TOTAL_PATHS_WIN, t.TOTAL_PATH_USERS_WIN, t.TOTAL_HIGH_RISK_USERS_WIN, t.TOTAL_SELF_ESCALATORS_WIN
+FROM ranked p
+CROSS JOIN totals t
+-- The 3000-row cap can no longer drop evidence on a tie: every user's own best path first (so each
+-- in-scope user stays selectable), then every escalation path, then risk. r31 floated a manage path
+-- only to a key of 100, which TIED every ownership-heavy RISK_SCORE=100 path, and USER_NAME broke the
+-- tie, so a late-alphabet MANAGE GRANTS holder was still cut once that tier passed 3000 rows.
+ORDER BY IFF(p.USER_PATH_RANK = 1, 0, 1),
+         IFF(p.MANAGE_GRANTS > 0 OR p.REACHES_ADMIN, 0, 1),
+         GREATEST(RISK_SCORE, IFF(COALESCE(p.MANAGE_GRANTS, 0) > 0, 100, 0)) DESC,
+         p.USER_NAME, p.DEPTH
 LIMIT 3000
 """
 
@@ -2233,7 +2496,6 @@ def egress_baseline(days: int = 30, *, bounds: tuple | None = None) -> str:
         # vs-prior on the calendar window: CURRENT = the given month [start, end),
         # PRIOR = the whole month before it [prior_start, start). BASELINE_DAYS is the
         # current month's span so the label matches the compared window.
-        from datetime import timedelta
         start, end = bounds
         prior_start = (start - timedelta(days=1)).replace(day=1)
         _current_pred = (f"START_TIME >= '{start.isoformat()}' "

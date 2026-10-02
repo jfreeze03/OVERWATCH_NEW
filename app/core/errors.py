@@ -24,6 +24,15 @@ _BUFFER_KEY = "_ow_error_buffer"
 _BUFFER_MAX = 100
 _CONTEXT_MAX = 2000          # APP_ERROR_LOG.CONTEXT VARCHAR(2000), V001__core.sql:137
 _TB_MAX = 400
+# c09 R1-006: set by record_error when a recorded failure says the Snowflake session expired;
+# the sidebar's 'Refresh data' pops it and, off SiS only, drops the cached session to reconnect.
+SESSION_EXPIRED_KEY = "_ow_session_expired"
+
+
+def _session_expired_text(lower: str) -> bool:
+    """The ONE session-expired test (lower-cased raw error text): format_snowflake_error's
+    message and record_error's reconnect flag must never disagree on what 'expired' means."""
+    return "session no longer exists" in lower or ("token" in lower and "expired" in lower)
 
 
 def _viewer_for_log() -> str:
@@ -83,8 +92,13 @@ def format_snowflake_error(error: object, max_len: int = 300) -> str:
         return f"This Snowflake edition/account does not expose {ident} here."
     if "timeout" in lower:
         return "The query hit its statement timeout. Narrow the window or filters and retry."
-    if "session no longer exists" in lower or ("token" in lower and "expired" in lower):
-        return "The Snowflake session expired. Press 'Refresh data' in the sidebar (or reload the app) to reconnect."
+    if _session_expired_text(lower):
+        # c09 R1-006: name a remedy that works where the user is. 'Refresh data' used to be the only
+        # advice, but it only bumped the read salt -- the expired session stayed cached. In SiS a browser
+        # reload starts a fresh app instance; off SiS (local dev) Refresh now drops the cached session
+        # (only after record_error saw this expiry -- SESSION_EXPIRED_KEY).
+        return ("The Snowflake session expired. Reload the app in your browser to reconnect "
+                "(local dev: press 'Refresh data' in the sidebar).")
     text = re.sub(r"^\(\d+\):?\s*[0-9a-f-]*:?\s*", "", text)
     text = re.sub(r"\s+", " ", text)
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
@@ -133,6 +147,8 @@ def record_error(page: str, error: BaseException, context: str = "") -> str:
         buffer = st.session_state.setdefault(_BUFFER_KEY, [])
         buffer.append(entry)
         del buffer[:-_BUFFER_MAX]
+        if _session_expired_text(_msg.lower()):
+            st.session_state[SESSION_EXPIRED_KEY] = True   # c09 R1-006: Refresh may now reconnect
     except Exception:
         pass  # session not available (import-time failure); nothing else to do
 

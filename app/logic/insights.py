@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import timedelta
 from math import ceil
 
@@ -32,11 +33,81 @@ IDLE_TARGET_SUSPEND_SEC = 60
 IDLE_RESUME_TAIL_SEC = IDLE_TARGET_SUSPEND_SEC
 
 
+def show_auto_suspend(value: object) -> float | None:
+    """One SHOW WAREHOUSES ``auto_suspend`` cell as seconds, or None when it cannot be read.
+
+    R1-071: SHOW reports a warehouse that never suspends (AUTO_SUSPEND = NULL) as NULL -- "a value
+    of null indicates the warehouse never automatically suspends" -- so a NULL on a row SHOW DID
+    return is the KNOWN never-suspend setting, the same as 0 (proof.py and the mart's setting rank
+    already read it that way), never 'unknown'. Only an unparseable value is None."""
+    if isinstance(value, str):
+        if value.strip().upper() in ("NULL", "NONE", "NAN"):
+            return 0.0
+    elif value is None or (pd.api.types.is_scalar(value) and bool(pd.isna(value))):
+        return 0.0      # None / NaN / pd.NA: the cell SHOW returned is NULL = never suspends
+    num = pd.to_numeric(value, errors="coerce")
+    return None if pd.isna(num) else float(num)
+
+
+@dataclass(frozen=True)
+class ShowWarehouseSettings:
+    """The settings on ONE warehouse's own SHOW WAREHOUSES row (show_warehouse_settings).
+
+    ``listed``: SHOW returned the exact-name row. ``auto_suspend``: seconds, where 0 = never suspends (a
+    listed 0 or NULL, R1-071) and None = unknown (not listed, no column, or an unparseable cell).
+    ``size``: SHOW's raw 'size' cell (e.g. 'X-Small'); '' when not listed, no column, or NULL."""
+
+    listed: bool
+    auto_suspend: float | None
+    size: str
+
+    @property
+    def auto_suspend_known(self) -> bool:
+        return self.auto_suspend is not None
+
+
+def show_warehouse_settings(show_df: pd.DataFrame | None, warehouse: str) -> ShowWarehouseSettings:
+    """``warehouse``'s settings from its OWN row of a SHOW WAREHOUSES [LIKE] read: the ONE parser behind the
+    live one-warehouse re-read (recheck_sql.warehouse_settings_sql) that the alert drawer's and Cost ▸ Optimize
+    ▸ Remediation's 'Tighten auto-suspend' guards and the resize lever decide on (review R1-170 + its twin).
+
+    Not listed (listed=False, nothing known) when the read failed (None), returned nothing, has no name column,
+    or returned only near-name rows: LIKE treats '_' as a one-character wildcard, so 'WH_X' also matches 'WHAX'.
+    Case-insensitive on column and warehouse names. AUTO_SUSPEND goes through show_auto_suspend, so a NULL on a
+    listed row is the KNOWN never-suspend 0 (R1-071), and only a missing column or an unparseable cell is
+    unknown -- a tighten guard then generates no ALTER. Pure; never raises."""
+    unlisted = ShowWarehouseSettings(listed=False, auto_suspend=None, size="")
+    if show_df is None or show_df.empty:
+        return unlisted
+    df = show_df.copy()
+    df.columns = [str(c).lower() for c in df.columns]
+    if "name" not in df.columns:
+        return unlisted
+    match = df[df["name"].astype(str).str.strip().str.upper() == str(warehouse or "").strip().upper()]
+    if match.empty:
+        return unlisted
+    row = match.iloc[0]
+    suspend = show_auto_suspend(row.get("auto_suspend")) if "auto_suspend" in df.columns else None
+    size = row.get("size") if "size" in df.columns else None
+    size_known = size is not None and not (pd.api.types.is_scalar(size) and bool(pd.isna(size)))
+    return ShowWarehouseSettings(listed=True, auto_suspend=suspend,
+                                 size=str(size).strip() if size_known else "")
+
+
+def auto_suspend_in_force(show_df: pd.DataFrame | None, warehouse: str) -> tuple[bool, float | None]:
+    """(known, seconds) for ``warehouse``'s AUTO_SUSPEND, the pair remediation.tighten_suspend_plan takes;
+    (False, None) when show_warehouse_settings cannot read it. Pure; never raises."""
+    found = show_warehouse_settings(show_df, warehouse)
+    return found.auto_suspend_known, found.auto_suspend
+
+
 def with_auto_suspend_settings(idle: pd.DataFrame, warehouses: pd.DataFrame) -> pd.DataFrame:
     """Attach case-insensitive SHOW WAREHOUSES auto-suspend evidence.
 
     Missing metadata stays explicitly unknown. AUTO_SUSPEND=0 is a known,
     disabled setting and must not be conflated with a failed metadata read.
+    A warehouse SHOW lists with a NULL auto_suspend never suspends: known, 0
+    (show_auto_suspend, R1-071) -- only a warehouse SHOW did not list is unknown.
     """
     if idle is None or idle.empty:
         return pd.DataFrame() if idle is None else idle.copy()
@@ -50,7 +121,7 @@ def with_auto_suspend_settings(idle: pd.DataFrame, warehouses: pd.DataFrame) -> 
     if not {"name", "auto_suspend"}.issubset(settings.columns):
         return out
     values = {
-        str(name).strip().upper(): pd.to_numeric(value, errors="coerce")
+        str(name).strip().upper(): show_auto_suspend(value)
         for name, value in zip(settings["name"], settings["auto_suspend"], strict=False)
     }
     mapped = out["WAREHOUSE_NAME"].astype(str).str.strip().str.upper().map(values)
@@ -843,6 +914,33 @@ CREEP_MIN_SLOPE_SEC = 5.0     # ignore < 5 sec/run drift (noise, not a trend)
 CREEP_MIN_LATEST_SEC = 30.0   # ignore trivially short tasks (seconds-long steps)
 
 
+def _creep_series_rows(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """The task_runtime_history_scan rows a creep fit can use (numeric RN + RUNTIME_SEC), or None
+    when there are none -- shared by etl_runtime_creep and creep_fit_coverage so the 'fitted'
+    count and the fit itself can never disagree on which runs count."""
+    if (df is None or df.empty
+            or not {"WORKFLOW_NAME", "TASK_NAME", "RN", "RUNTIME_SEC"}.issubset(df.columns)):
+        return None
+    work = df.copy()
+    work["RUNTIME_SEC"] = pd.to_numeric(work["RUNTIME_SEC"], errors="coerce")
+    work["RN"] = pd.to_numeric(work["RN"], errors="coerce")
+    work = work.dropna(subset=["RUNTIME_SEC", "RN"])
+    return None if work.empty else work
+
+
+def creep_fit_coverage(df: pd.DataFrame | None, *, min_runs: int = CREEP_MIN_RUNS) -> tuple[int, int]:
+    """(task series with >= ``min_runs`` usable runs, all task series) in a task_runtime_history_scan
+    frame: the series etl_runtime_creep actually FITS vs every series it saw. An empty creep result
+    is a verified all-clear only when the first is > 0 -- on the 1st of the month under Current
+    month every nightly task has one run in the Window, nothing is fitted, and 'the fitted trends
+    are flat' would be false (v4.606 holistic review). (0, 0) on empty / malformed input. Pure."""
+    work = _creep_series_rows(df)
+    if work is None:
+        return 0, 0
+    sizes = work.groupby(["WORKFLOW_NAME", "TASK_NAME"]).size()
+    return int(sizes.ge(min_runs).sum()), len(sizes)
+
+
 def etl_runtime_creep(
     df: pd.DataFrame, *, min_runs: int = CREEP_MIN_RUNS, horizon_runs: int = CREEP_HORIZON_RUNS,
     min_slope_sec: float = CREEP_MIN_SLOPE_SEC, min_latest_sec: float = CREEP_MIN_LATEST_SEC,
@@ -860,16 +958,10 @@ def etl_runtime_creep(
     Empty in → empty out. Pure: no Streamlit, no I/O."""
     cols = ["WORKFLOW_NAME", "TASK_NAME", "RUNS", "LATEST_SEC", "BASELINE_SEC",
             "SLOPE_SEC_PER_RUN", "PROJECTED_SEC", "RUNS_TO_2X"]
-    if (df is None or df.empty
-            or not {"WORKFLOW_NAME", "TASK_NAME", "RN", "RUNTIME_SEC"}.issubset(df.columns)):
+    work = _creep_series_rows(df)
+    if work is None:
         return pd.DataFrame(columns=cols)
     from app.logic.forecast import _robust_slope
-    work = df.copy()
-    work["RUNTIME_SEC"] = pd.to_numeric(work["RUNTIME_SEC"], errors="coerce")
-    work["RN"] = pd.to_numeric(work["RN"], errors="coerce")
-    work = work.dropna(subset=["RUNTIME_SEC", "RN"])
-    if work.empty:
-        return pd.DataFrame(columns=cols)
     rows = []
     for (wf, task), g in work.groupby(["WORKFLOW_NAME", "TASK_NAME"]):
         gg = g.sort_values("RN", ascending=False)     # oldest (highest RN) → newest (RN=1) last
@@ -1651,8 +1743,9 @@ def cycle_timeline_frame(night_df: pd.DataFrame | None, *, start_workflow: str =
 def task_cadence_attainment(fresh: pd.DataFrame | None, *, row_cap: int = 200) -> dict:
     """Built-in objective "Tasks on cadence": of the tasks with a derivable cadence
     (``task_freshness_status`` output), how many are On-time vs Late vs Stale against their own
-    schedule. ``capped`` is True when the frame hit the builder's LIMIT (``row_cap``, the 200
-    most-silent tasks first), so the ratio covers those and not every task. {} on no data."""
+    schedule. ``capped`` is True when the frame hit the builder's LIMIT (``row_cap``:
+    ops_sql.task_freshness_sla keeps the 200 tasks most overdue RELATIVE to their own cadence, PR-1
+    R1-129), so the ratio covers those and not every task. {} on no data."""
     if fresh is None or fresh.empty or "STATUS" not in fresh.columns:
         return {}
     status = fresh["STATUS"].astype(str)
@@ -1779,12 +1872,16 @@ def dormant_severity(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["DAYS_DORMANT"] = out["DAYS_DORMANT"].map(safe_float)
     out["ROLE_COUNT"] = out["ROLE_COUNT"].map(safe_float)
-    out["SEVERITY"] = out.apply(
-        lambda r: "High" if r["DAYS_DORMANT"] >= 180 or r["ROLE_COUNT"] >= 5
+    # R1-054: a never-logged-in account (90d+ old, still holding access) stays High. Its DAYS_DORMANT is now
+    # the honest days-since-created lower bound, not the old fabricated 9999 that put it there.
+    _never = (out["NEVER_LOGGED_IN"].map(lambda v: str(v).strip().upper() in ("TRUE", "1"))
+              if "NEVER_LOGGED_IN" in out.columns else pd.Series(False, index=out.index))
+    out["SEVERITY"] = [
+        "High" if never or r["DAYS_DORMANT"] >= 180 or r["ROLE_COUNT"] >= 5
         else "Medium" if r["DAYS_DORMANT"] >= 90
-        else "Low",
-        axis=1,
-    )
+        else "Low"
+        for never, (_, r) in zip(_never, out.iterrows(), strict=True)
+    ]
     # Sort worst-first so a High-by-role-count row (moderate gap, many roles) leads instead of
     # being buried under longer-gap Medium rows -- the table is read top-down as a triage list
     # (mirrors takeover_severity, bug-hunt 2026-08-30).
@@ -2204,6 +2301,13 @@ def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.Dat
         if not is_met:
             forecasts.append("Breached")
             severities.append("High")
+            if pd.isna(hours_since.iloc[i]):
+                # R1-076: PIPELINE_SLA_STATUS LEFT JOINs ACCOUNT_USAGE.TABLES, so a registered table it
+                # cannot find has no LAST_ALTERED -- never a fabricated "0s old" next to an em-dash age
+                details.append("no LAST_ALTERED — not found in ACCOUNT_USAGE.TABLES (dropped, renamed, "
+                               "mis-registered or a quoted mixed-case name; a new table can take ~2h to "
+                               "appear)")
+                continue
             details.append(f"already {humanize_duration(hs, 'h')} old (past its "
                            f"{humanize_duration(safe_float(max_age.iloc[i]), 'h')} limit)")
             continue

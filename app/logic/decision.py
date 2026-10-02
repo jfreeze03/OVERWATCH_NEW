@@ -57,7 +57,16 @@ def prioritize_workloads(frame: pd.DataFrame | None, rate: float,
     ).round(2)
 
     out["IMPACT_USD_30D"] = (credits * max(safe_float(rate), 0.0) / horizon * 30).round(2)
-    out["FAIL_PCT"] = (fails / runs.replace(0, pd.NA) * 100).fillna(0.0).round(2)
+    # R1-083: FAILS comes from the family mart, so its rate is over the SAME population's runs
+    # (FAMILY_RUNS, the optimize-queue / advisor shape). The pattern mart's RUNS counts only
+    # warehouse-attributed runs (no result-cache hits, no compile-time failures), so FAILS / RUNS
+    # read high -- past 100%, or across the 2% "Stabilize failures" gate on a 1% family. RUNS stays
+    # the per-row fallback (a NaN / zero FAMILY_RUNS, or the non-advisor portfolio), clamped to 100.
+    fail_den = runs
+    if "FAMILY_RUNS" in out.columns:
+        family_runs = pd.to_numeric(out["FAMILY_RUNS"], errors="coerce")
+        fail_den = family_runs.where(family_runs.gt(0), runs)
+    out["FAIL_PCT"] = (fails / fail_den.replace(0, np.nan) * 100).fillna(0.0).clip(0.0, 100.0).round(2)
     run_evidence = (runs / 30).clip(upper=1.0)
     day_evidence = (active_days / min(horizon, 30)).clip(upper=1.0)
     cost_evidence = credits.gt(0).astype(float)
@@ -154,6 +163,45 @@ def scenario_projection(actions: pd.DataFrame | None, *, adoption_pct: float,
         "low_capture": round(gross * adoption * max(realization - 0.2, 0.0), 2),
         "high_capture": round(min(gross, gross * adoption * min(realization + 0.2, 1.0)), 2),
     }
+
+
+def _entity_ids(view: pd.DataFrame) -> pd.Series:
+    """scenario_projection's de-duplication key: TYPE:KEY when the entity has a key, else the ACTION_ID."""
+    entity_type = view.get("SOURCE_ENTITY_TYPE", pd.Series("", index=view.index)).fillna("").astype(str)
+    entity_key = view.get("SOURCE_ENTITY_KEY", pd.Series("", index=view.index)).fillna("").astype(str)
+    action_id = view.get("ACTION_ID", pd.Series(view.index, index=view.index)).astype(str)
+    entity_id = (entity_type.str.upper() + ":" + entity_key.str.upper()).str.strip(":")
+    return entity_id.where(entity_key.str.strip().str.len().gt(0), action_id)
+
+
+def floor_exclusions(actions: pd.DataFrame | None, *, confidence_floor: float) -> dict[str, float]:
+    """R1-088: the PRICED open items scenario_projection leaves out at ``confidence_floor``, so the Pipeline
+    can say so instead of silently reading "No evidence" beside a priced queue.
+
+    A NULL confidence is not a measured 0 -- an AI-exception or triage item carries no authored confidence
+    -- but it still does not pass the floor (an AI exception's estimate is projected spend, not a saving), so
+    it is counted apart: ``no_conf_count`` / ``no_conf_usd`` (NULL) and ``below_floor_count`` /
+    ``below_floor_usd`` (authored, under the floor). OPEN / IN_PROGRESS rows with an estimate > 0 only,
+    de-duplicated by entity like the projection (largest estimate wins), never counting an entity the
+    projection already counts."""
+    out = {"no_conf_count": 0.0, "no_conf_usd": 0.0, "below_floor_count": 0.0, "below_floor_usd": 0.0}
+    if actions is None or actions.empty:
+        return out
+    view = actions.copy()
+    status = view.get("STATUS", pd.Series("OPEN", index=view.index)).astype(str).str.upper()
+    raw = pd.to_numeric(view.get("CONFIDENCE", pd.Series(np.nan, index=view.index)), errors="coerce")
+    conf = raw.fillna(0.0).clip(0.0, 1.0)
+    est = pd.to_numeric(view.get("ESTIMATED_USD", pd.Series(0.0, index=view.index)),
+                        errors="coerce").fillna(0.0).clip(lower=0.0)
+    view = view.assign(_ENTITY=_entity_ids(view), _ESTIMATE=est)
+    open_ = status.isin(("OPEN", "IN_PROGRESS"))
+    counted = set(view.loc[open_ & (conf >= confidence_floor), "_ENTITY"])
+    excluded = open_ & (conf < confidence_floor) & (est > 0) & ~view["_ENTITY"].isin(counted)
+    for prefix, mask in (("no_conf", excluded & raw.isna()), ("below_floor", excluded & raw.notna())):
+        rows = view[mask].sort_values("_ESTIMATE", ascending=False).drop_duplicates("_ENTITY")
+        out[f"{prefix}_count"] = float(len(rows))
+        out[f"{prefix}_usd"] = round(float(rows["_ESTIMATE"].sum()), 2)
+    return out
 
 
 # ACTION_QUEUE.PERIOD (V083; logic.workbench.ACTION_ESTIMATE_PERIODS) -> monthly run-rate divisor.

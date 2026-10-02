@@ -57,7 +57,9 @@ def test_t1_1_cost_batch_and_unmapped_on_hourly_tier():
     assert 'if j["key"] in ("metering", "csr", "coco")]' in cost
     assert '"key": "allin", "tier": "historical"' in cost
     assert "_pf = run_batch_mixed(_spend_specs, page=_PAGE) or {}" in cost
-    assert 'key=f"unmapped_{f[\'days\']}", tier="hourly"' in cost
+    # R1-145: the worklist now honours the calendar bounds, so its key carries them (_unm_b) -- a Current
+    # month day offset (e.g. 7 on the 8th) must not share the trailing 7d entry. Still the hourly tier.
+    assert 'key=f"unmapped_{f[\'days\']}{_unm_b}", tier="hourly"' in cost
 
 
 # --- T1.6: CSV prep keyed by page + content, single evicting slot -------------

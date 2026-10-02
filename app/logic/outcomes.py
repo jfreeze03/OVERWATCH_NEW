@@ -204,6 +204,7 @@ def _failure_arm(per_day: pd.DataFrame, before_idx: list[date], after_idx: list[
     ROLL_DAYS rate (calendar days, zero-filled) must fall MIN_DROP below the baseline rate to count as
     fixed; after that, a week back at REGAIN x the baseline rate WITH a failed run in it is "Re-broke",
     dated the day that week crossed back; never falling is "Not fixed"; < MIN_AFTER_DAYS is "Too early".
+    A week with no run has no rate; when no week since done had a run the item is "Not measurable".
     A zero baseline rate (a forced triage task with no failed run in the baseline) makes any failed run
     in a week after the first clean one a re-break."""
     runs_b = float(per_day["RUNS"].reindex(before_idx).fillna(0.0).sum())
@@ -222,11 +223,17 @@ def _failure_arm(per_day: pd.DataFrame, before_idx: list[date], after_idx: list[
 
     roll_f = fails_a.rolling(ROLL_DAYS, min_periods=ROLL_DAYS).sum().dropna()
     roll_r = runs_a.rolling(ROLL_DAYS, min_periods=ROLL_DAYS).sum().reindex(roll_f.index)
-    rate = pd.Series([(100.0 * f / r) if r > 0 else (100.0 if f > 0 else 0.0)
+    # R1-084: a week with no run has NO failure rate (house law 8) -- 0 of 0 is not a measured 0%, or a
+    # task that was suspended / unscheduled after done (no mart rows; LOADED_THROUGH is mart-wide) read
+    # "Held". Those weeks drop out; a failed run with no recorded run stays the inconsistent 100%.
+    rate = pd.Series([(100.0 * f / r) if r > 0 else (100.0 if f > 0 else float("nan"))
                       for f, r in zip(roll_f.tolist(), roll_r.tolist(), strict=True)],
-                     index=roll_f.index, dtype=float)
-    if n < MIN_AFTER_DAYS or rate.empty:
+                     index=roll_f.index, dtype=float).dropna()
+    if n < MIN_AFTER_DAYS or roll_f.empty:
         return res(TOO_EARLY, _too_early(n))
+    if rate.empty:
+        # a full week has elapsed but no run since done: nothing to measure the fix on
+        return res(NOT_MEASURABLE, NOT_MEASURABLE_LABEL)
     last = float(rate.iloc[-1])
     fixed = rate <= rate_b * (1 - MIN_DROP)
     if not bool(fixed.any()):

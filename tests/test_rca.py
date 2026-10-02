@@ -169,3 +169,76 @@ def test_changes_adapter_prefers_setting_over_change_source():
     assert only["title"] == "Warehouse change on WH_X: MANAGED"
     bare = candidates_from_changes(pd.DataFrame([{"WAREHOUSE_NAME": "WH_X"}]))[0]
     assert bare["title"] == "Warehouse change on WH_X: change" and bare["evidence"]["source"] == ""
+
+
+def test_changes_adapter_magnitude_humanizes_verdict_detail_durations():
+    """v4.606 holistic review (R1-124's twin): the change scans write VERDICT_DETAIL with raw
+    seconds, and the Operations drill humanized it while Control Room's ranked-cause Magnitude --
+    this adapter's magnitude_text -- still read 'p95 1800.0s->2400.0s'. The shared
+    wh_change.humanize_verdict_detail now runs BEFORE the 60-char slice."""
+    import re
+
+    from app.logic.wh_change import humanize_verdict_detail
+
+    detail = ("credits/day 12.34->15.67 | p95 1800.0s->2400.0s | queue 145.00->200.00 min/d "
+              "| fail 0->1.5% | 120->140 queries")
+    reg = pd.DataFrame([{"WAREHOUSE_NAME": "WH_ETL", "SETTING": "SIZE", "OLD_VALUE": "MEDIUM",
+                         "NEW_VALUE": "LARGE", "CHANGE_SEEN_AT": _ONSET - timedelta(hours=2),
+                         "VERDICT": "REGRESSED", "VERDICT_DETAIL": detail}])
+    mt = candidates_from_changes(reg)[0]["magnitude_text"]
+    assert mt == "Regressed — " + humanize_verdict_detail(detail)[:60]
+    assert "p95 30m → 40m" in mt
+    assert not re.search(r"[0-9.]+s->", mt) and "1800.0s" not in mt
+    # humanize first, THEN cut: a raw p95 token straddling char 60 is still humanized (slicing first
+    # left 'p95 1800.0s->24', which the regex can no longer match)
+    long = "credits/day 1234.5678->2345.6789 | runs 10->12 | p95 1800.0s->2400.0s | queue 1->2 min/d"
+    assert long.index("p95") < 60 < long.index("2400.0s") + len("2400.0s")
+    mt = candidates_from_changes(pd.DataFrame([{"OBJECT_NAME": "DB.S.SP_X", "CHANGE_DDL": "CREATE PROC",
+                                                "VERDICT": "REGRESSED", "VERDICT_DETAIL": long}]))[0][
+        "magnitude_text"]
+    assert "1800.0s" not in mt and "p95 30m" in mt
+    # a detail with no duration token passes through unchanged
+    plain = candidates_from_changes(pd.DataFrame([{"OBJECT_NAME": "DB.S.T", "VERDICT_DETAIL": "runs 1->2"}]))
+    assert plain[0]["magnitude_text"] == "changed — runs 1->2"
+
+
+# ------------------------------------------------- live-data timestamp types ----
+
+def test_tz_aware_ltz_candidates_rank_against_a_naive_ntz_onset():
+    """R1-099: INCIDENTS.STARTED_AT is TIMESTAMP_NTZ (a naive onset), but every candidate time
+    is TIMESTAMP_LTZ, which the connector returns tz-AWARE. Naive minus aware raised TypeError in
+    _proximity and killed the Control Room incident drawer (ranked cause + close expander) on
+    every incident with a change, task failure or grant in its window. Each adapter must rank
+    an aware candidate in account (Central) wall time."""
+    from app.logic.insights import build_failure_timeline
+
+    tz = "America/Chicago"
+    # 11:40 CDT, 2h20m before the naive 14:00 onset
+    seen = pd.Timestamp(_ONSET - timedelta(hours=2, minutes=20)).tz_localize(tz)
+    changes = candidates_from_changes(pd.DataFrame({
+        "OBJECT_NAME": ["DB.S.SP_LOAD"], "CHANGE_SEEN_AT": pd.Series([seen]),
+        "VERDICT": ["REGRESSED"], "CHANGED_BY": ["DEPLOYER"]}))
+    # 16:00 UTC = 11:00 CDT (UTC-5 in August): 3h before onset
+    grants = candidates_from_grants(pd.DataFrame({
+        "ACTION": ["grant"], "GRANTEE": ["ANALYST"], "PRIVILEGE": ["OWNERSHIP"],
+        "CHANGED_AT": pd.Series([pd.Timestamp("2026-08-18 16:00:00", tz="UTC")])}))
+    tasks = candidates_from_tasks(build_failure_timeline(pd.DataFrame({
+        "TASK_NAME": ["LOAD_A"], "DATABASE_NAME": ["PRD"], "ERROR_MESSAGE": ["Insufficient privileges"],
+        "QUERY_START_TIME": pd.Series([pd.Timestamp(_ONSET - timedelta(hours=4)).tz_localize(tz)])})))
+
+    ranked = rank_root_causes(changes + grants + tasks, _ONSET)     # raised TypeError before the fix
+    by_kind = {h["kind"]: h for h in ranked}
+    assert by_kind["object_change"]["lead_text"] == "2h 20m before onset"
+    assert by_kind["grant_change"]["lead_text"] == "3h before onset"
+    assert by_kind["task_failure"]["lead_text"] == "4h before onset"
+    # timed pre-onset candidates are not LOW-capped: the regressed change headlines
+    assert ranked[0]["kind"] == "object_change" and ranked[0]["band"] == "HIGH"
+    assert rca_summary(ranked)["has_lead"] is True
+
+
+def test_a_tz_aware_onset_is_normalized_too():
+    # The onset side gets the same normalization: an aware onset vs naive candidates ranks.
+    onset = pd.Timestamp(_ONSET).tz_localize("America/Chicago")
+    ranked = rank_root_causes([_cand(when=_ONSET - timedelta(minutes=30), magnitude=1.0)], onset,
+                              entity_name="WH_A")
+    assert ranked[0]["lead_text"] == "30m before onset" and ranked[0]["band"] == "HIGH"

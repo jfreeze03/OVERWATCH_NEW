@@ -12,10 +12,12 @@ Contract (the rebuild's honesty rules applied to AI):
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from .date_windows import window_phrase
 from .formulas import safe_float
 
 if TYPE_CHECKING:
@@ -90,7 +92,20 @@ def task_failure_prompt(timeline: pd.DataFrame, company: str, window_days: int =
     )
 
 
-def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int) -> str:
+def _window_text(window_days: int, bounds: tuple[date, date] | None) -> str:
+    """The evidence window for a prompt's CONTEXT line. A calendar preset (``bounds`` = start,
+    exclusive end) is named with its dates -- the model has no clock, and 'last 31 days' read on
+    Sep 30 is NOT the Aug 1-31 that 'Last month' evidence covers."""
+    if bounds is None:
+        return f"last {window_days} days"
+    start, end = bounds
+    last = end - timedelta(days=1)
+    return (f"{window_phrase(bounds, window_days)} "
+            f"({start:%b} {start.day} - {last:%b} {last.day}, {last.year})")
+
+
+def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int,
+                          *, bounds: tuple[date, date] | None = None) -> str:
     evidence = _serialize_rows(
         advisor,
         ["WAREHOUSE_NAME", "COMPANY", "METERED_HOURS", "IDLE_HOURS", "TOTAL_CREDITS",
@@ -99,7 +114,8 @@ def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int)
          "ACTIONABLE_MONTHLY_USD", "SAVINGS_CONFIDENCE"],
     )
     return _assemble(
-        f"Idle warehouse analysis for {company}, last {window_days} days. IDLE_* = credits billed in "
+        f"Idle warehouse analysis for {company}, {_window_text(window_days, bounds)}. "
+        "IDLE_* = credits billed in "
         "hour slices where zero queries ran on that warehouse.",
         evidence,
         "Recommend auto-suspend only where ACTIONABLE=True. Use ACTIONABLE_MONTHLY_USD as the "
@@ -283,15 +299,21 @@ def alert_evidence_prompt(kind: str, title: str, detail: str,
     # wide evidence pack (e.g. 20 cloud_svc rows + a long DETAIL) would otherwise push the
     # trailing anti-fabrication / 150-word instructions past the cut, leaving Cortex evidence
     # with no grounding constraint — the exact ungrounded-answer mode the ordering prevents.
+    # The EVIDENCE ROWS marker (ai_grounding._EVIDENCE_MARKERS) opens the evidence: the alert's
+    # own TITLE/DETAIL and the rows follow it, and the instruction text plus the framing/window
+    # line stay ahead of it. Without a marker the grounding check took the WHOLE prompt as
+    # evidence, so '(1) ... 1-2 ... Max 150 words' and 'prior 7 days' licensed a made-up $150,
+    # 150%, 2% or $7 in the answer (R1-102).
     head = (
-        "You are a Snowflake cost & performance analyst. An automated sweep raised this alert:\n"
+        "You are a Snowflake cost & performance analyst. An automated sweep raised the alert "
+        "below. Using ONLY the evidence that follows (the alert and the rows): (1) name the 1-2 "
+        "most likely drivers with the numbers that support them, (2) state what to check or "
+        "change next, (3) say 'evidence is inconclusive' if the rows do not explain the alert. "
+        "Max 150 words. Never invent queries, warehouses, services, or numbers not shown.\n"
+        f"The rows after ALERT/DETAIL are: {framing} ({window_label}).\n\n"
+        "EVIDENCE ROWS:\n"
         f"ALERT: {str(title)[:300]}\n"
         f"DETAIL: {str(detail)[:500]}\n\n"
-        "Using ONLY the evidence rows below: (1) name the 1-2 most likely drivers with the "
-        "numbers that support them, (2) state what to check or change next, (3) say "
-        "'evidence is inconclusive' if the rows do not explain the alert. Max 150 words. "
-        "Never invent queries, warehouses, services, or numbers not shown.\n\n"
-        f"{framing} ({window_label}):\n"
     )
     budget = MAX_PROMPT_CHARS - len(head)
     if budget <= 0:

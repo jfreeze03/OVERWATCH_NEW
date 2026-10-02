@@ -42,7 +42,9 @@ _REACHABLE = {
         # + GRANTS_TO_ROLES: the incident auto-investigation's grant-change signal
         # (recent_grant_changes unions GRANTS_TO_USERS + GRANTS_TO_ROLES), reached only
         # when a DBA selects an incident — the same drill-scoped scan class as day-replay.
-        "GRANTS_TO_ROLES", "GRANTS_TO_USERS", "QUERY_HISTORY", "TASK_HISTORY",
+        # + LOCK_WAIT_HISTORY (R1-293, already reached, now seen): selecting a lock-wait spike row reads
+        # that object's last-2-day events (ops_sql.lock_wait_object_detail) -- row-select gated.
+        "GRANTS_TO_ROLES", "GRANTS_TO_USERS", "LOCK_WAIT_HISTORY", "QUERY_HISTORY", "TASK_HISTORY",
         "WAREHOUSE_METERING_HISTORY"),
     # v4.545: the Spend batch co-schedules the native-apps rollup (compute_pool_usage)
     # so the summary line + the Compute-pools detail share one SPCS read.
@@ -62,7 +64,11 @@ _REACHABLE = {
         "QUERY_HISTORY", "SESSIONS", "SNOWPARK_CONTAINER_SERVICES_HISTORY",
         "STORAGE_USAGE", "TABLES", "TABLE_DML_HISTORY", "TABLE_STORAGE_METRICS",
         "WAREHOUSE_METERING_HISTORY"),
-    "app/ui/pages/cost_parts/contract.py": ("QUERY_HISTORY", "WAREHOUSE_METERING_HISTORY"),
+    # + METERING_DAILY_HISTORY (R1-293, already reached, now seen): the contract-consumed live leg of
+    # run_mart_first (cost_sql.contract_consumed_credits) -- read only when FACT_METERING_DAILY does not
+    # reach the contract start (coverage fallback).
+    "app/ui/pages/cost_parts/contract.py": ("METERING_DAILY_HISTORY", "QUERY_HISTORY",
+                                            "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/cost_parts/ai_chargeback.py": (
         "CORTEX_AI_FUNCTIONS_USAGE_HISTORY", "CORTEX_CODE_CLI_USAGE_HISTORY",
         "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY", "METERING_DAILY_HISTORY",
@@ -109,7 +115,10 @@ _REACHABLE = {
         # chatter-by-application panel joins QUERY_HISTORY to SESSIONS on SESSION_ID
         # (chatter_sql.chatter_by_application / chatter_families_for_application) to
         # attribute metadata chatter to the client app/driver; toggle-gated, off first paint.
+        # + QUERY_ATTRIBUTION_HISTORY (R1-293, already reached, now seen): the ETL run-cost attribution
+        # (etl_control_sql.run_cost_attribution_scan) behind the 'Compute attributed cost' toggle.
         "COPY_HISTORY", "DYNAMIC_TABLE_REFRESH_HISTORY", "LOCK_WAIT_HISTORY",
+        "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "QUERY_INSIGHTS", "SESSIONS", "TABLE_DML_HISTORY", "TASKS",
         "TASK_HISTORY", "TASK_VERSIONS", "WAREHOUSE_LOAD_HISTORY", "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/security.py": (
@@ -135,7 +144,10 @@ _REACHABLE = {
     # filtered to that warehouse, probe + historical tier) before it offers the ALTER. Interaction-gated: it
     # runs only when an operator opens an alert's Respond expander, picks that lever, and the SET would
     # tighten -- never first paint. The page file still carries no new ACCOUNT_USAGE literal.
-    "app/ui/pages/alerts.py": ("QUERY_HISTORY",),
+    # + METERING_DAILY_HISTORY (R1-293, already reached, now seen): the button-gated AI evidence pack
+    # (alert_evidence_sql.build) reads it for the cortex / metering_service plans. That builder also
+    # already reached QUERY_HISTORY before the v4.603 note above (the gate skipped it, so it was unseen).
+    "app/ui/pages/alerts.py": ("METERING_DAILY_HISTORY", "QUERY_HISTORY"),
     # v4.597 (Option C): Operations > Optimize. The queue/tracked/watchlist reads are mart and
     # app tables; QUERY_HISTORY is the opt-in live-profile toggle (query_opportunity_fingerprints,
     # byte-identical to the Queries board call, so the two share one cache entry) — off first paint.
@@ -158,45 +170,149 @@ _REACHABLE = {
 }
 
 
-def _render_builder(fn):
-    kwargs = {}
-    for pname, param in inspect.signature(fn).parameters.items():
-        if pname == "company":
-            kwargs[pname] = "ALFA"
-        elif param.default is not inspect.Parameter.empty:
+_QID = "01b2c3d4-0000-4000-8000-000000000001"
+
+
+def _gate_args() -> dict[str, list[dict]]:
+    """Per-builder arguments for the required parameters _REQUIRED_ARGS (the injection matrix's shared
+    table) does not carry. Several renders = the union of their tables (one per basis / object type /
+    evidence kind), so a branch-dependent reach is seen whichever branch the page takes. R1-293: the
+    gate used to SKIP every such builder with a bare `continue`, and four page pins were wrong for it."""
+    from datetime import date, timedelta
+
+    from app.data.etl_control_sql import RefGapCheck
+    from app.logic.alert_evidence import _KIND_LABEL, EvidencePlan
+    from app.logic.date_windows import CalendarDayOffset
+    from app.logic.ledger_measure import BASES
+
+    recent = date.today() - timedelta(days=7)
+    ctl = {"control_fqn": "DB.S.CONTROL_STATUS"}
+    tbl = {"database": "DB", "schema": "S", "table": "T"}
+    return {
+        "alert_evidence_sql.build": [
+            {"plan": EvidencePlan(kind, "last 7 days", days=7, warehouse="WH_X", service="AI_SERVICES",
+                                  day="2026-06-14", family_text="SELECT 1")} for kind in _KIND_LABEL],
+        "change_impact_sql.object_run_history": [
+            {"object_type": "PROCEDURE", "object_name": "DB.S.MY_PROC"},
+            {"object_type": "TASK", "object_name": "DB.S.MY_TASK"}],
+        "cost_sql.contract_consumed_credits": [{"contract_start_date": "2026-01-01"}],
+        "cost_sql.unread_maintenance_proof": [
+            {"fqn": "DB.S.T", "booked_on": date(2026, 6, 1), "baseline_monthly_credits": 10.0}],
+        # the shared Window-label helper (v4.606 holistic review): a pure phrase, rendered so its
+        # (empty) reach is checked rather than skipped
+        "etl_control_sql.calendar_window_phrase": [{"days": CalendarDayOffset(9), "today": date(2026, 9, 10)}],
+        "etl_control_sql.cycle_finish_history_scan": [{**ctl, "start_workflow": "WF_A", "end_workflow": "WF_Z"}],
+        "etl_control_sql.recon_errors_scan": [{"recon_fqn": "DB.S.RECON"}],
+        "etl_control_sql.recon_recurrence_scan": [{"recon_fqn": "DB.S.RECON"}],
+        "etl_control_sql.reference_gap_scan": [
+            {"checks": [RefGapCheck("pc_x.code", "DB.S.STG", "CODE")], "xlat_fqn": "DB.S.XLAT"}],
+        "etl_control_sql.run_cost_attribution_scan": [ctl],
+        "etl_control_sql.run_inventory_scan": [{"run_id_fqn": "DB.S.RUN_ID"}],
+        "etl_control_sql.run_params_scan": [{"params_fqn": "DB.S.PARAMS"}],
+        "etl_control_sql.run_task_evidence_scan": [{**ctl, "task": "TASK_A"}],
+        "etl_control_sql.run_tasks_scan": [{**ctl, "run_id": "R1"}],
+        "etl_control_sql.task_runtime_history_scan": [ctl],
+        "etl_control_sql.task_status_history_scan": [ctl],
+        "etl_control_sql.workflow_list_scan": [ctl],
+        "etl_control_sql.workflow_runtime_drift_scan": [ctl],
+        "etl_control_sql.workflow_runtimes_scan": [ctl],
+        "insights_sql.call_children_costs": [{"call_query_id": _QID}],
+        "insights_sql.call_cost_lookup": [{"ident": _QID}],
+        "insights_sql.query_detail": [{"query_id": _QID}],
+        "insights_sql.table_retention_live": [tbl],
+        "insights_sql.table_tco": [tbl],
+        "mart_sql.deliveries_for_event": [{"event_id": _QID}],
+        "mart_sql.fact_contract_consumed": [{"start_iso": "2026-01-01"}],
+        "mart_sql.incident_members_detail": [{"incident_id": "INC-1"}],
+        "mart_sql.ledger_before_after": [
+            {"basis": b, "target_object": "DB.S.T", "booked_day": date(2026, 6, 1)} for b in BASES],
+        "mart_sql.ledger_for_event": [{"event_id_prefix": "ab12cd34"}],
+        "mart_sql.supersede_ledger_twins_sql": [{"actor_sql": "CURRENT_USER()"}],
+        "ops_sql.lock_wait_object_detail": [{"database": "DB", "schema": "S", "object_name": "T"}],
+        "ops_sql.operator_anatomy": [{"query_id": _QID}],
+        "security_sql.role_holders": [{"role": "SOME_ROLE"}],
+        "security_sql.role_privileges": [{"role": "SOME_ROLE"}],
+        "security_sql.show_grants_to_share_sql": [{"share_name": "SOME_SHARE"}],
+        "workbench_sql.entity_daily_signals": [
+            {"entities": [("WAREHOUSE", "WH_X", recent), ("TASK", "DB.S.T", recent),
+                          ("QUERY_FINGERPRINT", "abc123", recent)]}],
+        "workbench_sql.watchlist": [{"viewer_name": "VIEWER"}],
+    }
+
+
+# Names the pages call through a *_sql module that are NOT SQL builders, so there is nothing to render.
+# Reviewed list: anything else the gate cannot render FAILS it -- a builder that grows a new required
+# argument must be taught in _gate_args, never skipped.
+_UNRENDERABLE = {
+    "etl_control_sql.filter_checks_by_database": "filters parsed RefGapChecks; renders no SQL",
+    "etl_control_sql.parse_ref_gap_checks": "parses the ETL_REF_GAP_CHECKS setting; renders no SQL",
+    "ops_sql.split_health_bundle": "splits an already-fetched DataFrame; renders no SQL",
+    "recheck_sql.recheck_closed_day": "pure helper: whether an event's title day is closed; renders no SQL",
+}
+
+
+def _render_sqls(mod_name: str, fn) -> list[str]:
+    """Every SQL the builder renders under the gate's arguments. KeyError = a required argument the
+    gate was never taught; TypeError = it returned no SQL."""
+    sqls = []
+    for override in _gate_args().get(f"{mod_name}.{fn.__name__}", [{}]):
+        kwargs = {}
+        for pname, param in inspect.signature(fn).parameters.items():
+            if pname == "company":
+                kwargs[pname] = "ALFA"
+            elif pname in override:
+                kwargs[pname] = override[pname]
+            elif param.default is not inspect.Parameter.empty:
+                continue
+            else:
+                kwargs[pname] = _REQUIRED_ARGS[pname]      # KeyError -> unrenderable
+        out = fn(**kwargs)
+        if isinstance(out, tuple) and out and isinstance(out[0], str):
+            out = out[0]                                  # the (sql, errors) builders
+        if not isinstance(out, str):
+            raise TypeError(fn.__name__)
+        sqls.append(out)
+    return sqls
+
+
+def _reachable_tables(src: str) -> tuple[set, dict]:
+    """(ACCOUNT_USAGE tables the source's builders render, {module.fn: why it could not be rendered})."""
+    tables: set = set()
+    skipped: dict = {}
+    for mod_name, fn_name in sorted(set(_BUILDER_RE.findall(src))):
+        try:
+            mod = importlib.import_module(f"app.data.{mod_name}")
+        except ModuleNotFoundError:
             continue
-        else:
-            kwargs[pname] = _REQUIRED_ARGS[pname]      # KeyError -> skipped
-    out = fn(**kwargs)
-    if not isinstance(out, str):
-        raise TypeError(fn.__name__)
-    return out
+        fn = getattr(mod, fn_name, None)
+        if fn is None or not inspect.isfunction(fn):
+            continue
+        try:
+            for sql in _render_sqls(mod_name, fn):
+                tables |= set(_AU_RE.findall(sql))
+        except (KeyError, TypeError, ValueError) as exc:
+            skipped[f"{mod_name}.{fn_name}"] = f"{type(exc).__name__}: {exc}"
+    return tables, skipped
 
 
 def test_reachable_account_usage_tables_per_page():
     """A page's true scan surface is what its BUILDERS render, not what its
     source spells. New reachable tables must be pinned here deliberately —
     growing this set is the honest version of raising a literal budget."""
+    all_skipped: dict = {}
     for rel, expected in _REACHABLE.items():
-        src = _read(rel)
-        tables: set = set()
-        for mod_name, fn_name in sorted(set(_BUILDER_RE.findall(src))):
-            try:
-                mod = importlib.import_module(f"app.data.{mod_name}")
-            except ModuleNotFoundError:
-                continue
-            fn = getattr(mod, fn_name, None)
-            if fn is None or not inspect.isfunction(fn):
-                continue
-            try:
-                sql = _render_builder(fn)
-            except (KeyError, TypeError, ValueError):
-                continue                                  # unguessable args
-            tables |= set(_AU_RE.findall(sql))
+        tables, skipped = _reachable_tables(_read(rel))
+        all_skipped.update(skipped)
         assert tuple(sorted(tables)) == expected, (
             f"{rel}: reachable ACCOUNT_USAGE set changed — "
             f"got {sorted(tables)}, pinned {list(expected)}. "
             "Update the pin ONLY with a deliberate scan-surface change.")
+    # R1-293: an unrenderable builder used to be dropped silently, so its scans never reached the pin.
+    unexpected = {k: v for k, v in all_skipped.items() if k not in _UNRENDERABLE}
+    assert not unexpected, f"teach _gate_args these builders' required arguments: {unexpected}"
+    assert set(_UNRENDERABLE) <= set(all_skipped), (
+        "stale _UNRENDERABLE entries (now rendered or no longer referenced): "
+        f"{sorted(set(_UNRENDERABLE) - set(all_skipped))}")
 
 
 # ---------------------------------------------------------------------------

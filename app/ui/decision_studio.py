@@ -35,6 +35,7 @@ from app.logic import insights
 from app.logic.actions import ledger_totals, savings_by_lever, savings_month_calendar
 from app.logic.date_windows import is_prior_month_window, window_phrase
 from app.logic.decision import (
+    floor_exclusions,
     monthly_equivalent,
     pipeline_frame,
     prioritize_workloads,
@@ -82,7 +83,7 @@ from app.logic.savings_rollup import (
 )
 from app.logic.sizing import size_recommendations
 from app.logic.storage_waste import H_STORAGE_BASIS
-from app.logic.verdict import decision_studio_signals, page_verdict
+from app.logic.verdict import Signal, decision_studio_signals, page_verdict
 from app.logic.workbench import ENTITY_TYPES, mark_watched_pairs, stale_planning
 from app.ui import charts
 from app.ui.components import (
@@ -347,7 +348,8 @@ def reset_proof_memo() -> None:
 def _proof_signals(rate: float) -> dict | None:
     """Wave 2 #8: the shared prove-it reads + compute behind BOTH the page-open verdict and the Proof
     section, so the hoisted verdict and the section's banner figures are one identical computation.
-    Returns None when the savings ledger isn't set up yet. Keeps the `savings_ledger(limit=None)` /
+    Returns None when the savings ledger could not be read; the failed read is memoized
+    (_proof_ledger_failure) so each caller renders it by its KIND (R1-085). Keeps the `savings_ledger(limit=None)` /
     `decision_roi_ledger_full` read to ONE site (v4.597: the Scorecard and ROI merged into Proof, so
     the old second ROI read is gone).
 
@@ -365,7 +367,9 @@ def _proof_signals(rate: float) -> dict | None:
     ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
                  tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
     if not ledger.ok:
-        _PROOF_MEMO.update(rate=_k, sig=None)
+        # R1-085: keep the failed read -- needs_setup ("apply V051+") only for a true absence; a timeout,
+        # drift or other failure on an installed ledger renders unavailable with its error
+        _PROOF_MEMO.update(rate=_k, sig=None, ledger_failure=ledger)
         return None
     # perf: the ledger gate above must run first (it early-returns), but these three scorecard
     # reads are independent + non-probe — co-schedule them into ONE round trip instead of three
@@ -424,9 +428,23 @@ def _proof_signals(rate: float) -> dict | None:
         "summary_ok": _q_ok,
         "acc": acceptance_summary(_acc.df if _acc.usable() else None),
         "prec": account_precision(_prec.df if _prec.usable() else None),
+        # R1-087: a FAILED acceptance / precision read is not a measured zero -- the helpers above return
+        # 0 counts for None, so the cards and the projection key off these, never off DONE_N / ACTIONED.
+        # (.ok, not .usable(): an ok-but-empty grouped precision read IS a real "nothing resolved".)
+        "acc_read": _acc, "prec_read": _prec,
     }
-    _PROOF_MEMO.update(rate=_k, sig=sig)
+    _PROOF_MEMO.update(rate=_k, sig=sig, ledger_failure=None)
     return sig
+
+
+def _proof_ledger_failure():
+    """The failed savings-ledger read behind a None _proof_signals this render, else None."""
+    return _PROOF_MEMO.get("ledger_failure")
+
+
+def _read_gap(res, what: str) -> str:
+    """A failed side read's card delta: 'needs setup' for a true absence, else 'unavailable'."""
+    return f"{what} {'needs setup' if is_setup_absence(res.error_kind) else 'unavailable'} (read failed)"
 
 
 def decision_verdict(rate: float) -> dict:
@@ -439,12 +457,28 @@ def decision_verdict(rate: float) -> dict:
     with _load:
         sig = _proof_signals(rate)
     if sig is None:
+        _failed = _proof_ledger_failure()
+        if _failed is not None and not is_setup_absence(_failed.error_kind):
+            # R1-085: a failed read on an installed ledger says so -- the line never just vanishes
+            return page_verdict([Signal("warn", "the proof record could not be read (the savings-ledger read "
+                                                "failed) — retry in a moment")], healthy="")
         return {}
     proof = proof_verdict(sig["roi"], sig["realization"], sig["acc"]["ACCEPTANCE_PCT"], sig["prec"])
+    # R1-087's verdict twin (holistic review): a FAILED acceptance / precision read reaches proof_verdict as
+    # None, which it lists as "not yet measured" -- a broken read posing as data that does not exist yet,
+    # under a possible "Healthy". Each failed side read is its own warn (worded by its kind, like the cards),
+    # ahead of proof_verdict's signals. (.ok, as the cards: an ok-but-empty read IS a real "nothing yet".)
+    _failed_reads = [
+        Signal("warn", f"{_what} {'needs setup' if is_setup_absence(_res.error_kind) else 'could not be read'}"
+                       f" (the {_table} read failed)")
+        for _res, _what, _table in ((sig.get("acc_read"), "team follow-through", "ACTION_QUEUE"),
+                                    (sig.get("prec_read"), "alert precision", "ALERT_EVENTS"))
+        if _res is not None and not _res.ok
+    ]
     # The healthy sentence is proof_verdict's own headline, which names only MEASURED facts (and lists what
     # is not measured yet) - the old hard-coded sentence claimed realization, precision and follow-through
     # even while they were unmeasured (owner screenshot 2026-09-24).
-    return page_verdict(decision_studio_signals(proof), healthy=proof["headline"])
+    return page_verdict(_failed_reads + decision_studio_signals(proof), healthy=proof["headline"])
 
 
 def _proof_tab(rate: float) -> None:
@@ -465,13 +499,26 @@ def _proof_tab(rate: float) -> None:
     with _sc_load:
         sig = _proof_signals(rate)
     if sig is None:
-        empty_state("needs_setup", "Apply the action + savings layer (V051+) to start the proof record.")
+        _failed = _proof_ledger_failure()
+        if _failed is not None and is_setup_absence(_failed.error_kind):
+            empty_state("needs_setup",
+                        "This app's role cannot read the savings ledger — re-run the grants in "
+                        "snowflake/roles.sql." if str(_failed.error_kind).strip().lower() == "privilege"
+                        else "Apply the action + savings layer (V051+) to start the proof record.")
+        else:
+            # R1-085: a timeout / drift / other failure is a failed read with its error, never "apply V051"
+            empty_state("unavailable", "The savings ledger could not be read, so the proof record is not shown "
+                                       "— retry in a moment.", detail=getattr(_failed, "error", None))
         return
     ledger = sig["ledger"]
     totals = sig["totals"]
     roi = sig["roi"]
     acc = sig["acc"]
     prec = sig["prec"]
+    # R1-087: whether each side read succeeded (a sig built elsewhere without the reads counts as read)
+    _acc_res, _prec_res = sig.get("acc_read"), sig.get("prec_read")
+    _acc_ok = _acc_res is None or bool(_acc_res.ok)
+    _prec_ok = _prec_res is None or bool(_prec_res.ok)
     verified_active = sig["verified_active"]
     # Per-item attribution + the uncapped attribution split (its own read: it joins ALERT_EVENTS, so it
     # re-colds on alert acks — kept apart from the ledger read, which gates the verdict).
@@ -592,7 +639,8 @@ def _proof_tab(rate: float) -> None:
                  "booked by hand are verified on Cost ▸ Optimization & Savings ▸ Remediation & ledger."},
         {"label": "Acted on",
          "value": (f"{acc['ACCEPTANCE_PCT']:,.0f}%" if acc["ACCEPTANCE_PCT"] is not None else "—"),
-         "delta": f"{acc['DONE_N']} done · {acc['DROPPED_N']} dismissed · {acc['OPEN_N']} open",
+         "delta": (f"{acc['DONE_N']} done · {acc['DROPPED_N']} dismissed · {acc['OPEN_N']} open" if _acc_ok
+                   else _read_gap(_acc_res, "ACTION_QUEUE")),
          "delta_color": "off",
          "help": "Of the recommendations the team DECIDED on (last 90d), the share acted on (DONE) vs "
                  "dismissed (DROPPED). Open items are still undecided, not counted for or against."},
@@ -600,8 +648,9 @@ def _proof_tab(rate: float) -> None:
          "value": (f"{prec['PRECISION_PCT']:,.0f}%" if prec["PRECISION_PCT"] is not None else "—"),
          "severity": ("ok" if (prec["PRECISION_PCT"] or 0) >= 70 else
                       ("warn" if prec["PRECISION_PCT"] is not None else "")),
-         "delta": (f"{prec['ACTIONED']} actioned · {prec['NOISE']} noise"
-                   + (f" · {prec['UNTAGGED_SHARE_PCT']:.0f}% unlabeled" if prec["UNTAGGED_SHARE_PCT"] else "")),
+         "delta": ((f"{prec['ACTIONED']} actioned · {prec['NOISE']} noise"
+                    + (f" · {prec['UNTAGGED_SHARE_PCT']:.0f}% unlabeled" if prec["UNTAGGED_SHARE_PCT"] else ""))
+                   if _prec_ok else _read_gap(_prec_res, "ALERT_EVENTS")),
          "delta_color": "off",
          "help": "When a rule fires and is resolved, how often it was real (ACTIONED) vs noise "
                  "(expected/maintenance closes excluded). A high unlabeled share means the number "
@@ -611,6 +660,16 @@ def _proof_tab(rate: float) -> None:
          "help": "Share of the recommendation board's three signals (cache, latency, fail-rate) "
                  "actually present per family — how much of the advice rests on complete evidence."},
     ])
+    # R1-087: a failed acceptance / precision read renders by its kind (the card deltas above say which),
+    # never as the "0 done · 0 open" / "0 actioned" a clean, empty queue would show
+    for _side, _what in ((_acc_res, "Team follow-through (ACTION_QUEUE decisions, last 90 days)"),
+                         (_prec_res, "Alert precision (ALERT_EVENTS resolution kinds)")):
+        if _side is not None and not _side.ok:
+            if is_setup_absence(_side.error_kind):
+                empty_state("needs_setup", f"{_what} is not installed or not readable by this app's role.")
+            else:
+                empty_state("unavailable", f"{_what} could not be read, so it is not shown.",
+                            detail=_side.error)
     if not sig.get("summary_ok", True):
         # review r2: the fallback (see _proof_signals) is disclosed, and the truncation note below
         # never claims whole-ledger SQL when that read failed
@@ -814,14 +873,37 @@ def _clamp_pct(value: object) -> int:
     return round(max(0.0, min(safe_float(value), 100.0)))
 
 
-def _projection_defaults(sig: dict | None, carried: dict | None) -> dict:
+def _projection_defaults(sig: dict | None, carried: dict | None, *, ledger_failure=None) -> dict:
     """The projection's slider defaults and where each came from. Adoption = the MEASURED acceptance
     rate (Proof ▸ Acted on), realization = the measured realization rate, else the carried realization
     vs OVERWATCH's own estimate; each falls back to a labelled assumption. The confidence floor is
-    policy, never measured."""
+    policy, never measured.
+
+    ``ledger_failure`` is the failed savings-ledger read behind a None ``sig`` (_proof_ledger_failure):
+    _proof_signals returns before the acceptance read, so neither "nothing decided yet" nor "no verified
+    item" is known -- both helps then say the proof record could not be read (or is not set up yet, for a
+    true absence) instead (R1-209 review)."""
     acc = (sig or {}).get("acc") or {}
     acc_pct = acc.get("ACCEPTANCE_PCT")
-    if acc_pct is not None:
+    _acc_res = (sig or {}).get("acc_read")
+    _unread = None
+    if sig is None and ledger_failure is not None:
+        _kind = str(getattr(ledger_failure, "error_kind", "") or "").strip().lower()
+        _unread = ("the proof record could not be read (the savings-ledger read failed)"
+                   if not is_setup_absence(_kind)
+                   else "this app's role cannot read the proof record yet (the savings-ledger grants)"
+                   if _kind == "privilege"
+                   else "the proof record is not set up yet (no savings ledger to read)")
+    if _unread is not None:
+        adoption = _ASSUMED_ADOPTION_PCT
+        adoption_help = (f"Assumed — {_unread}, so {_ASSUMED_ADOPTION_PCT}% is a placeholder, not a "
+                         "measurement.")
+    elif _acc_res is not None and not _acc_res.ok:
+        # R1-209: a failed acceptance read cannot say "nothing decided yet"
+        adoption = _ASSUMED_ADOPTION_PCT
+        adoption_help = (f"Assumed — the acceptance read (ACTION_QUEUE) could not be completed, so "
+                         f"{_ASSUMED_ADOPTION_PCT}% is a placeholder, not a measurement.")
+    elif acc_pct is not None:
         adoption = _clamp_pct(acc_pct)
         adoption_help = (f"Measured: the team acted on {safe_float(acc_pct):,.0f}% of the recommendations "
                          f"it decided in the last 90 days ({acc.get('DONE_N', 0)} done · "
@@ -832,7 +914,11 @@ def _projection_defaults(sig: dict | None, carried: dict | None) -> dict:
                          f"{_ASSUMED_ADOPTION_PCT}% is a placeholder, not a measurement.")
     real = (sig or {}).get("realization")
     carried_pct = (carried or {}).get("carried_pct")
-    if real is not None:
+    if _unread is not None:
+        realization = _ASSUMED_REALIZATION_PCT
+        realization_help = (f"Assumed — {_unread}, so {_ASSUMED_REALIZATION_PCT}% is a placeholder, not a "
+                            "measurement.")
+    elif real is not None:
         realization = _clamp_pct(real)
         realization_help = (f"Measured: verified items realized {safe_float(real):,.0f}% of their up-front "
                             "estimates — Proof ▸ Realization rate.")
@@ -897,10 +983,13 @@ def _pipeline_projection(frame: pd.DataFrame, defaults: dict) -> None:
     # decision, a tracked query family) yields candidates > 0 with gross == 0. Rendering that as
     # "$0.00" reads as "worth nothing" when the dollars are unquantified, not zero (ds-hunt 2026-08-30).
     _priced = has_candidates and projection["gross_estimate"] > 0
+    # R1-088: priced open items the floor leaves out (a NULL confidence counted apart from an authored low one)
+    _excl = floor_exclusions(frame, confidence_floor=confidence)
+    _excl_n = int(_excl["no_conf_count"] + _excl["below_floor_count"])
 
     def _capture(value: float) -> str:
         if not has_candidates:
-            return "No evidence"
+            return "Below floor" if _excl_n else "No evidence"
         return format_usd(value) if _priced else "Unpriced"
 
     kpi_row([
@@ -916,6 +1005,17 @@ def _pipeline_projection(frame: pd.DataFrame, defaults: dict) -> None:
          "help": "In play × adoption × realization; the range moves realization ±20 points. A model of "
                  "what is ahead, never a verified saving."},
     ])
+    if _excl_n:
+        _parts = []
+        if _excl["no_conf_count"]:
+            _parts.append(f"{int(_excl['no_conf_count']):,} with no authored confidence (e.g. an AI exception, "
+                          "whose estimate is projected spend, not a saving)")
+        if _excl["below_floor_count"]:
+            _parts.append(f"{int(_excl['below_floor_count']):,} below the {confidence:.2f} confidence floor")
+        st.caption(md_dollars(
+            f"{_excl_n:,} priced open item(s) "
+            f"({format_usd(_excl['no_conf_usd'] + _excl['below_floor_usd'])}/mo) are not projected: "
+            + "; ".join(_parts) + "."))
 
 
 def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
@@ -1009,6 +1109,10 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     settle = settle_schedule(sig["ledger"].df) if sig is not None else {}
     _pending = int(sig["totals"].get("auto_settle_pending_count") or 0) if sig is not None else 0
     _next = settle.get("next")
+    # R1-085: a failed ledger read on an installed ledger is "unavailable", never "not set up"
+    _ledger_fail = _proof_ledger_failure()
+    _ledger_gap = ("ledger unavailable" if _ledger_fail is not None and not is_setup_absence(_ledger_fail.error_kind)
+                   else "ledger not set up")
 
     _counted = [lever for lever, on in (("IDLE", idle.usable()), ("RESIZE", _sized_ok),
                                         ("UNREAD_MAINT", _unread.included),
@@ -1070,7 +1174,7 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
          "value": (f"{_pending:,}" if sig is not None else "—"),
          "delta": ((f"measuring · next ~{_next:%b} {_next.day}" if _pending and _next is not None
                     else ("measuring" if _pending else "nothing measuring"))
-                   if sig is not None else "ledger not set up"),
+                   if sig is not None else _ledger_gap),
          "delta_color": "off",
          "help": "Changes the daily scan booked that are still inside their 14-day measured window. "
                  "Their measured $ joins Proof's verified run-rate when the window closes — it never "
@@ -1125,7 +1229,7 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                     probe=True)
         carried = carried_realization(
             ledger_with_attribution(sig["ledger"].df, _attr.df if _attr.usable() else None))
-    _pipeline_projection(pipeline, _projection_defaults(sig, carried))
+    _pipeline_projection(pipeline, _projection_defaults(sig, carried, ledger_failure=_ledger_fail))
 
     # DS #1: pin items on watched entities to the top WITHIN their severity band, so a watched
     # entity's item surfaces first without burying a CRITICAL under a watched LOW. The watchlist and

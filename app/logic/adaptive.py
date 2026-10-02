@@ -48,7 +48,10 @@ def adaptive_compute_candidacy(hourly: pd.DataFrame | None,
 
     ``hourly`` (warehouse_hourly_activity): WAREHOUSE_NAME, HOUR_OF_DAY, AVG_CREDITS.
     ``idle`` (idle_warehouse_analysis, optional): WAREHOUSE_NAME, TOTAL_CREDITS,
-    IDLE_CREDITS — folds in an idle discount + surfaces IDLE_PCT.
+    IDLE_CREDITS — folds in an idle discount + surfaces IDLE_PCT. A warehouse with
+    NO idle evidence (no frame — the idle read failed — or a warehouse missing from
+    its LIMIT-100 rows) gets IDLE_PCT None (renders "—"), no discount and no
+    auto-suspend override: unknown idle is not 0% idle (house law 8).
 
     Returns one row per warehouse: SCORE (0-100, desc), VERDICT, PEAK_TO_MEAN,
     DAILY_CREDITS, IDLE_PCT, RATIONALE. Empty in, empty out.
@@ -84,10 +87,14 @@ def adaptive_compute_candidacy(hourly: pd.DataFrame | None,
         peak_to_mean = (peak / mean) if mean > 0 else 1.0
         burst = _clamp01((peak_to_mean - BURST_ANCHOR) / (BURST_CEIL - BURST_ANCHOR))
         volume_gate = _clamp01(daily / MIN_DAILY_CREDITS)
-        idle_pct = safe_float(idle_pct_by_wh.get(str(wh), 0.0))
-        idle_discount = 1.0 - IDLE_MAX_DISCOUNT * _clamp01(idle_pct / 100.0)
+        # No idle evidence is NOT 0% idle: the old .get(wh, 0.0) default showed a made-up "0%"
+        # and silently dropped the auto-suspend override whenever the idle read failed.
+        _idle_raw = idle_pct_by_wh.get(str(wh))
+        idle_pct = None if _idle_raw is None else safe_float(_idle_raw)
+        idle_discount = (1.0 if idle_pct is None
+                         else 1.0 - IDLE_MAX_DISCOUNT * _clamp01(idle_pct / 100.0))
         score = round(100 * burst * volume_gate * idle_discount)
-        if idle_pct >= HIGH_IDLE_PCT:
+        if idle_pct is not None and idle_pct >= HIGH_IDLE_PCT:
             verdict = "Auto-suspend first"     # idle dominates; multi-cluster won't help it
         elif score >= 60:
             verdict = "Strong candidate"
@@ -95,12 +102,13 @@ def adaptive_compute_candidacy(hourly: pd.DataFrame | None,
             verdict = "Consider"
         else:
             verdict = "Not bursty enough"
-        rationale = (f"{peak_to_mean:.1f}x peak-to-mean, {daily:,.1f} cr/day"
-                     + (f", {idle_pct:.0f}% idle" if idle_pct >= 1 else ""))
+        idle_note = (", idle n/a" if idle_pct is None
+                     else f", {idle_pct:.0f}% idle" if idle_pct >= 1 else "")
+        rationale = f"{peak_to_mean:.1f}x peak-to-mean, {daily:,.1f} cr/day{idle_note}"
         rows.append({
             "WAREHOUSE_NAME": str(wh), "SCORE": int(score), "VERDICT": verdict,
             "PEAK_TO_MEAN": round(peak_to_mean, 1), "DAILY_CREDITS": round(daily, 1),
-            "IDLE_PCT": round(idle_pct, 0), "RATIONALE": rationale,
+            "IDLE_PCT": None if idle_pct is None else round(idle_pct, 0), "RATIONALE": rationale,
         })
     if not rows:
         return pd.DataFrame(columns=cols)

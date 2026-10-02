@@ -26,6 +26,7 @@ SQL. Pure module: bounded output, no Streamlit, no dollar rates.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 # The Teradata ETL translation (XLAT) table's own column convention. These are
 # fixed for the reference table (the family axis is SRC_IDNTFTN_NM, the translated
@@ -194,11 +195,21 @@ MAX_WORKFLOWS = 200  # distinct workflows for the runtimes picker (a cycle has d
 def _window_clause(days: object, col: str = "TASK_START_DTTM", indent: str = "  ") -> str:
     """A ``AND <col> >= DATEADD('day', -N, now)`` line honoring the scope-bar Window.
 
-    ``days <= 0`` (the default / 'all') returns ``""`` — no window filter — so callers
-    that don't scope a window behave exactly as before. Shared by the runtimes, list, and
-    drift readers so the scope bar means the same thing everywhere. A non-numeric ``days``
-    (None, a stray string) is treated as unscoped, never a crash."""
+    A plain ``days <= 0`` (the default / 'all') returns ``""`` — no window filter — so
+    callers that don't scope a window behave exactly as before. A CALENDAR offset
+    (``date_windows.CalendarDayOffset``: Current month / Current year) anchors on the
+    account-clock DATE instead — ``DATEADD('day', -N, <account today>)``, the period's
+    first day at midnight — because its 0 legitimately means "today only" on the
+    period's first day (R1-063: it used to fall into the unscoped branch and read all
+    time), and a now-anchored offset cut the first day's hours before the current
+    time. Shared by the list, runtimes, runtime-history (creep), status-history
+    (failure recurrence), cycle-finish and task-evidence-fallback readers so the scope
+    bar means the same thing everywhere. A non-numeric ``days`` (None, a stray string)
+    is treated as unscoped, never a crash."""
     n = int(days) if isinstance(days, (int, float)) else 0
+    if getattr(days, "calendar_window", False) and n >= 0:
+        from app.data.common import account_today_sql
+        return f"{indent}AND {col} >= DATEADD('day', -{n}, {account_today_sql()})\n"
     if n <= 0:
         return ""
     return f"{indent}AND {col} >= DATEADD('day', -{n}, CURRENT_TIMESTAMP())\n"
@@ -242,7 +253,8 @@ def workflow_runtimes_scan(
     globally-newest run (back-compatible default). Per-workflow matters because each RUN_ID is
     ONE workflow's execution, so the single globally-latest run only ever shows one workflow —
     the picker lets the operator see any workflow's latest run, not just whichever finished last.
-    ``days`` (> 0) honors the scope-bar Window; ``0`` means all time. Returns one row per task:
+    ``days`` honors the scope-bar Window via ``_window_clause`` (a plain ``0`` means all time; a
+    calendar day-0 offset means today — operations._etl_window_suffix labels it). Returns one row per task:
     WORKFLOW_NAME, TASK_NAME, TASK_STATUS, the start/end window, and RUNTIME_SEC = end − start (a
     still-running task with a NULL end is measured to CURRENT_TIMESTAMP(), so a hung task
     surfaces), and RUN_ID (text; the same run on every row) so a drill can bind exactly the run
@@ -645,7 +657,10 @@ def recon_errors_scan(
         return ""
     return (
         "SELECT MTRC, FRQCY, VALUE_TYPE, RECON_MTRC_LAYER,\n"
-        "       SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR, LOAD_DTTM\n"
+        "       SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR, LOAD_DTTM,\n"
+        # window totals run before the LIMIT, so the panel's headline counts every error row and
+        # metric in the window, not the newest max_rows (PR-1 R1-066 / R1-137, uncapped-aggregate)
+        "       COUNT(*) OVER () AS TOTAL_ERRORS, COUNT(DISTINCT MTRC) OVER () AS TOTAL_METRICS\n"
         f"  FROM {tbl}\n"
         f"  WHERE LOAD_DTTM >= DATEADD('day', -{int(days)}, CURRENT_TIMESTAMP())\n"
         "  ORDER BY LOAD_DTTM DESC, MTRC\n"
@@ -663,6 +678,90 @@ def recon_errors_scan(
 RECON_RECURRENCE_LOOKBACK_DAYS = 90   # default (unscoped) — long enough for monthly cadences to recur
 MAX_RECON_RECURRENCE_ROWS = 300
 RECON_RECENT_K = 5                    # "recent" = broke in N of the last K cohort cycles
+# R1-057: 'broke in the LATEST cycle' is also anchored to the CALENDAR. The cohort axis ranks only
+# the dates that HAVE errors, so once every check of a frequency goes clean its newest error date
+# stays CYCLE_RN 1 forever and the last breaker read "still breaking" for weeks. A check counts as
+# latest only while its last break is within its cadence of account-today: (FRQCY LIKE pattern,
+# grace days) — DAILY allows a weekend gap. An unrecognised FRQCY (HOURLY, BIWEEKLY, AD-HOC, ...)
+# keeps the cohort-only rule.
+RECON_CADENCE_GRACE_DAYS = (("D%", 3), ("W%", 8), ("M%", 32), ("Q%", 93), ("Y%", 367),
+                            ("ANNUAL%", 367))
+
+
+def _recon_window_start(days: object) -> str:
+    """The recurrence scan's LOAD_DTTM lower bound. A plain ``days > 0`` keeps the trailing
+    now-anchored window; a CALENDAR offset (Current month / Current year) anchors on the account
+    DATE like _window_clause — so day 0 is TODAY, not the 90-day default (R1-063); anything else
+    (unscoped / 0 / junk) is the RECON_RECURRENCE_LOOKBACK_DAYS default."""
+    n = int(days) if isinstance(days, (int, float)) else 0
+    if getattr(days, "calendar_window", False) and n >= 0:
+        from app.data.common import account_today_sql
+        return f"DATEADD('day', -{n}, {account_today_sql()})"
+    return f"DATEADD('day', -{n if n > 0 else RECON_RECURRENCE_LOOKBACK_DAYS}, CURRENT_TIMESTAMP())"
+
+
+def calendar_window_phrase(days: object, *, today: date) -> str | None:
+    """How a CALENDAR-offset Window (``date_windows.CalendarDayOffset``) reads once _window_clause /
+    _recon_window_start anchor it on the account DATE: 'today' at offset 0 (the period's first day),
+    else 'since <Mon> <d>' -- the first day the read covers (today - N, at midnight). None for
+    anything else (a plain int is a trailing now-anchored window; the caller names it).
+
+    The ONE rule every ETL Window label uses (operations._etl_window_suffix and recon_window_phrase):
+    the v4.606 holistic review found the runtimes label saying 'since Sep 1' while the recon
+    recurrence panel called the same since-the-1st read 'in the last 9 days'. ``today`` is the
+    ACCOUNT clock's date (``formulas.account_today``), passed in so this stays pure."""
+    if not getattr(days, "calendar_window", False):
+        return None
+    n = int(days) if isinstance(days, (int, float)) else 0
+    if n < 0:
+        return None
+    if n == 0:
+        return "today"
+    start = today - timedelta(days=n)
+    return f"since {start:%b} {start.day}"
+
+
+def recon_window_phrase(days: object, *, today: date | None = None) -> str:
+    """How the recurrence panel names the window recon_recurrence_scan actually read (R1-063): a
+    calendar offset by calendar_window_phrase ('today' on the period's first day, else 'since <first
+    day>' -- never 'in the last N days' for a read that starts on the 1st), a plain N as 'in the
+    last N days', anything else as the 90-day default _recon_window_start falls back to. ``today``
+    (the account date) is only needed for a mid-period calendar offset; the page passes it."""
+    if getattr(days, "calendar_window", False):
+        if today is None:
+            from app.logic.formulas import account_today
+            today = account_today()
+        phrase = calendar_window_phrase(days, today=today)
+        if phrase is not None:
+            return phrase
+    n = int(days) if isinstance(days, (int, float)) else 0
+    return f"in the last {n if n > 0 else RECON_RECURRENCE_LOOKBACK_DAYS} days"
+
+
+def _recon_cadence_grace_sql(col: str) -> str:
+    """CASE over the frequency name -> grace days (NULL for an unrecognised FRQCY)."""
+    arms = "".join(f" WHEN UPPER(TRIM({col})) LIKE '{p}' THEN {n}" for p, n in RECON_CADENCE_GRACE_DAYS)
+    return f"CASE{arms} END"
+
+
+def recon_tier_predicates(alias: str = "r") -> tuple[str, str]:
+    """(CHRONIC, NEW) as SQL predicates over a recon_recurrence_scan row -- the SQL twin of
+    ``app.logic.insights.recon_recurrence``'s tier ladder, built from the SAME thresholds, so the
+    scan can total each tier before its LIMIT (PR-1 R1-137). COALESCE(..., 0) mirrors the
+    classifier's ``fillna(0)``; NEW excludes CHRONIC as the ladder's ``elif`` does. Pure.
+    tests/test_ops_c01_p606.py evaluates both against the classifier row by row."""
+    from app.logic.insights import RECON_CHRONIC_PCT, RECON_EMERGING_MAX, RECON_MIN_CYCLES
+
+    a = alias
+    pct, broken = f"COALESCE({a}.RECURRENCE_PCT, 0)", f"COALESCE({a}.BROKEN_CYCLES, 0)"
+    total, recent = f"COALESCE({a}.TOTAL_ERROR_CYCLES, 0)", f"COALESCE({a}.RECENT_BROKEN, 0)"
+    _chronic_min = int(RECON_MIN_CYCLES)
+    recurs = (f"{pct} >= {float(RECON_CHRONIC_PCT)} AND {broken} >= {_chronic_min}"
+              f" AND {total} >= {_chronic_min}")
+    chronic = f"{a}.BROKE_LATEST_CYCLE AND {recurs}"
+    new = (f"{a}.BROKE_LATEST_CYCLE AND NOT ({recurs})"
+           f" AND {broken} <= {int(RECON_EMERGING_MAX)} AND {recent} >= {broken}")
+    return chronic, new
 
 
 def recon_recurrence_scan(
@@ -679,6 +778,7 @@ def recon_recurrence_scan(
     cadences reach several cohort cycles. One-row-per-check output, so ORDER BY + LIMIT truncate
     deterministically (no series to bisect). Fail-closed on a bad FQN. Pure: bounded, no Streamlit."""
     from app.core.sqlsafe import safe_identifier
+    from app.data.common import account_today_sql
 
     fqn = str(recon_fqn or "").strip()
     if not fqn:
@@ -687,8 +787,8 @@ def recon_recurrence_scan(
         tbl = safe_identifier(fqn, allow_qualified=True)
     except ValueError:
         return ""
-    _d = int(days) if isinstance(days, (int, float)) and int(days) > 0 else RECON_RECURRENCE_LOOKBACK_DAYS
     _k = int(RECON_RECENT_K)
+    _since = f"DATEDIFF('day', a.LAST_BROKEN_ON, {account_today_sql()})"
     return (
         # COALESCE all three NULLABLE grain columns to '(unknown)' BEFORE any GROUP BY / equijoin —
         # a NULL grain both splits into an uncomparable pool and fails the NULL=NULL joins below.
@@ -700,7 +800,7 @@ def recon_recurrence_scan(
         "         SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR,\n"
         "         CAST(LOAD_DTTM AS DATE) AS CYCLE_DATE, LOAD_DTTM\n"
         f"  FROM {tbl}\n"
-        f"  WHERE LOAD_DTTM >= DATEADD('day', -{_d}, CURRENT_TIMESTAMP())\n"
+        f"  WHERE LOAD_DTTM >= {_recon_window_start(days)}\n"
         "    AND MTRC IS NOT NULL AND LOAD_DTTM IS NOT NULL\n"
         "),\n"
         # per-FRQCY cohort cycle sequence: newest cohort cycle = CYCLE_RN 1 (the denominator + recency axis)
@@ -735,18 +835,39 @@ def recon_recurrence_scan(
         "         MAX_BY(TARGET_ERROR, LOAD_DTTM) AS TARGET_ERROR\n"
         "  FROM errs GROUP BY 1, 2, 3, 4\n"
         ")\n"
+        # PR-1 R1-137: the per-check rows are wrapped so the banner's totals and the cap's order read
+        # the finished BROKE_LATEST_CYCLE column: TOTAL_CHECKS / ACTIVE_CHECKS_TOTAL are window
+        # totals over every check (evaluated before the LIMIT), and still-breaking checks rank first
+        # -- the Python tier ladder's order -- so the cap evicts resolved checks, never a
+        # low-recurrence break in the latest cycle (which used to sort last and fall off).
+        # CHRONIC_ / NEW_CHECKS_TOTAL total the tier ladder the same way: past the cap the still-
+        # breaking rows are ranked by recurrence, so a frame count drops the low-recurrence NEW ones.
+        "SELECT r.*,\n"
+        "       COUNT(*) OVER () AS TOTAL_CHECKS,\n"
+        "       SUM(IFF(r.BROKE_LATEST_CYCLE, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL,\n"
+        f"       SUM(CASE WHEN {recon_tier_predicates('r')[0]} THEN 1 ELSE 0 END) OVER () AS CHRONIC_CHECKS_TOTAL,\n"
+        f"       SUM(CASE WHEN {recon_tier_predicates('r')[1]} THEN 1 ELSE 0 END) OVER () AS NEW_CHECKS_TOTAL\n"
+        "FROM (\n"
         "SELECT a.MTRC, a.FRQCY, a.VALUE_TYPE, a.RECON_MTRC_LAYER,\n"
         "       a.BROKEN_CYCLES, f.TOTAL_ERROR_CYCLES,\n"
         "       ROUND(100.0 * a.BROKEN_CYCLES / NULLIF(f.TOTAL_ERROR_CYCLES, 0), 0) AS RECURRENCE_PCT,\n"
         f"       a.RECENT_BROKEN, LEAST({_k}, f.TOTAL_ERROR_CYCLES) AS RECENT_WINDOW,\n"
-        "       (a.NEWEST_BROKEN_RN = 1) AS BROKE_LATEST_CYCLE,\n"
+        # R1-057: newest cohort cycle AND within the frequency's cadence of account-today — a cohort
+        # that has gone quiet (every check clean since) no longer reads "still breaking"; it falls to
+        # RESOLVED through the classifier unchanged. Unrecognised FRQCY -> the cohort-only rule.
+        f"       {_since} AS DAYS_SINCE_LAST_BREAK,\n"
+        "       (a.NEWEST_BROKEN_RN = 1\n"
+        f"        AND COALESCE({_since} <= {_recon_cadence_grace_sql('a.FRQCY')}, TRUE))"
+        " AS BROKE_LATEST_CYCLE,\n"
         "       a.FIRST_BROKEN_ON, a.LAST_BROKEN_ON, x.ERROR_ROWS,\n"
         "       x.SOURCE_LAYER, x.TARGET_LAYER, x.SOURCE_ERROR, x.TARGET_ERROR\n"
         "  FROM agg a\n"
         "  JOIN freq f ON f.FRQCY = a.FRQCY\n"
         "  JOIN ctx  x ON x.MTRC = a.MTRC AND x.FRQCY = a.FRQCY\n"
         "               AND x.VALUE_TYPE = a.VALUE_TYPE AND x.RECON_MTRC_LAYER = a.RECON_MTRC_LAYER\n"
-        "  ORDER BY RECURRENCE_PCT DESC, a.RECENT_BROKEN DESC, a.BROKEN_CYCLES DESC, x.ERROR_ROWS DESC\n"
+        ") r\n"
+        "  ORDER BY r.BROKE_LATEST_CYCLE DESC, r.RECURRENCE_PCT DESC, r.RECENT_BROKEN DESC,\n"
+        "           r.BROKEN_CYCLES DESC, r.ERROR_ROWS DESC\n"
         f"  LIMIT {int(max_rows)}"
     )
 
@@ -763,8 +884,12 @@ def recon_recurrence_scan(
 # (SP_D_PLCY_TSACTN_STS_CANCLTN_RSN) never double-counts its credits onto its shorter
 # prefix (SP_D_PLCY_TSACTN). A query that matches NO task is kept in an '(unattributed)'
 # bucket so the panel can show coverage honestly: this is a best-effort attribution
-# model, not a billed invoice. Credits stay credits here (the module takes no dollar
-# rate, by design); the panel converts to USD with CREDIT_PRICE_USD.
+# model, not a billed invoice. R1-058: a RUN_ID is ONE workflow's execution, so that
+# bucket holds only the unmatched compute on the warehouses the run's own matched
+# statements ran on — not every other workload metered account-wide in the window
+# (Trexis, BI, other warehouses), which made Coverage structurally low and meaningless.
+# Credits stay credits here (the module takes no dollar rate, by design); the panel
+# converts to USD with CREDIT_PRICE_USD.
 MAX_COST_ROWS = 500
 # Literal recent-date floor to prune QAH/QH (latest-run path only). Sized to comfortably exceed the
 # max realistic gap between nightly runs (weekends/holidays/short outages) so the floor never narrows
@@ -793,7 +918,12 @@ def run_cost_attribution_scan(
     TASK_NAME, MATCHED_QUERIES, and CREDITS_ATTRIBUTED (the summed fair-share compute
     credits of every query charged to it), most expensive task first. Queries that ran
     in the run window but matched no task land in one '(unattributed)' row, so the caller
-    can show attributed-vs-total coverage rather than silently dropping them.
+    can show attributed-vs-total coverage rather than silently dropping them. That row is
+    scoped to the RUN's warehouses (every warehouse a matched statement ran on; credits are
+    kept per warehouse slice for it) — concurrent workflows and ad-hoc queries on those
+    warehouses stay in it, other warehouses' workloads do not (R1-058). When nothing matched
+    yet (metering lag, or task names that never appear in the text) the row keeps every
+    query in the window, so a 0% coverage still says so.
 
     The join: candidate queries are QUERY_ATTRIBUTION_HISTORY (credits) ⋈ QUERY_HISTORY
     (text) inside the run's [min start, max end] window; each is charged to the LONGEST
@@ -859,22 +989,24 @@ def run_cost_attribution_scan(
         # would collapse proc-driven cost to '(unattributed)'; rolling up to the CALL means the CALL
         # text (which carries the SP_/task name) is what gets matched. Credits = compute + query
         # acceleration, the app-wide credit definition. (Mirrors graph_sql / insights_sql.)
+        # R1-058: per (root, warehouse) slice, so the unattributed remainder can be narrowed to the
+        # run's own warehouses below; a root's slices still sum to its credits.
         "qah_agg AS (\n"
-        "  SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,\n"
+        "  SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID, WAREHOUSE_NAME,\n"
         "         SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0)\n"
         "             + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS\n"
         f"  FROM {_QAH_FQN}\n"
         "  WHERE START_TIME >= (SELECT RUN_START FROM bounds)\n"
         "    AND START_TIME <= (SELECT RUN_END FROM bounds)\n"
         f"{_floor}"
-        "  GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)\n"
+        "  GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID), WAREHOUSE_NAME\n"
         "  HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0)\n"
         "              + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0\n"
         "),\n"
         # attach the CALL's text (QUERY_HISTORY is one row per QUERY_ID) inside the same window;
         # RID = the CALL's own query id, so qh.QUERY_TEXT is the CALL (carrying the task name).
         "cand AS (\n"
-        "  SELECT a.RID AS QUERY_ID, a.CREDITS, qh.QUERY_TEXT, qh.START_TIME\n"
+        "  SELECT a.RID AS QUERY_ID, a.WAREHOUSE_NAME, a.CREDITS, qh.QUERY_TEXT, qh.START_TIME\n"
         "  FROM qah_agg a\n"
         f"  JOIN {_QH_FQN} qh ON qh.QUERY_ID = a.RID\n"
         "  WHERE qh.START_TIME >= (SELECT RUN_START FROM bounds)\n"
@@ -888,13 +1020,17 @@ def run_cost_attribution_scan(
         # it does not treat the '_' in SP_*/M_* task names as a single-char wildcard, so a
         # task name can't loosely match (and mis-charge) an unrelated query's text.
         "assigned AS (\n"
-        "  SELECT c.QUERY_ID, c.CREDITS, t.WORKFLOW_NAME, t.TASK_NAME,\n"
-        "         ROW_NUMBER() OVER (PARTITION BY c.QUERY_ID\n"
+        "  SELECT c.QUERY_ID, c.WAREHOUSE_NAME, c.CREDITS, t.WORKFLOW_NAME, t.TASK_NAME,\n"
+        "         ROW_NUMBER() OVER (PARTITION BY c.QUERY_ID, c.WAREHOUSE_NAME\n"
         "           ORDER BY LENGTH(t.TASK_NAME) DESC NULLS LAST) AS RN\n"
         "  FROM cand c\n"
         "  LEFT JOIN tasks t\n"
         "    ON c.START_TIME >= t.TASK_START_DTTM AND c.START_TIME <= t.TASK_END\n"
         "   AND CONTAINS(UPPER(c.QUERY_TEXT), UPPER(t.TASK_NAME))\n"
+        "),\n"
+        # R1-058: the run's own warehouses = every warehouse a MATCHED statement ran on.
+        "run_wh AS (\n"
+        "  SELECT DISTINCT WAREHOUSE_NAME FROM assigned WHERE RN = 1 AND TASK_NAME IS NOT NULL\n"
         ")\n"
         f"SELECT COALESCE(WORKFLOW_NAME, {unattr_wf}) AS WORKFLOW_NAME,\n"
         f"       COALESCE(TASK_NAME, {unattr_task}) AS TASK_NAME,\n"
@@ -902,6 +1038,11 @@ def run_cost_attribution_scan(
         "       ROUND(SUM(CREDITS), 4) AS CREDITS_ATTRIBUTED\n"
         "  FROM assigned\n"
         "  WHERE RN = 1\n"
+        # matched rows always; the unmatched remainder only on the run's warehouses (or all of it
+        # while nothing has matched, so an unmetered / misnamed run still reads 0% coverage)
+        "    AND (TASK_NAME IS NOT NULL\n"
+        "         OR WAREHOUSE_NAME IN (SELECT WAREHOUSE_NAME FROM run_wh)\n"
+        "         OR NOT EXISTS (SELECT 1 FROM run_wh))\n"
         "  GROUP BY 1, 2\n"
         "  ORDER BY CREDITS_ATTRIBUTED DESC NULLS LAST\n"
         f"  LIMIT {int(max_rows)}"

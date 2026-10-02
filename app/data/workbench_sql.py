@@ -9,6 +9,7 @@ from app.config import core_object
 from app.core.sqlsafe import clean_filter_text, contains_filter, sql_literal
 from app.data.common import account_today_sql, and_where, bounded_days, scope_window_where
 from app.logic.formulas import account_today
+from app.logic.workbench import TEAM_PLACEHOLDER_OWNERS
 
 
 def _entity_type(value: str) -> str:
@@ -27,12 +28,36 @@ _ACTION_TOTALS = f""",
            AS NO_PERIOD_TOTAL"""
 
 
+def _action_kpi_totals() -> str:
+    """R1-091/207: Action Center's headline KPIs as UNCAPPED window totals, computed before the LIMIT over
+    every matching row, with logic.workbench.action_summary's masks: ACTIVE = OPEN / IN_PROGRESS and not
+    deferred to a future account day (actions.deferred_mask); overdue = DUE_DATE before the account today;
+    a team placeholder owner (TEAM_PLACEHOLDER_OWNERS, blank included) is Unassigned. DEFERRED_TOTAL /
+    NEXT_RESUME_DATE carry mart_sql.action_queue's names, so actions.deferred_summary reads them as-is."""
+    today = account_today_sql()
+    parked = f"UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND DEFER_UNTIL > {today}"
+    active = f"UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND NOT COALESCE(DEFER_UNTIL > {today}, FALSE)"
+    placeholders = ", ".join(sql_literal(o) for o in sorted(TEAM_PLACEHOLDER_OWNERS))
+    return f""",
+       COUNT(*) OVER () AS KPI_MATCHING_TOTAL,
+       COUNT_IF({active}) OVER () AS KPI_OPEN_TOTAL,
+       COUNT_IF({active} AND UPPER(SEVERITY) IN ('CRITICAL', 'HIGH')) OVER () AS KPI_CRITICAL_HIGH_TOTAL,
+       COUNT_IF({active} AND DUE_DATE < {today}) OVER () AS KPI_OVERDUE_TOTAL,
+       COUNT_IF({active} AND UPPER(TRIM(COALESCE(OWNER, ''))) IN ({placeholders})) OVER ()
+           AS KPI_UNASSIGNED_TOTAL,
+       ROUND(SUM(IFF({active}, COALESCE(ESTIMATED_USD, 0), 0)) OVER (), 2) AS KPI_ESTIMATED_USD_TOTAL,
+       COUNT_IF({parked}) OVER () AS DEFERRED_TOTAL,
+       MIN(IFF({parked}, DEFER_UNTIL, NULL)) OVER () AS NEXT_RESUME_DATE"""
+
+
 def action_center(company: str = "ALL", include_closed: bool = False,
-                  limit: int = 500, *, with_totals: bool = False) -> str:
+                  limit: int = 500, *, with_totals: bool = False, with_kpi_totals: bool = False) -> str:
     """Extended ACTION_QUEUE shape installed by V074. ``with_totals`` (v4.597, Proof ▸ Pipeline) adds
     UNCAPPED window totals computed before the LIMIT -- the open count and the monthly run-rate of every
     matching item (MONTHLY as-is, ANNUAL / 12; the same buckets as decision.monthly_equivalent) -- so a
-    headline never sums the capped frame."""
+    headline never sums the capped frame. ``with_kpi_totals`` (R1-091/207, Action Center) adds the
+    uncapped KPI counts (_action_kpi_totals). With ``include_closed`` the open work sorts FIRST, so closed
+    CRITICAL / HIGH history never pushes open items past the cap."""
     cap = max(1, min(int(limit), 1000))
     clauses: list[str] = []
     if not include_closed:
@@ -41,14 +66,16 @@ def action_center(company: str = "ALL", include_closed: bool = False,
         clauses.append(
             f"(UPPER(COMPANY) IN ({sql_literal(str(company).upper())}, 'ALL'))"
         )
+    kpi_totals = _action_kpi_totals() if with_kpi_totals else ""
+    open_first = "IFF(UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS'), 0, 1), " if include_closed else ""
     return f"""
 SELECT ACTION_ID, CREATED_AT, COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS,
        DUE_DATE, DEFER_UNTIL, COMPLETED_AT, RESOLUTION_NOTE, SOURCE,
        SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, CONFIDENCE, PROOF_SQL,
-       ESTIMATED_USD, PERIOD, UPDATED_AT, UPDATED_BY{_ACTION_TOTALS if with_totals else ""}
+       ESTIMATED_USD, PERIOD, UPDATED_AT, UPDATED_BY{_ACTION_TOTALS if with_totals else ""}{kpi_totals}
 FROM {core_object("ACTION_QUEUE")}
 WHERE {and_where(*clauses)}
-ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+ORDER BY {open_first}CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
               WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 3 ELSE 4 END,
          IFF(DUE_DATE < CURRENT_DATE(), 0, 1),
          ESTIMATED_USD DESC NULLS LAST, CREATED_AT

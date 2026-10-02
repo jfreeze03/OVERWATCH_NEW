@@ -142,8 +142,10 @@ def test_objectives_paint_first_but_reuse_the_forecast():
     # the forecast panel returns its fc ({} on every early exit) — the r8 locks still hold
     panel = _body(ops, "_sla_finish_forecast_panel")
     assert "def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:" in ops
-    # every early exit says WHY (review r1): setup (x2) / empty / unavailable-or-empty; never a bare {}
-    assert panel.count('return {"_reason": "needs_setup"}') == 2 and 'return {"_reason": "empty"}' in panel
+    # every early exit says WHY (review r1): setup (x3) / empty / unavailable-or-empty; never a bare {}.
+    # PR-1 R1-059: the third setup exit is a zero-row all-time scan -- the starter workflow never ran,
+    # a misnamed anchor -- which used to return "empty" under a green verified-clean row.
+    assert panel.count('return {"_reason": "needs_setup"}') == 3 and 'return {"_reason": "empty"}' in panel
     assert 'return {"_reason": "unavailable" if not res.ok else "empty"}' in panel
     assert "return {}" not in panel and "return fc" in panel
     assert not re.search(r"\n\s+return\n", panel)                  # no bare return left
@@ -183,7 +185,10 @@ def test_objectives_panel_is_honest_about_absence_and_scope():
             "The custom SLO editor was retired (v4.597); any ACTIVE SLO_OBJECTIVES rows still alert and "
             "badge the Entity 360 watchlist.") in joined
     # review r1: the cap is disclosed plainly (no "conservative read" claim -- a stopped task can sit outside)
-    assert "judged over the 200 most-silent tasks only" in joined and "conservative" not in joined
+    # PR-1 R1-129: the read ranks by silence RELATIVE to each task's cadence, so a stopped fast-cadence
+    # task now leads it -- the caption names that order and drops the old "can fall outside" caveat
+    assert "judged over the 200 tasks most overdue against their own cadence only" in joined
+    assert "conservative" not in joined and "most-silent" not in joined
     contract = ops.split('"Pipeline SLA": {', 1)[1].split("},", 1)[0]
     assert "Dynamic-table refresh health honor Company/Database/Schema, as does " in contract
     # review r2: the builder clamps to 90 days, so the note and the tile help say so

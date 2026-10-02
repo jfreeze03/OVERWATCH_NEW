@@ -28,7 +28,8 @@ from datetime import datetime
 
 import pandas as pd
 
-from app.logic.formulas import humanize_duration, safe_float
+from app.logic.formulas import ACCOUNT_TIMEZONE, humanize_duration, safe_float
+from app.logic.wh_change import humanize_verdict_detail
 
 # Scoring weights + bands (uncalibrated starting points; the why-breakdown makes them auditable).
 _W_PROX, _W_MAG, _W_MATCH = 0.45, 0.35, 0.20
@@ -39,8 +40,21 @@ _BAND_HIGH, _BAND_MED = 0.6, 0.35
 
 
 def _to_dt(value) -> datetime | None:
+    """A timestamp as tz-NAIVE account (Central) wall time, or None.
+
+    The incident onset is INCIDENTS.STARTED_AT / DETECTED_AT (TIMESTAMP_NTZ, so naive account
+    time), but every candidate time is TIMESTAMP_LTZ — the registries' CHANGE_SEEN_AT,
+    TASK_HISTORY.QUERY_START_TIME, the grant CREATED_ON/DELETED_ON — which the connector hands
+    over tz-AWARE (and the adapters' string round-trip keeps the offset). Naive minus aware
+    raises TypeError in _proximity, which took down the whole Control Room incident drawer on
+    live data. Normalize both sides here (the quotas._account_ts pattern): an aware value
+    converts to ACCOUNT_TIMEZONE and drops its zone; a naive one is already account time."""
     ts = pd.to_datetime(value, errors="coerce")
-    return None if pd.isna(ts) else ts.to_pydatetime()
+    if pd.isna(ts):
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(ACCOUNT_TIMEZONE).tz_localize(None)
+    return ts.to_pydatetime()
 
 
 def _s(value) -> str:
@@ -98,7 +112,11 @@ def candidates_from_changes(df: pd.DataFrame | None) -> list[dict]:
         return out
     for _, r in df.iterrows():
         verdict = _first(r, "VERDICT").upper()
-        detail = _first(r, "DETAIL", "VERDICT_DETAIL")
+        # v4.606 holistic review (R1-124's twin): the change scans write VERDICT_DETAIL with raw
+        # seconds ('p95 1800.0s->2400.0s'); humanize BEFORE the magnitude_text slice below, so the
+        # Control Room's Magnitude reads '30m → 40m' like the Operations drill (and a cut never
+        # lands inside a raw token the regex would then miss).
+        detail = humanize_verdict_detail(_first(r, "DETAIL", "VERDICT_DETAIL"))
         mag = 1.0 if verdict == "REGRESSED" else (0.6 if detail else 0.35)
         entity = _first(r, "ENTITY", "WAREHOUSE_NAME", "OBJECT_NAME", "DATABASE_NAME", "TARGET")
         change = _first(r, "CHANGE", "CHANGE_DDL")
@@ -224,13 +242,15 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
     _has_entity_ctx = bool(str(entity_name).strip()) or bool(fams)
     scored: list[dict] = []
     for c in (candidates or []):
-        prox = _proximity(c.get("when"), onset_dt)
+        when = c.get("when")
+        # None for missing / NaN / NaT; naive account time otherwise (a hand-built candidate
+        # may carry a tz-aware `when` the adapters never saw, so normalize it here too).
+        when_dt = _to_dt(when)
+        prox = _proximity(when_dt, onset_dt)
         mag = max(0.0, min(safe_float(c.get("magnitude")), 1.0))
         match = _entity_match(c.get("entity"), entity_name, fams)
         score = _W_PROX * prox + _W_MAG * mag + _W_MATCH * match
         band = "HIGH" if score >= _BAND_HIGH else ("MEDIUM" if score >= _BAND_MED else "LOW")
-        when = c.get("when")
-        when_dt = _to_dt(when)               # None for missing / NaN / NaT
         _timing_unknown = when_dt is None
         # Timing gates causation: a change outside the plausible trigger window (proximity 0),
         # one that happened AFTER onset, OR one with NO timing at all cannot be a confident

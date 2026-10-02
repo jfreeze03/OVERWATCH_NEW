@@ -39,6 +39,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    served_days,
     styled_table,
 )
 
@@ -229,7 +230,11 @@ def _year_projection_strip(settings: dict) -> None:
     seasonality-aware month-end engines live on Overview."""
     cy = run(mart_sql.fact_daily_spend_year(), page=_PAGE, key="cy_projection",
              tier="recent", source="FACT_METERING_DAILY (calendar year)")
-    if not cy.usable():
+    # R1-161: a failed read (or Jan 1 before the first metering row lands) used to drop the strip with
+    # no trace; guard() renders the failure as unavailable (needs_setup for a missing install) and the
+    # empty year as the quiet no_data_yet caption.
+    if not guard(cy, f"No billed metering rows for {account_today().year} yet. The year strip fills "
+                     "in after the first daily metering load."):
         return
     cydf = cy.df.copy()
     cydf["DAY"] = pd.to_datetime(cydf["DAY"], errors="coerce").dt.date
@@ -329,12 +334,25 @@ def _rate_card_reconciliation(settings: dict) -> None:
         _compute_rows = _rs[_rs["USAGE_TYPE"].str.contains("COMPUTE", na=False)]
         if not _compute_rows.empty:
             contract_compute_rate = safe_float(_compute_rows.iloc[0].get("EFFECTIVE_RATE"))
-    if not org_m.usable():
+    # R1-165: only a true absence (an ungranted org view / an uninstalled fact) is a setup gap; a
+    # timeout or drift is a failed read with its error, and an ok-but-empty read is no data yet.
+    if not org_m.ok and is_setup_absence(org_m.error_kind):
         empty_state("needs_setup",
                     "Needs ORGANIZATION_USAGE visibility (the org accounts panel below "
                     "has the grant).")
-    elif not model_m.usable():
+    elif not org_m.ok:
+        empty_state("unavailable", "Org rate-card dollars (USAGE_IN_CURRENCY_DAILY) could not be read, so "
+                    "there is nothing to reconcile the app model against.", detail=org_m.error)
+    elif org_m.empty:
+        empty_state("no_data_yet", "No org rate-card rows for this account in the last 2 months "
+                    "(USAGE_IN_CURRENCY_DAILY lags up to 72h).")
+    elif not model_m.ok and is_setup_absence(model_m.error_kind):
         empty_state("needs_setup", "Needs the daily metering facts (V002) for the model side.")
+    elif not model_m.ok:
+        empty_state("unavailable", "The app model side (FACT_METERING_DAILY) could not be read.",
+                    detail=model_m.error)
+    elif model_m.empty:
+        empty_state("no_data_yet", "No FACT_METERING_DAILY rows in the last 70 days for the model side.")
     else:
         rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
         mdf = model_m.df.copy()
@@ -432,12 +450,21 @@ def _org_accounts_spend() -> None:
     )
     res = run(cost_sql.org_usage_in_currency(30), page=_PAGE, key="org_spend",
               tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY")
-    if not res.ok:
+    # R1-165: needs_setup only for a true absence; a timeout or drift is a failed read, and only the
+    # unavailable state renders the error (needs_setup has no detail expander).
+    if not res.ok and is_setup_absence(res.error_kind):
         empty_state(
             "needs_setup",
             "ORGANIZATION_USAGE is not visible to this role/account. Grant the "
             "ORGANIZATION_USAGE_VIEWER application role (or enable org views on this account) "
             "to light this up.",
+        )
+        return
+    if not res.ok:
+        empty_state(
+            "unavailable",
+            "Org accounts spend (USAGE_IN_CURRENCY_DAILY) could not be read; this is a failed read, "
+            "not a missing grant.",
             detail=res.error,   # r-ux: full error in the collapsed expander, not the message body
         )
         return
@@ -471,132 +498,31 @@ def _org_accounts_spend() -> None:
     result_caption(res)
 
 
-def _contract_tab(settings: dict) -> None:
-    _year_projection_strip(settings)
-    _rate_card_reconciliation(settings)
-    st.divider()
-    org_shown = _org_truth_panel()
-    _org_accounts_spend()
-    st.divider()
-    contract_credits = safe_float(settings.get("CONTRACT_CREDITS"))
-    start_s = str(settings.get("CONTRACT_START_DATE") or "").strip()
-    end_s = str(settings.get("CONTRACT_END_DATE") or "").strip()
-    if contract_credits <= 0 or not start_s or not end_s:
-        if org_shown:
-            st.caption(
-                "For credits-grain pacing and the steering levers below the balance, set "
-                "CONTRACT_CREDITS, CONTRACT_START_DATE and CONTRACT_END_DATE on the Admin page."
-            )
-        else:
-            empty_state(
-                "needs_setup",
-                "Contract pacing is not configured. Set CONTRACT_CREDITS, CONTRACT_START_DATE and "
-                "CONTRACT_END_DATE on the Admin page. Nothing is assumed."
-            )
-        return
-    if org_shown:
-        st.divider()
-    try:
-        start, end = date.fromisoformat(start_s), date.fromisoformat(end_s)
-    except ValueError:
-        st.error(f"Contract dates in SETTINGS are not YYYY-MM-DD: {start_s!r} / {end_s!r}.")
-        return
-    # r13 #7: facts first — the live reader rescans METERING_DAILY_HISTORY
-    # from contract start on every cold cache. mart_accept verifies the fact
-    # actually REACHES the contract start before trusting the sum.
-    res = run_mart_first(
-        mart_sql.fact_contract_consumed(start_s),
-        cost_sql.contract_consumed_credits(start_s),
-        page=_PAGE, key="contract_consumed",
-        mart_source="FACT_METERING_DAILY (contract window)",
-        live_source="ACCOUNT_USAGE.METERING_DAILY_HISTORY (coverage fallback)",
-        mart_accept=lambda df: (not df.empty and df.iloc[0].get("FACT_FIRST_DAY") is not None
-                                and str(pd.to_datetime(df.iloc[0]["FACT_FIRST_DAY"]).date()) <= start_s))
-    if not guard(res, "No metering rows since the contract start."):
-        return
-    consumed = safe_float(res.df.iloc[0].get("CREDITS_BILLED_TO_DATE"))
-    # C7 coverage: the mart leg is gated upstream (FACT_FIRST_DAY <= start), so it
-    # is always complete. The live fallback only sees ~365d of METERING_DAILY_HISTORY;
-    # when its earliest in-window day is AFTER the contract start, consumed is a
-    # FLOOR, not the true total, and pace / projected-term read low. Detect the gap
-    # from whichever leg served (mart: FACT_FIRST_DAY, live: FIRST_DAY) and label it.
-    _row = res.df.iloc[0]
-    # Both legs expose an UNFILTERED earliest retained day (mart: FACT_FIRST_DAY,
-    # live: SOURCE_FIRST_DAY) — the retention floor, not a contract-filtered MIN —
-    # so a quiet-start contract is not misread as a coverage gap (r14 #8).
-    _first_raw = (_row.get("FACT_FIRST_DAY") if "FACT_FIRST_DAY" in res.df.columns
-                  else _row.get("SOURCE_FIRST_DAY"))
-    coverage_from = None
-    _fd = pd.to_datetime(_first_raw, errors="coerce")
-    if pd.notna(_fd) and _fd.date() > start:
-        coverage_from = _fd.date()
-    # N11: project the term on the SAME trailing-30d burn the renewal planner (and
-    # the year strip) use, so the prominent "Projected term total" can't disagree
-    # with the planner below. Excludes today's partial day (N1); reuses the
-    # planner's cache key so it costs no extra query.
-    _burn = daily_spend_wide(_PAGE)   # PERF #46: shared wide read; sliced to 30d at use
-    rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
-    # C4: the burn frame is read ONCE here and shared by everything below it —
-    # the projected term, the steering gap and the renewal planner. Hoisting the
-    # blended $/credit out of the planner is the point: the gap used to be priced
-    # at the flat compute rate while the planner beside it used the blended rate,
-    # so one overage carried two dollar values on the same screen.
-    _burn_df = _whole_day_rows(daily_spend_last_n(_burn.df, 30).copy()) if _burn.usable() else None
-    eff_rate = _blended_rate(_burn_df, rate_now, ai_rate) if _burn_df is not None else rate_now
-    _trailing_daily = None
-    # #36: only when a COMPLETE day exists — a mean over an empty whole-day frame
-    # is NaN, and projecting a term from it would be projecting from nothing.
-    if _burn_df is not None and not _burn_df.empty and "CREDITS_BILLED" in _burn_df.columns:
-        _trailing_daily = float(pd.to_numeric(_burn_df["CREDITS_BILLED"], errors="coerce").fillna(0).mean())
-    pace = contract_pace(consumed, contract_credits, start, end, account_today(),
-                         trailing_daily_credits=_trailing_daily)
-    if not pace.get("ok"):
-        st.info(str(pace.get("reason")))
-        return
-    if coverage_from:
-        st.warning(
-            f"Retained metering history only reaches {coverage_from.isoformat()}, after the "
-            f"contract start ({start.isoformat()}). **Consumed is a floor** — pace and "
-            "projected-term understate. "
-            + ("Use the org REMAINING_BALANCE panel above for the dollar truth."
-               if org_shown else "Backfill FACT_METERING_DAILY to the contract start for exact pacing.")
-        )
-    _floor = " (floor — see coverage note)" if coverage_from else ""
+def _term_ended_panel(consumed: float, contract_credits: float, start: date, end: date, floor_note: str) -> None:
+    """R1-159: the configured term is over (today >= CONTRACT_END_DATE, which is EXCLUSIVE -- the same
+    clock forecast.contract_pace runs). The consumed read is bounded to [start, end), so this is the
+    FINAL in-term figure; pace, the term projection and the steering levers mean nothing past the
+    term, so they are withheld instead of painting a post-term overage that never happened."""
+    share = consumed / contract_credits * 100 if contract_credits > 0 else 0.0
+    delta = consumed - contract_credits
     kpi_row([
-        {"label": "Consumed", "value": f"{consumed:,.0f} cr",
-         "delta": f"{pace['consumed_share']:.1f}% of contract",
-         # r6-bug14: share-of-contract is informational, not a good/bad move — a
-         # near-exhaustion 95% must NOT render as a reassuring green up-arrow.
-         "delta_color": "off",
-         "help": f"Billed credits since contract start.{_floor}"},
-        {"label": "Contract clock", "value": f"{pace['time_share']:.1f}%", "help": f"{pace['days_remaining']} days remaining."},
-        {"label": "Pace", "value": f"{pace['pace_ratio']:.2f}x",
-         "delta": "burning fast" if pace["pace_ratio"] > 1 else "under pace",
-         "delta_color": "inverse" if pace["pace_ratio"] > 1 else "normal"},
-        {"label": "Projected term total", "value": f"{pace['projected_term_credits']:,.0f} cr",
-         "delta": (f"+{pace['projected_overage_credits']:,.0f} cr overage" if pace["projected_overage_credits"] > 0 else "within contract"),
-         "delta_color": "inverse" if pace["projected_overage_credits"] > 0 else "normal",
-         # v4.461 P2: the decision number gets a severity stripe on the hard fact
-         # (projected to exceed the contract), so it stands out of the pace row.
-         "severity": "bad" if pace["projected_overage_credits"] > 0 else "",
-         "help": f"Booked consumption + remaining days at the {pace.get('basis', 'trailing-30d burn')} — "
-                 "the same basis as the renewal planner below and the year projection above "
-                 "(no longer the optimistic lifetime average)."},
+        {"label": "Final term consumption", "value": f"{consumed:,.0f} cr",
+         "delta": f"{share:.1f}% of contract", "delta_color": "off",
+         "help": f"Billed credits from {start.isoformat()} up to the term end {end.isoformat()} (the end "
+                 f"day itself is outside the term, as on the contract clock).{floor_note}"},
+        {"label": "Term result",
+         "value": f"+{delta:,.0f} cr over" if delta > 0 else f"{-delta:,.0f} cr unused",
+         "delta": f"vs {contract_credits:,.0f} cr committed", "delta_color": "off"},
     ])
-    result_caption(res, note="Billed credits (cloud-services adjustment applied) since contract start.")
-    # C8: a Snowflake capacity commitment is a DOLLAR balance drawn by compute,
-    # storage AND transfer; this pacing counts credit-billed services only
-    # (compute + serverless + AI). Storage and data-transfer dollars draw the same
-    # commitment and are not in these credits, so the real balance paces to exhaust
-    # earlier than shown. The org REMAINING_BALANCE panel above is the dollar truth.
-    st.caption(
-        "Credits burn only — storage and data-transfer dollars draw the same "
-        + ("commitment but are not counted here; the org balance panel above is the dollar truth."
-           if org_shown
-           else "commitment but are not counted here. Grant ORGANIZATION_USAGE to see the dollar balance.")
-    )
+    empty_state("needs_setup",
+                f"The contract term ({start.isoformat()} to {end.isoformat()}) is over, so pace, the term "
+                "projection and the steering levers are withheld. Set the new term's CONTRACT_CREDITS, "
+                "CONTRACT_START_DATE and CONTRACT_END_DATE on the Admin page to resume pacing.")
 
+
+def _steering_panel(pace: dict, contract_credits: float, rate_now: float, eff_rate: float) -> None:
+    """Steering to commit: the gap to the contract and how far the named levers go (a running term only,
+    R1-159 -- once the term is over there is nothing left to steer)."""
     st.markdown("**Steering to commit — the levers, in dollars per day**")
     # r13 #6: mart-first steering — the live idle join and pattern
     # allocation were the last Account Usage scans on this section's
@@ -604,7 +530,7 @@ def _contract_tab(settings: dict) -> None:
     idle_lv = run_mart_first(
         mart27_sql.eff_idle_analysis(30, "ALL"),
         insights_sql.idle_warehouse_analysis(30, "ALL"),
-        page=_PAGE, key="steer_idle",
+        page=_PAGE, key="steer_idle", days=_STEER_WINDOW_DAYS,
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (idle contract)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     pats_lv = run_mart_first(
@@ -625,7 +551,12 @@ def _contract_tab(settings: dict) -> None:
             idle_lv.df,
             _steer_whs.df if _steer_whs.ok and not _steer_whs.empty else pd.DataFrame(),
         )
-        adv_st = idle_advisor(_steer_idle, rate_now, _STEER_WINDOW_DAYS)
+        # R1-021: divide by the days the idle read actually COVERS (eff_idle_analysis emits
+        # COVERED_DAYS, r34), not the fixed ask -- a loader-lagged efficiency mart holding 27 of 30
+        # days would otherwise spread 27 days of idle over 30 and understate this lever ~10% against
+        # the Optimize page's figure for the same warehouse. Read it off idle_lv (the run_mart_first
+        # result), not the settings-joined copy.
+        adv_st = idle_advisor(_steer_idle, rate_now, served_days(idle_lv, _STEER_WINDOW_DAYS))
         # Gross flagged idle, already-tuned residuals, and unknown settings are
         # measured waste, but they are not executable contract-steering levers.
         _actionable = adv_st[adv_st["ACTIONABLE"]]
@@ -673,6 +604,149 @@ def _contract_tab(settings: dict) -> None:
             "the renewal planner uses. Estimates, not promises — the savings verifier proves "
             "them after the fact."))
 
+
+def _contract_tab(settings: dict) -> None:
+    _year_projection_strip(settings)
+    _rate_card_reconciliation(settings)
+    st.divider()
+    org_shown = _org_truth_panel()
+    _org_accounts_spend()
+    st.divider()
+    contract_credits = safe_float(settings.get("CONTRACT_CREDITS"))
+    start_s = str(settings.get("CONTRACT_START_DATE") or "").strip()
+    end_s = str(settings.get("CONTRACT_END_DATE") or "").strip()
+    if contract_credits <= 0 or not start_s or not end_s:
+        if org_shown:
+            st.caption(
+                "For credits-grain pacing and the steering levers below the balance, set "
+                "CONTRACT_CREDITS, CONTRACT_START_DATE and CONTRACT_END_DATE on the Admin page."
+            )
+        else:
+            empty_state(
+                "needs_setup",
+                "Contract pacing is not configured. Set CONTRACT_CREDITS, CONTRACT_START_DATE and "
+                "CONTRACT_END_DATE on the Admin page. Nothing is assumed."
+            )
+        return
+    if org_shown:
+        st.divider()
+    try:
+        start, end = date.fromisoformat(start_s), date.fromisoformat(end_s)
+    except ValueError:
+        st.error(f"Contract dates in SETTINGS are not YYYY-MM-DD: {start_s!r} / {end_s!r}.")
+        return
+    # r13 #7: facts first — the live reader rescans METERING_DAILY_HISTORY
+    # from contract start on every cold cache. mart_accept verifies the fact
+    # actually REACHES the contract start before trusting the sum.
+    # R1-159: both reads are bounded to the TERM, [start, end) — the same end-exclusive clock
+    # contract_pace runs — so a term that ended before SETTINGS was rolled no longer keeps counting
+    # post-term credits into the consumed total (and a red overage that never happened in the term).
+    res = run_mart_first(
+        mart_sql.fact_contract_consumed(start_s, end.isoformat()),
+        cost_sql.contract_consumed_credits(start_s, end.isoformat()),
+        page=_PAGE, key="contract_consumed",
+        mart_source="FACT_METERING_DAILY (contract window)",
+        live_source="ACCOUNT_USAGE.METERING_DAILY_HISTORY (coverage fallback)",
+        mart_accept=lambda df: (not df.empty and df.iloc[0].get("FACT_FIRST_DAY") is not None
+                                and str(pd.to_datetime(df.iloc[0]["FACT_FIRST_DAY"]).date()) <= start_s))
+    if not guard(res, "No metering rows since the contract start."):
+        return
+    consumed = safe_float(res.df.iloc[0].get("CREDITS_BILLED_TO_DATE"))
+    # C7 coverage: the mart leg is gated upstream (FACT_FIRST_DAY <= start), so it
+    # is always complete. The live fallback only sees ~365d of METERING_DAILY_HISTORY;
+    # when its earliest in-window day is AFTER the contract start, consumed is a
+    # FLOOR, not the true total, and pace / projected-term read low. Detect the gap
+    # from whichever leg served (mart: FACT_FIRST_DAY, live: FIRST_DAY) and label it.
+    _row = res.df.iloc[0]
+    # Both legs expose an UNFILTERED earliest retained day (mart: FACT_FIRST_DAY,
+    # live: SOURCE_FIRST_DAY) — the retention floor, not a contract-filtered MIN —
+    # so a quiet-start contract is not misread as a coverage gap (r14 #8).
+    _first_raw = (_row.get("FACT_FIRST_DAY") if "FACT_FIRST_DAY" in res.df.columns
+                  else _row.get("SOURCE_FIRST_DAY"))
+    coverage_from = None
+    _fd = pd.to_datetime(_first_raw, errors="coerce")
+    if pd.notna(_fd) and _fd.date() > start:
+        coverage_from = _fd.date()
+    # N11: project the term on the SAME trailing-30d burn the renewal planner (and
+    # the year strip) use, so the prominent "Projected term total" can't disagree
+    # with the planner below. Excludes today's partial day (N1); reuses the
+    # planner's cache key so it costs no extra query.
+    _burn = daily_spend_wide(_PAGE)   # PERF #46: shared wide read; sliced to 30d at use
+    rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
+    # C4: the burn frame is read ONCE here and shared by everything below it —
+    # the projected term, the steering gap and the renewal planner. Hoisting the
+    # blended $/credit out of the planner is the point: the gap used to be priced
+    # at the flat compute rate while the planner beside it used the blended rate,
+    # so one overage carried two dollar values on the same screen.
+    _burn_df = _whole_day_rows(daily_spend_last_n(_burn.df, 30).copy()) if _burn.usable() else None
+    eff_rate = _blended_rate(_burn_df, rate_now, ai_rate) if _burn_df is not None else rate_now
+    _trailing_daily = None
+    # #36: only when a COMPLETE day exists — a mean over an empty whole-day frame
+    # is NaN, and projecting a term from it would be projecting from nothing.
+    if _burn_df is not None and not _burn_df.empty and "CREDITS_BILLED" in _burn_df.columns:
+        _trailing_daily = float(pd.to_numeric(_burn_df["CREDITS_BILLED"], errors="coerce").fillna(0).mean())
+    pace = contract_pace(consumed, contract_credits, start, end, account_today(),
+                         trailing_daily_credits=_trailing_daily)
+    if not pace.get("ok"):
+        st.info(str(pace.get("reason")))
+        return
+    # R1-159: CONTRACT_END_DATE is exclusive (contract_pace's term_days = end - start), so on/after it
+    # the term is over: pace, the projection and the steering levers no longer apply.
+    _term_ended = account_today() >= end
+    if coverage_from:
+        st.warning(
+            f"Retained metering history only reaches {coverage_from.isoformat()}, after the "
+            f"contract start ({start.isoformat()}). **Consumed is a floor** — pace and "
+            "projected-term understate. "
+            + ("Use the org REMAINING_BALANCE panel above for the dollar truth."
+               if org_shown else "Backfill FACT_METERING_DAILY to the contract start for exact pacing.")
+        )
+    _floor = " (floor — see coverage note)" if coverage_from else ""
+    if _term_ended:
+        _term_ended_panel(consumed, contract_credits, start, end, _floor)
+    else:
+        kpi_row([
+            {"label": "Consumed", "value": f"{consumed:,.0f} cr",
+             "delta": f"{pace['consumed_share']:.1f}% of contract",
+             # r6-bug14: share-of-contract is informational, not a good/bad move — a
+             # near-exhaustion 95% must NOT render as a reassuring green up-arrow.
+             "delta_color": "off",
+             "help": f"Billed credits since contract start.{_floor}"},
+            {"label": "Contract clock", "value": f"{pace['time_share']:.1f}%", "help": f"{pace['days_remaining']} days remaining."},
+            {"label": "Pace", "value": f"{pace['pace_ratio']:.2f}x",
+             "delta": "burning fast" if pace["pace_ratio"] > 1 else "under pace",
+             "delta_color": "inverse" if pace["pace_ratio"] > 1 else "normal"},
+            {"label": "Projected term total", "value": f"{pace['projected_term_credits']:,.0f} cr",
+             "delta": (f"+{pace['projected_overage_credits']:,.0f} cr overage" if pace["projected_overage_credits"] > 0 else "within contract"),
+             "delta_color": "inverse" if pace["projected_overage_credits"] > 0 else "normal",
+             # v4.461 P2: the decision number gets a severity stripe on the hard fact
+             # (projected to exceed the contract), so it stands out of the pace row.
+             "severity": "bad" if pace["projected_overage_credits"] > 0 else "",
+             "help": f"Booked consumption + remaining days at the {pace.get('basis', 'trailing-30d burn')} — "
+                     "the same basis as the renewal planner below and the year projection above "
+                     "(no longer the optimistic lifetime average)."},
+        ])
+    # R1-159: once the term is over the bounded read is the final in-term total, not credits to date.
+    result_caption(res, note=(
+        "Billed credits (cloud-services adjustment applied) from the contract start up to the term end "
+        f"{end.isoformat()} (end day excluded)." if _term_ended else
+        "Billed credits (cloud-services adjustment applied) since contract start."))
+    # C8: a Snowflake capacity commitment is a DOLLAR balance drawn by compute,
+    # storage AND transfer; this pacing counts credit-billed services only
+    # (compute + serverless + AI). Storage and data-transfer dollars draw the same
+    # commitment and are not in these credits, so the real balance paces to exhaust
+    # earlier than shown. The org REMAINING_BALANCE panel above is the dollar truth.
+    st.caption(
+        "Credits burn only — storage and data-transfer dollars draw the same "
+        + ("commitment but are not counted here; the org balance panel above is the dollar truth."
+           if org_shown
+           else "commitment but are not counted here. Grant ORGANIZATION_USAGE to see the dollar balance.")
+    )
+
+    if not _term_ended:
+        _steering_panel(pace, contract_credits, rate_now, eff_rate)
+
     st.divider()
     st.markdown("**Renewal planner (what-if)**")
     panel_help(
@@ -703,7 +777,9 @@ def _contract_tab(settings: dict) -> None:
             )
             return
         daily_usd = float(pd.to_numeric(bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean()) * eff_rate
-        remaining_usd = max(0.0, (contract_credits - consumed) * eff_rate)
+        # R1-159: past the term there is no current-contract balance to exhaust -- the scenarios
+        # only size the next term (term consumption + recommended commit).
+        remaining_usd = 0.0 if _term_ended else max(0.0, (contract_credits - consumed) * eff_rate)
         col1, col2, col3 = st.columns(3)
         term_months = col1.slider("Next term (months)", 12, 36, 12, step=6, key="plan_term")
         buffer_pct = col2.slider("Safety buffer %", 0, 40, 15, step=5, key="plan_buffer")
@@ -714,7 +790,10 @@ def _contract_tab(settings: dict) -> None:
                                                "exhaustion date.")
         daily_usd_adj = daily_usd + float(extra_credits) * eff_rate
         rows = contract_planner.plan_scenarios(daily_usd_adj, term_months, buffer_pct, remaining_usd)
-        styled_table(pd.DataFrame(rows),  # rec21
+        _plan_df = pd.DataFrame(rows)
+        if _term_ended:
+            _plan_df = _plan_df.drop(columns=["CURRENT_CONTRACT_EXHAUSTED"], errors="ignore")
+        styled_table(_plan_df,  # rec21
                      column_config={
                          "TERM_CONSUMPTION_USD": st.column_config.NumberColumn("Term consumption", format="$%.0f"),
                          "RECOMMENDED_COMMIT_USD": st.column_config.NumberColumn("Recommended commit", format="$%.0f"),
@@ -734,8 +813,11 @@ def _contract_tab(settings: dict) -> None:
                    f"blended (compute ${rate_now}, AI ${ai_rate})"
                    + (f" + ${float(extra_credits) * eff_rate:,.0f}/day hypothetical load"
                       if extra_credits else "") + ". "
-                   "Exhaustion here is CREDITS-based: the current contract's remaining "
-                   f"{contract_credits - consumed:,.0f} credits (SETTINGS) at that rate."
+                   + ("The current term is over, so there is no remaining balance to exhaust; the "
+                      "scenarios size the next term."
+                      if _term_ended else
+                      "Exhaustion here is CREDITS-based: the current contract's remaining "
+                      f"{contract_credits - consumed:,.0f} credits (SETTINGS) at that rate.")
                    + (" The 'Runway at this burn' KPI above is the BALANCE-based answer "
                       "(org billing dollars, which also carry storage and transfer) — it "
                       "normally lands earlier, and it is the one to trust. Brief, Overview and the "

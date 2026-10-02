@@ -88,7 +88,18 @@ Re-run snowflake/roles.sql (new V075 objects plus ALL + FUTURE grants).
 
 Run snowflake/backfill_365.sql: a year of daily facts, 90 days of the
 QUERY_HISTORY-derived marts (the extract fills first — V041), platform
-score inputs. A few minutes.
+score inputs, and 180 days of security login/change facts (the loader's
+maximum: the new-network panel serves from the fact only when it holds the
+window plus a 90-day baseline). A few minutes. It suspends TASK_LOAD_HOURLY
+around the extract-fed loads; each load is guarded and keeps the loader's own verdict,
+so an error or a failure verdict (`MARTS WITH ERRORS`,
+`extract committed: false`) shows as a `FAILED:` row. The last pane must read 0 in both
+`BACKFILL_CALLS_FAILED` and `LOADER_ARMS_FAILED` (arm failures a loader
+logs without failing the CALL); `FAILURES` names each one. **If the
+worksheet stops before the end** (a timeout or Stop), run the
+`ALTER TASK ... RESUME` and `SYSTEM$TASK_DEPENDENTS_ENABLE` statements just
+above the file's final verify SELECT, or snowflake/loader_chain_check.sql
+step 0, or the hourly graph stays suspended.
 
 ## 6. Validate
 

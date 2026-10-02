@@ -10,6 +10,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.config import core_object
+from app.core.errors import safe_page
 from app.core.query import execute_statement, run, run_batch, run_batch_mixed
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
@@ -18,7 +19,7 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic import contract_planner
 from app.logic.directory import resolve_display
 from app.logic.formulas import contract_runway, format_usd, humanize_duration, md_dollars, safe_float
-from app.logic.verdict import Signal, page_verdict
+from app.logic.verdict import contract_runway_clause, contract_runway_signal, page_verdict
 from app.ui.components import (
     alarm_health,
     empty_state,
@@ -73,17 +74,26 @@ def _unmapped_mapper(df, is_operator: bool) -> None:
     an operator applies it in place, otherwise it's copy-paste for Snowsight. The
     next loader pass re-stamps go-forward facts — history needs a backfill re-run."""
     with st.expander("Map an entity to a company"):
-        entities = [str(e) for e in df["ENTITY"].dropna().tolist() if str(e).strip()]
-        if not entities:
+        # R1-146: pick a ROW, not a name. The same name can be UNKNOWN under two grains (a FIVETRAN
+        # user and a FIVETRAN database; an ANALYTICS warehouse and database): the old name picker
+        # listed it twice, Streamlit resolves duplicate options by value (the second entry cannot be
+        # selected), and a name lookup took the first row in GRAIN order -- so the credit-bearing
+        # WAREHOUSE (or USER) row could never be mapped and Apply wrote a DATABASE scope instead.
+        _rows = df[df["ENTITY"].notna() & df["ENTITY"].astype(str).str.strip().ne("")].reset_index(drop=True)
+        if _rows.empty:
             st.caption("Nothing to map in this window.")
             return
         c1, c2 = st.columns([3, 2])
         with c1:
-            pick = st.selectbox("Entity", entities, key="unmap_entity")
+            _idx = st.selectbox(
+                "Entity", list(range(len(_rows))), key="unmap_entity_row",
+                format_func=lambda i: f"{_rows.at[i, 'ENTITY']} · {str(_rows.at[i, 'GRAIN']).title()}")
         with c2:
             company_choice = st.selectbox("Company", ["ALFA", "Trexis"], key="unmap_company")
-        _row = df[df["ENTITY"].astype(str) == str(pick)]
-        grain = str(_row.iloc[0]["GRAIN"]).upper() if len(_row) else "WAREHOUSE"
+        # a sticky index can outlive a window change that shrinks the worklist
+        _row = _rows.iloc[int(_idx) if _idx is not None and 0 <= int(_idx) < len(_rows) else 0]
+        pick = str(_row["ENTITY"])
+        grain = str(_row["GRAIN"]).upper()
         scope_type = _SCOPE_FOR_GRAIN.get(grain, "USER_OVERRIDE")
         pattern = str(pick).upper()
         note = f"Classified via OVERWATCH ({grain})"
@@ -103,15 +113,22 @@ def _unmapped_mapper(df, is_operator: bool) -> None:
             f"Maps **{pick}** ({scope_type}) → **{company_choice}**. Go-forward facts stamp "
             "immediately; the nightly reconcile re-stamps the trailing 3 days. Older history "
             "keeps its original stamp until a full loader backfill re-run.")
-        if is_operator and st.button("Apply mapping", key="unmap_apply") and write_gate_open(f"unmap_apply:{pick}:{company_choice}"):
+        # the latch key and the receipt carry the grain too: a same-name mapping at another grain is a
+        # genuinely different write (C48 scoped key), and the toast names which one ran
+        if is_operator and st.button("Apply mapping", key="unmap_apply") and write_gate_open(
+                f"unmap_apply:{scope_type}:{pick}:{company_choice}"):
             ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
-            stamp_write(f"unmap_apply:{pick}:{company_choice}", ok)  # C48
-            notify(ok, msg if not ok else f"Mapped {pick} → {company_choice}.")
+            stamp_write(f"unmap_apply:{scope_type}:{pick}:{company_choice}", ok)  # C48
+            notify(ok, msg if not ok else f"Mapped {pick} ({scope_type}) → {company_choice}.")
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS — in-app "
                        "execution needs an admin profile.")
 
 
+# The page boundary every renderer in main._RENDERERS carries (tests/test_page_boundaries.py): the
+# V028 split (6329789e, cost.py -> cost_parts/) dropped it, so a Python-side bug on this page showed
+# Streamlit's raw traceback and never reached record_error / APP_ERROR_LOG.
+@safe_page(_PAGE)
 def render() -> None:
     f = filters()
     settings = load_settings(_PAGE)
@@ -133,21 +150,18 @@ def render() -> None:
     _best = contract_planner.best_runway(
         _bal.df if (_bal is not None and _bal.usable()) else None,
         contract_runway(_exh.df.iloc[0]) if _exh.usable() else None)
-    _vsig = []
-    if _best is not None:
-        _dl = _best["days_left"]
-        _b = "billing balance" if _best["basis"] == "balance" else "configured credits"
-        if 0 <= _dl <= 30:
-            _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days at current burn ({_b})"))
-        elif 0 <= _dl <= 90:
-            _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days at current burn ({_b})"))
-    elif not _exh.usable():
-        # A failed runway read must NOT read as green "contract on track" — that is a
-        # positive claim on missing data (the false-all-clear class the sibling pages
-        # guard). Surface Watch instead. (bug-hunt round 5)
-        _vsig.append(Signal("warn", "contract runway unavailable — telemetry not read"))
+    # The shared runway Signal (verdict.contract_runway_signal, also the Brief's): it branches on the
+    # runway's own sign + severity, so an OVERRUN contract (days_left < 0, severity 'bad') reads
+    # Attention, not "Healthy — contract on track" (the old 0..30 / 0..90 bands dropped every negative).
+    # A failed runway read must NOT read as green either -- that is a positive claim on missing data
+    # (the false-all-clear class the sibling pages guard), so read_ok=_exh.usable() surfaces Watch
+    # (bug-hunt round 5); a clean read with no contract configured claims nothing about a contract.
+    _b = ("billing balance" if _best is not None and _best["basis"] == "balance"
+          else "configured credits")
+    _rsig = contract_runway_signal(_best, read_ok=_exh.usable(), basis=_b)
+    _vsig = [_rsig] if _rsig is not None else []
     page_verdict_line(page_verdict(
-        _vsig, healthy="contract on track at the current burn — open a section for detail"))
+        _vsig, healthy=f"{contract_runway_clause(_best)} — open a section for detail"))
     # Cost3/C18: the "what changed since your last visit" opener, now the shared
     # component (severity-mapped line + one-hop jumps to Alerts/Action Center).
     since_last_visit_opener(_PAGE, f["company"])
@@ -251,8 +265,11 @@ def render() -> None:
             section_header("Storage", "", "cost", anchor="cost-storage")
             _storage_tab(f["company"], f["days"], settings, bounds=f["bounds"])
             st.divider()
-            unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
-                      key=f"unmapped_{f['days']}", tier="hourly",
+            # R1-145: the worklist serves the page window (bounds included), so the "in this window"
+            # KPI help, the 'Est. $ (window)' column and the clean claim below are true as worded.
+            _unm_b = f"_{f['bounds'][0]}_{f['bounds'][1]}" if f["bounds"] is not None else ""
+            unm = run(mart_sql.unmapped_entities(f["days"], bounds=f["bounds"]), page=_PAGE,
+                      key=f"unmapped_{f['days']}{_unm_b}", tier="hourly",
                       source="FACT_WAREHOUSE_DAILY + FACT_QUERY_SCHEMA_HOURLY + FACT_LOGIN_DAILY (COMPANY='UNKNOWN')")
             # C23: "empty is the goal state" — so the header is green when it is.
             section_header("Unmapped entities", alarm_health(unm), "chargeback",

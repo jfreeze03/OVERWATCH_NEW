@@ -3,6 +3,8 @@ radius, object TCO, pattern pricing, fire drill, tag governance, restatements.""
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import pytest
 
@@ -112,7 +114,8 @@ def test_drill_streak_counts_consecutive_passes():
         {"RAISED_AT": "2026-05-01", "NOTIFIED_AT": None, "ACK_AT": None},
         {"RAISED_AT": "2026-04-01", "NOTIFIED_AT": "2026-04-01 09:00", "ACK_AT": "2026-04-01 09:05"},
     ])
-    report = drill_report(df)
+    # now pinned to mid-July: the streak counts back from the month that is due (R1-122 review)
+    report = drill_report(df, now=datetime(2026, 7, 15))
     assert report["streak_months"] == 2  # broken by May
     assert report["last"]["delivered"] and report["last"]["acked"]
     assert report["last"]["mtta_min"] == 10.0
@@ -145,8 +148,13 @@ def test_blast_radius_identifier_safety():
 def test_table_tco_identifier_safety():
     sql = table_tco("DB1", "SCH", "T1", 30)
     assert "'DB1.SCH.T1'" in sql and "OBJECTS_MODIFIED" in sql
-    with pytest.raises(ValueError):
-        table_tco("DB1", "SCH", "T1; DROP", 30)
+    # R1-044: table_tco no longer raises on an exotic name — the safe_identifier ValueError left the
+    # TCO drill with no evidence and a fabricated "0 reads". The name is matched as a sql_literal (quote-
+    # stripped, upper-cased objectName), so a hostile value stays inert inside one quoted string literal.
+    hostile = table_tco("DB1", "SCH", "T1'; DROP TABLE X; --", 30)
+    assert "'DB1.SCH.T1''; DROP TABLE X; --'" in hostile
+    import sqlglot
+    assert len(sqlglot.parse(hostile, dialect="snowflake")) == 1
 
 
 def test_tag_coverage_shape():

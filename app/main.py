@@ -160,6 +160,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         if page not in pages:
             page = current
         st.session_state["_ow_page"] = page
+        _note_landing_rendered()   # c09 R1-002: a page is on screen while the saved landing is pending
         remember_page(page)
         # C44 review fix: leaving Alerts expires the momentum queue — returning
         # later must not surprise-open a drawer from a spent triage chain. Gated
@@ -176,6 +177,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         _global_jump(pages)
         if st.button("Refresh data", width="stretch"):
             bump_refresh_salt()
+            _reconnect_off_sis()   # c09 R1-006: what the session-expired message tells users to press
             # Re-resolve the role too: a grant/role change mid-session should
             # be picked up here, not only on a full browser reload.
             st.session_state.pop("_ow_current_role", None)
@@ -230,6 +232,25 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
     return page
 
 
+def _reconnect_off_sis() -> None:
+    """c09 R1-006: off Streamlit-in-Snowflake the Snowpark session (session._connect) and the raw
+    connection under it (st.connection) are OURS, cached by st.cache_resource for the whole process,
+    so an expired master token kept failing every read through 'Refresh data' and even a browser
+    reload. Clear them, as 'Retry connection' does, so the next read reconnects. On SiS the session
+    is the platform's (get_active_session) and a browser reload starts a fresh instance -- the
+    session-expired message says so -- so nothing is cleared there.
+
+    Only when a read this session actually failed as session-expired (record_error sets
+    SESSION_EXPIRED_KEY): the cache is process-wide (every local tab's ONE connection and the
+    telemetry shape flag), and with externalbrowser SSO a reconnect can open a new login prompt,
+    so a routine Refresh stays a cheap salt bump (c09 R1-006 follow-up)."""
+    from app.core.errors import SESSION_EXPIRED_KEY
+    from app.core.session import is_sis
+
+    if st.session_state.pop(SESSION_EXPIRED_KEY, False) and not is_sis():
+        st.cache_resource.clear()
+
+
 def _parse_view(raw: str) -> dict | None:
     import json
 
@@ -240,17 +261,34 @@ def _parse_view(raw: str) -> dict | None:
         return None
 
 
+def _note_landing_rendered() -> None:
+    """_sidebar calls this once the run's page is resolved. While the saved landing is
+    still pending (a USER_PREFS retry, r10 #1, or a run before identity hydrated, r11 #3),
+    record that the session has already rendered a page: from then on a late successful
+    retry hydrates the display prefs only (c09 R1-002 follow-up)."""
+    if not st.session_state.get("_ow_default_applied"):
+        st.session_state["_ow_landing_rendered"] = True
+
+
 def _apply_default_landing() -> None:
-    """Once per session: land on the user's saved default view. An explicit
-    ?page= deep link always wins over the default."""
+    """Once per session: hydrate the viewer's display prefs (timezone, density,
+    presentation mode) and land on their saved default view. An explicit ?page=
+    deep link the session ARRIVED with wins over the default view only — the
+    display prefs hydrate either way. The saved view lands ONLY before the session
+    has rendered a page: a retry that succeeds after one hydrates the display prefs
+    and never applies the view's navigation or filters."""
+    # c09 R1-002: record ONCE, on the session's first call (before _sidebar's remember_page
+    # writes ?page= for every run), whether it arrived on a deep link. Re-reading
+    # st.query_params on a retry saw the app's OWN ?page= write as a deep link, so a
+    # transient prefs failure (r10 #1) or a pre-identity run (r11 #3) lost every saved pref
+    # for the session, and a shared link / reload never hydrated the display prefs at all.
+    if "_ow_arrived_with_page" not in st.session_state:
+        try:
+            st.session_state["_ow_arrived_with_page"] = bool(st.query_params.get("page"))
+        except Exception:  # noqa: BLE001
+            st.session_state["_ow_arrived_with_page"] = False
     if st.session_state.get("_ow_default_applied"):
         return
-    try:
-        if st.query_params.get("page"):
-            st.session_state["_ow_default_applied"] = True   # deep link wins, done
-            return
-    except Exception:  # noqa: BLE001
-        pass
     from app.core.state import consume_pending_navigation
     from app.data import prefs_sql
 
@@ -262,8 +300,10 @@ def _apply_default_landing() -> None:
     prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
                 source="USER_PREFS")
     if not prefs.ok:
-        # r10 #1: commit-on-success — a transient failure retries next rerun
-        # instead of silently skipping the saved landing for the session.
+        # r10 #1: commit-on-success — a transient failure retries the USER_PREFS
+        # read next rerun, so the display prefs (timezone, density, presentation
+        # mode) still hydrate. The saved DEFAULT_VIEW only lands if no page has
+        # rendered yet (see the c09 R1-002 follow-up below).
         tries = int(st.session_state.get("_ow_default_attempts", 0)) + 1
         st.session_state["_ow_default_attempts"] = tries
         if tries >= 3:
@@ -292,6 +332,13 @@ def _apply_default_landing() -> None:
         # the toggle; programmatic assignment never fires its on_change, so the
         # user's saved 'audit' can't be clobbered by a stale pre-hydrate False.
         st.session_state["_ow_present_mode_toggle"] = (mode_pref == "audit")
+    # c09 R1-002 follow-up: a retry runs on the viewer's NEXT rerun, which is their
+    # interaction with the page already on screen — a nav click, a scope change, or a
+    # button whose handler runs later in THIS run. Comparing page + filters against run 1
+    # only caught moves made before the script started; a late DEFAULT_VIEW still pre-empted
+    # an action handled during the retry run. So once a page has rendered, never navigate.
+    if st.session_state.get("_ow_arrived_with_page") or st.session_state.get("_ow_landing_rendered"):
+        return   # deep link wins over the saved DEFAULT_VIEW, and so does a page already on screen
     raw = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
                 if str(r["PREF_KEY"]) == "DEFAULT_VIEW"), "")
     data = _parse_view(raw)
@@ -478,7 +525,7 @@ def _record_recent(label: str) -> None:
 def _dispatch_jump(pick: str, pages: tuple) -> None:
     """C3: resolve a 'Kind · name' jump selection to a navigation (shared by the
     selectbox and the recents buttons)."""
-    from app.companies import ALFA_DATABASES, TREXIS_DATABASES
+    from app.companies import ALFA_DATABASES, TREXIS_DATABASES, classify_warehouse
     kind, _, name = pick.partition(" · ")
     if kind == "Page":
         request_navigation(name)
@@ -497,7 +544,16 @@ def _dispatch_jump(pick: str, pages: tuple) -> None:
     elif kind == "WH":
         # Queries honors warehouse_contains; the Warehouses tab ignores it (would show an
         # "Active but ignored: Warehouse" no-op) — route the WH pick to Queries like the DB pick.
-        request_navigation("Operations", "Queries", {"warehouse_contains": name})
+        # c09 R1-003: and carry a company that cannot contradict the warehouse, as the DB pick
+        # does (r6-bug9). The list offers warehouses of BOTH tenants whatever the filter says, so
+        # WH_TRXS_LOAD under the default ALFA scope rendered COMPANY = 'ALFA' AND WAREHOUSE ILIKE
+        # '%WH_TRXS_LOAD%' -- an empty Queries tab for a busy warehouse. classify_warehouse reads
+        # names only (the SQL's COMPANY_FOR_WAREHOUSE reads COMPANY_SCOPE first), so an UNKNOWN
+        # name lands under ALL rather than a company it may not belong to.
+        _wco = classify_warehouse(name)
+        request_navigation("Operations", "Queries",
+                           {"company": _wco if _wco in ("ALFA", "Trexis") else "ALL",
+                            "warehouse_contains": name})
     elif kind == "Rule":
         # r-ux: carry the searched rule's identity so Alerts ▸ Rules lands ON that rule (its
         # precision drill + threshold generator preselect it), like every other palette target —

@@ -24,7 +24,7 @@ def _src(rel: str) -> str:
 
 # every file with operator-write click blocks -> expected latched-block count
 LATCHED_FILES = {
-    "app/ui/pages/cost_parts/optimize.py": 6,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject); +1 Next-Fifty #30 unread-maintenance ESTIMATED booking; -1 the 2026-09-30 hygiene release review: the storage-waste retention control is review only (the allow-list refuses ALTER TABLE, so its write never succeeded)
+    "app/ui/pages/cost_parts/optimize.py": 7,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject); +1 Next-Fifty #30 unread-maintenance ESTIMATED booking; -1 the 2026-09-30 hygiene release review: the storage-waste retention control is review only (the allow-list refuses ALTER TABLE, so its write never succeeded); +1 R1-086: the off-hours schedule is review only (the allow-list refuses its multi-statement CREATE TASK script), and its ESTIMATED saving books from its own one-click button
     "app/ui/pages/operations.py": 5,
     "app/ui/pages/alerts.py": 6,
     "app/ui/workbench.py": 5,   # v4.597: -1 the retired Action Center experiment-start expander
@@ -99,7 +99,11 @@ def test_latch_keys_scope_by_action_and_target():
     assert al.count("_unsz_key") >= 3                               # def + gate + stamp
     assert 'f"ai_save_{event_id[:8]}:{hash(answer) & 0xFFFFFF}"' in al
     ops = _src("app/ui/pages/operations.py")
-    assert ops.count('f"emg_rq_{qid[:8]}"') == 2
+    # PR-1 R1-134: the cancel's confirm AND latch key is the FULL query id (qid[:8] is shared by queries
+    # issued close together, and the old fixed confirm key "emg_rq" kept a typed CANCEL armed across rows)
+    assert '_rq_key = f"emg_rq_{qid}"' in ops and 'f"emg_rq_{qid[:8]}"' not in ops
+    assert 'key=_rq_key,' in ops and "_rq_key, backstop=15.0" in ops and "stamp_write(_rq_key, ok)" in ops
+    assert 'confirm_gate("CANCEL", "Cancel query + audit", key="emg_rq"' not in ops
     # the emergency surfaces get SHORT backstops (idempotent levers/cancels,
     # back-to-back actions under pressure) and the lever key scopes by
     # lever+target — a bare "emg" inside the fragment/dialog locked out every
@@ -114,7 +118,8 @@ def test_latch_keys_scope_by_action_and_target():
     assert cb.count('f"bud_save:{pick_dept}"') == 2
     assert cb.count('f"cb_map_exec:{name}"') == 2
     cost = _src("app/ui/pages/cost.py")
-    assert cost.count('f"unmap_apply:{pick}:{company_choice}"') == 2
+    # R1-146: scoped by grain too -- the same name at another grain is a genuinely different mapping
+    assert cost.count('f"unmap_apply:{scope_type}:{pick}:{company_choice}"') == 2
 
 
 def test_every_write_click_block_is_latched():

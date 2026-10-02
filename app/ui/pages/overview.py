@@ -10,6 +10,7 @@ Contract (the old app broke all four of these):
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 
 import pandas as pd
@@ -17,7 +18,7 @@ import streamlit as st
 
 from app.core.errors import safe_page
 from app.core.query import run, run_batch
-from app.core.result import QueryResult
+from app.core.result import QueryResult, is_setup_absence
 from app.core.state import filters, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
@@ -113,11 +114,14 @@ def _load_board(company: str, days: int, window: object = None) -> QueryResult:
 def _live_fallback_daily(company: str, days: int, rate: float,
                          bounds: tuple | None = None) -> tuple[pd.DataFrame, QueryResult]:
     """Daily warehouse-spend series for the paths the trailing-window exec_board can't serve —
-    the 'Last month' calendar window (its explicit (start, end) range) and the mart-not-deployed
-    fallback. perf: MART-FIRST — FACT_WAREHOUSE_DAILY carries the same DAY/WAREHOUSE_NAME/
-    CREDITS_TOTAL columns for 365d and CAN express a bounded month, so it serves this read and the
-    live WAREHOUSE_METERING_HISTORY scan is only the labeled fallback (Last month is a closed
-    calendar period, so the fact's hourly loader lag is immaterial). Real data, never fabricated."""
+    every calendar preset window (Last month / Current month / Current year: any window with
+    bounds, read over its explicit (start, end) range) and the mart-not-deployed fallback.
+    perf: MART-FIRST — FACT_WAREHOUSE_DAILY carries the same DAY/WAREHOUSE_NAME/CREDITS_TOTAL
+    columns for 365d and CAN express a bounded range, so it serves this read and the live
+    WAREHOUSE_METERING_HISTORY scan is only the labeled fallback. Last month is a closed calendar
+    period, so the fact's hourly loader lag is immaterial there; Current month and Current year
+    run to today, and render() drops today's still-filling partial day downstream
+    (daily_complete) as it does for every window. Real data, never fabricated."""
     _lm = "_lm" if bounds is not None else ""
     res = run_mart_first(
         mart_sql.fact_warehouse_daily(days, company, bounds=bounds),
@@ -132,6 +136,30 @@ def _live_fallback_daily(company: str, days: int, rate: float,
     daily = res.df.groupby("DAY", as_index=False)["CREDITS_TOTAL"].sum()
     daily["USD"] = daily["CREDITS_TOTAL"].map(lambda c: safe_float(c) * rate)
     return daily[["DAY", "USD"]], res
+
+
+def _spend_failure_help(board_res: QueryResult | None, trend_source: QueryResult, *,
+                        window_label: str = "") -> str:
+    """c09 R1-191: the 'Unavailable' spend hero's help names what was actually read (house law 8).
+
+    Only the LAST leg failed: the daily spend comes from the exec board when it is usable, else from
+    _live_fallback_daily, whose run_mart_first returns a failure only from its final live read. The
+    exec board was not read at all for a calendar preset window -- Last month, Current month or
+    Current year, every window with bounds (board_res None; ``window_label`` names the one picked) --
+    and it may have answered empty; FACT_WAREHOUSE_DAILY may have failed, answered empty, or been
+    skipped by the mart backoff -- so neither is claimed to have failed unless it did."""
+    if board_res is None:
+        _which = (str(window_label).strip()
+                  or "a calendar window (Last month, Current month or Current year)")
+        board = f"The exec board covers trailing windows only, so it was not read for {_which}"
+    elif not board_res.ok:
+        board = "The exec board read failed"
+    else:
+        board = "The exec board returned no rows"
+    failed = str(trend_source.source or "").strip() or "the warehouse metering read"
+    error = str(trend_source.error or "").strip()[:200] or "read failed"
+    return (f"Warehouse spend could not be read, so no total is shown. {board}; FACT_WAREHOUSE_DAILY "
+            f"did not serve it; the last fallback, {failed}, failed: {error}.")
 
 
 def _billed_split_available(frame: pd.DataFrame) -> bool:
@@ -159,15 +187,18 @@ def _billed_usd_series(frame: pd.DataFrame, rate: float, ai_rate: float) -> pd.S
 
 def _mtd_spend_usd(rate: float, ai_rate: float,
                    preloaded: QueryResult | None = None,
-                   exclude_today: bool = False) -> tuple[float, str]:
+                   exclude_today: bool = False) -> tuple[float, str, QueryResult]:
     """MTD account billed spend (adjustment applied) from the daily fact, AI credits
     priced at the AI rate (C1). exclude_today drops today's still-filling PARTIAL metering
     row (DAY < account today) — the pace-vs-budget card needs a COMPLETE-days MTD to match
     budget_pace_variance's completed-days denominator, else an on-budget account reads
-    ~one day's spend ahead every day (a clock-driven sawtooth)."""
+    ~one day's spend ahead every day (a clock-driven sawtooth).
+
+    c09 R1-193: also returns the result it read, so the MTD tile can tell a FAILED read (a timeout:
+    'Unavailable') from a true absence or an empty fact ('Needs daily facts')."""
     res = preloaded if preloaded is not None and preloaded.ok else daily_spend_wide(_PAGE)
     if not res.usable():
-        return 0.0, ""
+        return 0.0, "", res
     frame = res.df.copy()
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
     month_start = account_today().replace(day=1)
@@ -179,7 +210,7 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
                                    rate, ai_rate)
     else:
         spend = mtd["CREDITS_BILLED"].map(safe_float).sum() * rate
-    return spend, res.source
+    return spend, res.source, res
 
 
 def _open_alert_counts(company: str = "ALL",
@@ -281,9 +312,11 @@ def render() -> None:
     # while the 45d MTD fact is fixed — coupling them in one batch cache meant
     # every company/days change cold-started the fixed read. Serial keeps each
     # on its own cache key, so filter changes only refetch the board.
-    # 'Last month' is a BOUNDED calendar window (f["bounds"] is set only then); the exec
-    # board is keyed by trailing WINDOW_DAYS and has no row for it, so skip the mart and
-    # read the bounded live daily aggregate (real data, today-excluded by the month end).
+    # The calendar presets (Last month / Current month / Current year) are BOUNDED windows
+    # (f["bounds"] is set only for them); the exec board is keyed by trailing WINDOW_DAYS and
+    # has no row for them, so skip the mart and read the bounded live daily aggregate (real
+    # data; a closed month is today-excluded by its month end, the open presets by
+    # daily_complete below).
     _ov_bounds = f["bounds"]
     board_res = _load_board(company, days, f["window"]) if _ov_bounds is None else None
     board = board_res.df if (board_res is not None and board_res.usable()) else pd.DataFrame(
@@ -316,6 +349,11 @@ def render() -> None:
     # 'as of' watermark (built from daily_complete), and the reconciliation caption.
     window_spend = (float(daily_complete["USD"].sum()) if not daily_complete.empty
                     else 0.0)
+    # c09 R1-191: that 0.0 is honest only for a read that SUCCEEDED with no complete day. When the
+    # spend read itself failed (no usable board, and the fallback's last leg -- live metering --
+    # failed), the hero, the case summary and the executive export say "unavailable", never a
+    # fabricated $0.00; the hero's help names which reads ran (_spend_failure_help).
+    _spend_failed = not trend_source.ok
     # rec28: the credits behind the dollar headline, for reconciling against Snowsight.
     # This card's value IS credits x rate (warehouse metering), so credits = USD / rate —
     # exact and column-independent (the `daily` frame here is only [DAY, USD], no credits col).
@@ -324,7 +362,9 @@ def render() -> None:
     # (Codex r16 #17) — the separate 45d read survives only as the fallback
     # inside _mtd_spend_usd when this one fails.
     _bt_hist = daily_spend_wide(_PAGE)   # PERF #46: the shared wide read (also serves MTD above)
-    mtd_spend, mtd_source = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist)
+    mtd_spend, mtd_source, _mtd_res = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist)
+    # c09 R1-193: "Needs daily facts" only for a true absence or a read that succeeded empty.
+    _mtd_failed = not mtd_source and not _mtd_res.ok and not is_setup_absence(_mtd_res.error_kind)
     # Triage #1: the exec-board `daily` frame is windowed to the filter `days`
     # (default 7) and is company-scoped, so it truncates month-to-date for most of
     # the month and mismatches the account-wide "Projected month-end" KPI (which
@@ -352,6 +392,7 @@ def render() -> None:
         company, prefetched=_live_pf.get(f"alert_counts_{company}"))
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
     forecast = None
+    _ml_stale_note = ""
     if engine == "ml_forecast":
         mlres = run(mart_sql.ml_forecast_daily(), page=_PAGE, key="ml_forecast",
                     tier="hourly", source="FORECAST_ML_DAILY (SNOWFLAKE.ML.FORECAST)")
@@ -366,12 +407,26 @@ def render() -> None:
             # was dropped entirely — the projection omitted today's remaining spend.
             # Prorate today's OWN forecast row by the fraction of the account day
             # still ahead and add it back as an explicit today-remainder term.
+            # (c09 R1-229: the reader keeps TS::DATE >= account_today_sql() -- the
+            # account clock, R1-230 -- for exactly this row; a strictly-future reader
+            # made the term 0 every day.)
             _secs_elapsed = now.hour * 3600 + now.minute * 60 + now.second
             _frac_left = max(0.0, min(1.0, 1.0 - _secs_elapsed / 86400.0))
             today_remainder_cr = float(pd.to_numeric(
                 mdf.loc[mdf["DAY"] == today, "FORECAST_CREDITS"], errors="coerce"
             ).fillna(0).sum()) * _frac_left
+            _ml_horizon = mdf["DAY"].max()
             mdf = mdf[(mdf["DAY"] > today) & (mdf["DAY"] < month_end)]
+            # c09 R1-229: the table covers only the 45 days after the model's LAST TRAINING day. A
+            # horizon that stops before month-end would sum a few days and report the partial sum as
+            # the month-end projection (days_remaining shrinking with it), so it falls back to the
+            # disclosed seasonal engine instead, with the stale horizon named in the basis.
+            _last_day = month_end - timedelta(days=1)
+            if today < _last_day and _ml_horizon < _last_day:
+                _ml_stale_note = (f"The ML forecast table ends {_ml_horizon}, before month-end ({_last_day}), so "
+                                  "the seasonal engine is used — retrain it with SP_REFRESH_ML_FORECAST "
+                                  "(snowflake/ml_forecast_option.sql).")
+                mdf = mdf.iloc[0:0]
             if not mdf.empty:
                 # mtd_now rides proj_daily, already AI-split-priced (C1). The
                 # FORECAST_* legs price via formulas.credits_to_usd at the compute
@@ -403,11 +458,16 @@ def render() -> None:
                           "today's remainder prorated in; a disclosed compute-rate "
                           "estimate (AI/OTHER split queued for V061).",
                 )
+        elif mlres.ok:   # c09 R1-229: the table exists but its horizon is already behind today
+            _ml_stale_note = ("The ML forecast table has no row for today or later, so the seasonal engine is "
+                              "used — retrain it with SP_REFRESH_ML_FORECAST (snowflake/ml_forecast_option.sql).")
         if forecast is None:
             engine = "seasonal"  # honest fallback when the ML view isn't installed
     if forecast is None:
         forecast = (month_end_projection(proj_daily, account_today(), engine=engine)
                     if not proj_daily.empty else month_end_projection(pd.DataFrame(), account_today(), engine=engine))
+        if _ml_stale_note:
+            forecast = dataclasses.replace(forecast, basis=f"{forecast.basis} {_ml_stale_note}".strip())
 
     # C2/N5: pull the score's throughput+pressure signals from a FIXED recent
     # window (not the exec board, which is windowed to the user's 7/30/90d spend
@@ -638,6 +698,12 @@ def render() -> None:
     company_kpis = [
         {
             "label": f"Spend, {_ov_spend_lbl} ({company})",
+            "value": "Unavailable",
+            "severity": "warn",
+            "method": "metering", "scope": "company",
+            "help": _spend_failure_help(board_res, trend_source, window_label=str(f["window_label"])),
+        } if _spend_failed else {
+            "label": f"Spend, {_ov_spend_lbl} ({company})",
             "value": format_usd(window_spend),
             "as_of": _ov_asof_company,
             "delta": _ov_spend_delta,
@@ -670,6 +736,13 @@ def render() -> None:
         })
     account_kpis = [
         _mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget) if mtd_source else {
+            "label": "MTD credit spend",
+            "value": "Unavailable",
+            "severity": "warn",
+            "method": "billed", "scope": "account-wide",
+            "help": "Daily metering facts (FACT_METERING_DAILY) could not be read, so month-to-date "
+                    "spend is unknown: " + (str(_mtd_res.error)[:200] or "read failed") + ".",
+        } if _mtd_failed else {
             "label": "MTD credit spend",
             "value": "Needs daily facts",
             "method": "billed", "scope": "account-wide",
@@ -820,7 +893,8 @@ def render() -> None:
         # the preview reconciles with what it shows (the $ headline is in the summary).
         "Overview · Spend", _vp,
         title=f"Spend {str(f['window_label']).lower()} ({company}) — by warehouse vs prior",
-        summary=format_usd(window_spend) + (f" ({_ov_spend_delta})" if _ov_spend_delta else ""),
+        summary=("unavailable (spend read failed)" if _spend_failed else
+                 format_usd(window_spend) + (f" ({_ov_spend_delta})" if _ov_spend_delta else "")),
         next_action="Drill into Cost Intelligence ▸ Spend & Attribution for the driver.",
         as_of=_ov_asof_company or "",
         key=f"ow_case_add_ov_spend_{company}_{days}")
@@ -897,8 +971,10 @@ def render() -> None:
             "here, click one to open it in the Control Room queue and assign or resolve it."
         )
         # actions_res loaded above the score (triage #3) — reused here.
-        if not actions_res.ok:
+        if not actions_res.ok and is_setup_absence(actions_res.error_kind):
             empty_state("needs_setup", "Action queue isn't installed yet.")
+        elif not actions_res.ok:   # c09 R1-193: a timeout or other failure is not "not installed"
+            empty_state("unavailable", "The action queue couldn't be read.", detail=actions_res.error)
         elif actions_res.empty:
             empty_state("clean", "Action queue is empty. Nothing waiting on an owner.")
         else:
@@ -1075,8 +1151,11 @@ def render() -> None:
                                     "PRIOR_USD": _piv[_prev_m].to_numpy(),
                                     "LATEST_USD": _piv[_last_m].to_numpy()})
                 _mv["DELTA_USD"] = _mv["LATEST_USD"] - _mv["PRIOR_USD"]
-                _mv["DELTA_PCT"] = [(d / p * 100.0) if p > 0 else 0.0
-                                    for d, p in zip(_mv["DELTA_USD"], _mv["PRIOR_USD"], strict=True)]
+                # c09 R1-195: the house pct_delta (None when the prior month is $0, shown "—"), as the
+                # Cost compare/spend movers use -- a new warehouse's +$5,000 is not "+0.0%".
+                _mv["DELTA_PCT"] = pd.to_numeric(pd.Series(
+                    [pct_delta(lt, p) for lt, p in zip(_mv["LATEST_USD"], _mv["PRIOR_USD"], strict=True)],
+                    index=_mv.index, dtype=object), errors="coerce")
                 _mv = _mv.iloc[_mv["DELTA_USD"].abs().argsort()[::-1]].head(6)
                 st.caption(f"Top movers — {_last_m} vs {_prev_m}")
                 entity_nav_table(_mv, key=f"ov_wh_movers_{company}", key_col="WAREHOUSE",
@@ -1257,7 +1336,9 @@ def render() -> None:
     # cloud-services adjustment for the warehouse window-spend number (which excludes it).
     _score_export = ("Incomplete — health inputs unavailable" if _score_incomplete
                      else f"{score.score}/100 ({score.state})")
-    _mtd_export = ((format_usd(mtd_spend) if mtd_source else "n/a (daily facts not deployed)")
+    _mtd_export = ((format_usd(mtd_spend) if mtd_source
+                    else "unavailable (daily facts could not be read)" if _mtd_failed
+                    else "n/a (daily facts not deployed)")
                    + (f" vs budget {format_usd(budget)}" if budget > 0 else " (no budget configured)")
                    + " · account-wide")
     _fc_export = ((format_usd(forecast.projected_usd)
@@ -1280,10 +1361,13 @@ def render() -> None:
         days=days,
         generated=account_now().strftime("%Y-%m-%d %H:%M") + " (account time)",
         cards=(
-            ("Window spend", f"{format_usd(window_spend)} - {company}, metering"),
+            ("Window spend", f"unavailable (spend read failed) - {company}" if _spend_failed
+             else f"{format_usd(window_spend)} - {company}, metering"),
             ("Month to date", _mtd_export),
             ("Projected month-end", _fc_export),
-            ("Open alerts", f"{critical_alerts} critical | {high_alerts} high"),
+            # c09 R1-192: the tile's own guard -- a failed alerts read is never exported as "0 critical".
+            ("Open alerts", f"{critical_alerts} critical | {high_alerts} high" if alerts_res.ok
+             else "Unavailable (alert tables could not be read)"),
             ("Platform score", _score_export),
         ),
         drivers=tuple(

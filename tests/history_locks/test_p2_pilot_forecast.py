@@ -46,7 +46,11 @@ def test_seasonal_falls_back_when_thin():
 def test_ml_forecast_reader():
     sql = mart_sql.ml_forecast_daily()
     assert "FORECAST_ML_DAILY" in sql and "FORECAST_CREDITS" in sql
-    assert "TS::DATE > CURRENT_DATE()" in sql
+    # R1-230 (deliberate change): the reader now KEEPS today's row (>= on the account clock) — the
+    # #24 today-remainder term in overview.py prorates exactly that row, and the old strict '>'
+    # dropped it, so the term was always 0. Overview still sums only days strictly after today.
+    assert "TS::DATE >= CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE" in sql
+    assert "TS::DATE > CURRENT_DATE()" not in sql
 
 
 def test_v015_dt_pilot_and_backups():

@@ -52,8 +52,12 @@ COLUMN_HELP = {
     "MEASURED_USD": "MEASURED USD — exact attributed compute; idle excluded.",
     "ALLOCATED_USD": "ALLOCATED USD — a coarse-grain total spread by a share; an estimate.",
     "ESTIMATED_USD": "ESTIMATED — modeled from bytes/credits x a configured rate, not billed.",
-    "SPEND_USD": "USD = credits x the contract rate ($3.68 compute / $2.20 Cortex). Display-only conversion.",
-    "USD": "USD = credits x the contract rate ($3.68 compute / $2.20 Cortex). Display-only conversion.",
+    # No literal rates and no "$": header help renders markdown, where two "$" pair into LaTeX, and
+    # the rates are SETTINGS values an operator can change (they were hard-coded here).
+    "SPEND_USD": "USD = credits x the configured contract rate (CREDIT_PRICE_USD compute / "
+                 "AI_CREDIT_PRICE_USD Cortex). Display-only conversion.",
+    "USD": "USD = credits x the configured contract rate (CREDIT_PRICE_USD compute / "
+           "AI_CREDIT_PRICE_USD Cortex). Display-only conversion.",
     # r-ux: the Operations query-optimization jargon columns — meaning lived only in a caption.
     "OOS": "Optimization opportunity score — a typical run's inefficiency (QOP) x its compute "
            "footprint percentile; higher = fix first.",

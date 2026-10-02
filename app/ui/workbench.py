@@ -13,7 +13,7 @@ from app.core.result import is_setup_absence
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import graph_sql, mart27_sql, mart_sql, workbench_sql
-from app.logic import lineage, outcomes
+from app.logic import lineage, outcomes, wh_change
 from app.logic.actions import deferred_mask, deferred_summary, rank_actions
 from app.logic.formulas import (
     account_today,
@@ -29,6 +29,7 @@ from app.logic.watch_monitor import WATCH_SIGNAL_TYPES, watch_summary, watched_s
 from app.logic.wh_health import warehouse_health
 from app.logic.workbench import (
     ACTION_STATUSES,
+    ACTION_WINDOW_COLS,
     CRITICALITIES,
     ENTITY_TYPES,
     UNASSIGNED_OWNER,
@@ -350,6 +351,9 @@ def _with_held(frame: pd.DataFrame, *, key: str, type_col: str = "SOURCE_ENTITY_
     return out
 
 
+_ACTION_READ_CAP = 500
+
+
 def render_action_center(company: str) -> None:
     """Persistent owner queue with exact-row navigation and lifecycle controls."""
     # Codex-adj P1: the header stripe was a CONSTANT "warn" (amber on every render, incl. a
@@ -363,28 +367,29 @@ def render_action_center(company: str) -> None:
                           help=f"Only work whose Owner is you ({_me or 'viewer unknown'}). Team labels "
                                "like DBA count as Unassigned.")
     read_model_caption("action_center")
+    # R1-091/207: the KPIs read the read's UNCAPPED window totals (with_kpi_totals), and with Include
+    # completed work the open items sort first, so closed history never pushes open work past the cap.
     extended_res = run(
-        workbench_sql.action_center(company, include_closed, 500), page=_PAGE,
-        key=f"action_center_{company}_{include_closed}", tier="live",
+        workbench_sql.action_center(company, include_closed, _ACTION_READ_CAP, with_kpi_totals=True),
+        page=_PAGE, key=f"action_center_{company}_{include_closed}", tier="live",
         source="ACTION_QUEUE + V074 lifecycle context",
     )
-    extended = extended_res.ok
-    if extended:
-        frame = extended_res.df.copy()
-    else:
-        base = run(
-            mart_sql.action_queue(500, company), page=_PAGE,
-            key=f"action_center_legacy_{company}",
-            tier="live", source="ACTION_QUEUE (legacy shape)",
-        )
-        if not base.ok:
-            empty_state("needs_setup", "The action queue is not installed yet.")
-            return
-        frame = base.df.copy()
-        empty_state(
-            "needs_setup",
-            "V074 is pending. Showing the existing read-only queue; lifecycle, evidence, ownership, and experiments unlock after the owner applies it.",
-        )
+    # R1-206: V074's lifecycle shape is guaranteed past config.REQUIRED_SCHEMA_FLOOR (88; main.py blocks
+    # the page below it), so a failed read is never "V074 is pending" -- the old read-only legacy fallback
+    # turned every timeout into that claim and locked the editor. needs_setup only for a true absence.
+    if not extended_res.ok and is_setup_absence(extended_res.error_kind):
+        empty_state("needs_setup", "The action queue (ACTION_QUEUE) is not installed or not readable by this "
+                                   "app's role yet.")
+        return
+    if not extended_res.ok:
+        empty_state("unavailable", "The action queue could not be read, so open work is not shown — retry "
+                                   "in a moment.", detail=extended_res.error)
+        return
+    extended = True
+    frame = extended_res.df.copy()
+    _read_capped = len(frame) >= _ACTION_READ_CAP
+    _matching = (int(safe_float(frame.iloc[0].get("KPI_MATCHING_TOTAL")))
+                 if not frame.empty and "KPI_MATCHING_TOTAL" in frame.columns else len(frame))
 
     # A pending deep link bypasses the mine filter, so a Brief / Overview click to someone else's item
     # is never swallowed (Next-Fifty #20).
@@ -396,7 +401,9 @@ def render_action_center(company: str) -> None:
         _keep = owned_by(frame, _me)
         if _pin and "ACTION_ID" in frame.columns:
             _keep = _keep | (frame["ACTION_ID"].astype(str) == _pin)
-        frame = frame[_keep].reset_index(drop=True)
+        # the window totals count EVERY owner's work: after this filter the counts come from the rows
+        frame = frame[_keep].reset_index(drop=True).drop(columns=list(ACTION_WINDOW_COLS), errors="ignore")
+    _window_counts = set(ACTION_WINDOW_COLS) <= set(frame.columns)
 
     if frame.empty:
         empty_state("clean", "Nothing assigned to you in this scope." if mine_only and _me
@@ -449,6 +456,14 @@ def render_action_center(company: str) -> None:
         if n_def:
             st.caption(f"Deferred ({n_def}): parked until their resume date and left out of the counts "
                        f"above; next resumes {next_resume}.")
+        if _read_capped:
+            # R1-091/207: disclose the list cap (UNCAPPED-AGGREGATE): the counts are window totals over every
+            # matching item, except under 'Assigned to me', which filters the rows read
+            _order = ("open work first, then severity" if include_closed else "severity") + ", overdue, estimate"
+            st.caption(f"The list shows the first {_ACTION_READ_CAP:,} of {_matching:,} matching items "
+                       f"({_order}); "
+                       + ("the counts above cover all of them." if _window_counts else
+                          "'Assigned to me' and the counts above cover only those rows."))
         # Next-Fifty #46: completed work is listed only with Include completed work, so the Held? read is
         # gated on that toggle (never first paint) and on V074's lifecycle columns.
         if include_closed and extended:
@@ -632,8 +647,13 @@ def _render_data_product_detail(product: str) -> None:
         key=f"product_detail_{product}", tier="live",
         source="ENTITY_CATALOG (by data product)",
     )
-    if not detail.ok:
+    if not detail.ok and is_setup_absence(detail.error_kind):
         empty_state("needs_setup", "V074 is required for the ownership catalog.")
+        return
+    if not detail.ok:
+        # R1-206: a timeout / drift / other failure is a failed read with its error, never "V074 required"
+        empty_state("unavailable", f"The '{product}' data product's catalog entities could not be read.",
+                    detail=detail.error)
         return
     if detail.empty:
         empty_state("no_data_yet",
@@ -710,9 +730,14 @@ def render_entity_360(company: str) -> None:
         key=f"entity_record_{kind}_{key}", tier="live", source="ENTITY_CATALOG",
     )
     catalog_row = record.df.iloc[0] if record.ok and not record.empty else None
-    if not record.ok:
+    # R1-206: split a failed record read on its kind. A timeout / drift / other failure is unavailable with
+    # its error -- never "V074 required", and never the "no ownership record yet" absence claim below.
+    if not record.ok and is_setup_absence(record.error_kind):
         empty_state("needs_setup", "V074 is required for the ownership catalog and watchlists.")
-    if catalog_row is not None:
+    elif not record.ok:
+        empty_state("unavailable", "This entity's ownership record could not be read, so ownership and its "
+                                   "editor are hidden until the read succeeds.", detail=record.error)
+    elif catalog_row is not None:
         status_chips([
             (str(catalog_row.get("CRITICALITY") or "STANDARD"),
              "bad" if str(catalog_row.get("CRITICALITY", "")).upper() == "CRITICAL" else ""),
@@ -785,7 +810,11 @@ def render_entity_360(company: str) -> None:
             if ok:
                 st.rerun()
 
-    _render_catalog_editor(kind, key, catalog_row, company)
+    # R1-206: only over a record read that succeeded -- after a failed read the form would seed blank
+    # per-entity widget keys (Streamlit then ignores value= on later reruns) and Save's full-replace MERGE
+    # would overwrite the existing record's team / owner / steward / notes with those blanks.
+    if record.ok:
+        _render_catalog_editor(kind, key, catalog_row, company)
 
     # CR15: the "changes" this panel's docstring promises (ownership, work,
     # CHANGES, savings, evidence). Reuses the change registries the Operations
@@ -798,12 +827,24 @@ def render_entity_360(company: str) -> None:
             source="OBJECT_CHANGE_REGISTRY / WAREHOUSE_CHANGE_REGISTRY",
         )
         if changes.ok and not changes.empty:
-            styled_table(changes.df, height=200)
+            # v4.606 holistic review: DETAIL is the change scans' VERDICT_DETAIL, written in SQL
+            # with raw seconds ('p95 1800.0s->2400.0s'); styled_table only humanizes numeric
+            # duration columns, so re-render the text the way the Operations drill and Control
+            # Room's Magnitude do. A copy -- never mutate the cached frame.
+            _chg = changes.df.copy()
+            if "DETAIL" in _chg.columns:
+                _chg["DETAIL"] = _chg["DETAIL"].map(
+                    lambda v: wh_change.humanize_verdict_detail(v) if isinstance(v, str) else v)
+            styled_table(_chg, height=200)
         elif changes.ok:
             empty_state("no_data_yet", "No tracked change in the last 90 days — the "
                         "change-impact scans fill this (Operations → Change impact).")
-        else:
+        elif is_setup_absence(changes.error_kind):
             empty_state("needs_setup", "Change tracking needs the change-impact scan (V010).")
+        else:
+            # R1-206: a failed read of an installed registry is unavailable with its error
+            empty_state("unavailable", "Recent changes could not be read for this entity.",
+                        detail=changes.error)
     else:
         st.caption(f"Change tracking is not defined for {kind} entities — warehouse settings "
                    "and proc/task deploys are tracked; other types are not.")
@@ -836,8 +877,11 @@ def render_entity_360(company: str) -> None:
                 st.caption(md_dollars(
                     f"Newest completed item — Held? {_lbl}" + (f": {_basis}" if _basis else "")
                     + ". Measured on this entity's own mart signal since it was marked done."))
-    else:
+    elif related.ok:
         empty_state("no_data_yet", "No action is linked to this entity.")
+    else:
+        # R1-206 (same class): a failed ACTION_QUEUE read is not "no action is linked"
+        empty_state("unavailable", "Linked work could not be read for this entity.", detail=related.error)
 
     if evidence_gate(
         "entity_360",
@@ -874,6 +918,10 @@ def render_entity_360(company: str) -> None:
 
 
 _BLAST_WINDOW_DAYS = 30
+# The account-wide declared-edge fetch: the builder's LIMIT and run()'s max_rows are ONE number, so the
+# n+1 canary arms and `truncated` can fire. R1-056: the builder's default (10,000) is below max_rows, so
+# run() kept the smaller trailing LIMIT and a >10k-edge graph was cut with no lower-bound warning.
+_DEP_EDGE_CAP = 50000
 
 
 def _object_blast_radius_panel(key: str) -> None:
@@ -884,11 +932,11 @@ def _object_blast_radius_panel(key: str) -> None:
     probe-gated (OBJECT_DEPENDENCIES is unverified here; ACCESS_HISTORY is Enterprise-
     only), so each half degrades on its own."""
     st.markdown("**Downstream blast radius**")
-    # max_rows honors the builder's own 50k clamp instead of the 5k default, and
-    # `truncated` is surfaced below — the declared-dependent count is never silently cut.
-    edges = run(graph_sql.object_dependency_edges(), page=_PAGE, key="object_dep_edges",
+    # The builder's LIMIT and max_rows are the same 50k cap (the builder's own clamp), so run() fetches
+    # cap+1 and `truncated` is surfaced below — the declared-dependent count is never silently cut.
+    edges = run(graph_sql.object_dependency_edges(_DEP_EDGE_CAP), page=_PAGE, key="object_dep_edges",
                 tier="historical", source="ACCOUNT_USAGE.OBJECT_DEPENDENCIES",
-                probe=True, max_rows=50000)
+                probe=True, max_rows=_DEP_EDGE_CAP)
     if not edges.ok and is_setup_absence(edges.error_kind):
         st.caption("Declared object lineage needs ACCOUNT_USAGE.OBJECT_DEPENDENCIES, "
                    "which isn't available to this role/account yet — blast radius hidden.")

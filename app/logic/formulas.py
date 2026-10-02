@@ -304,8 +304,10 @@ _DURATION_FACTOR_SEC = {"ms": 0.001, "s": 1.0, "sec": 1.0, "min": 60.0, "h": 360
 def humanize_duration(value: object, unit: str = "s") -> str:
     """Render a raw duration as compact H/M/S for reading — "1h 30m", "5m 12s",
     "45s", "850ms". DISPLAY ONLY: callers format the display cell while the
-    underlying numeric column is untouched, so tables still sort by the real
-    value and the CSV keeps the raw number. ``unit`` is the column's native unit
+    underlying numeric column is untouched, so the CSV keeps the raw number and a
+    Styler-rendered table (up to components.STYLER_MAX_ROWS rows) still sorts by
+    the real value; a larger table shows these strings as its cells, so its header
+    sort is textual (and its header help says so). ``unit`` is the column's native unit
     ('ms', 's'/'sec', 'min', 'h'). NaN/garbage renders the em-dash no-value glyph."""
     v = safe_float(value, default=float("nan"))
     if v != v:                       # NaN / unparseable

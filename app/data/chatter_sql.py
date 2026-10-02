@@ -15,9 +15,14 @@ ACCOUNT-WIDE by nature: metadata statements carry WAREHOUSE_NAME NULL, so the ch
 cannot be company-scoped by warehouse; a warehouse filter instead narrows to that
 warehouse's compile-heavy (warehouse-backed) portion. Every cloud-services credit here is
 GROSS USAGE (never billable -- the ~10% rebate is account+day, not decomposable to an app
-or query), and the application name is SELF-REPORTED (spoofable; ODBC/legacy tools land in
-'(unknown)'). SESSIONS is scanned a few days WIDER than the query window (it lags ~3h) so
-an in-window statement never loses its application for lack of a session match.
+or query), and the application name is SELF-REPORTED (spoofable; a session whose client
+reports neither a program nor a driver -- many ODBC / legacy tools -- lands in '(unknown)').
+SESSIONS is scanned 7 days WIDER than the query window (it lags ~3h), which covers sessions
+opened shortly before the window. A statement whose session has NO SESSIONS row in that
+range -- a long-lived / keep-alive / pooled session opened more than 7 days before the
+window, one too recent for SESSIONS' lag, or a system-owned session -- lands in its own
+'(no session record)' bucket (R1-055), never in '(unknown)': it did not fail to self-report,
+its session simply was not scanned.
 """
 
 from __future__ import annotations
@@ -25,6 +30,12 @@ from __future__ import annotations
 from app.core.sqlsafe import sql_literal
 from app.data.app_cost_sql import _APP_EXPR  # the canonical application identifier (V077)
 from app.data.common import and_where, bounded_days, not_app_self_sql
+
+# R1-055: the bucket for a statement whose SESSION_ID has no SESSIONS row in the scanned range.
+# Distinct from _APP_EXPR's '(unknown)' (a session that reports no client program), so the
+# Operations 'Unresolved runs' KPI — whose help names non-self-reporting clients — counts only those.
+NO_SESSION_RECORD = "(no session record)"
+_APP_OF = f"COALESCE(s.APPLICATION, '{NO_SESSION_RECORD}')"
 
 # chatter = metadata-only (no warehouse) OR compile-dominated (compile >= half the elapsed).
 _CHATTER_PREDICATE = (
@@ -39,8 +50,9 @@ _SELF_NOISE = (f"{not_app_self_sql('q')} "
 
 
 def _windows(days: int, bounds: tuple | None) -> tuple[str, str]:
-    """(q_scope, sess_scope). SESSIONS is padded -7d wider (it lags ~3h) so an in-window
-    query keeps its application; 'Last month' applies the bounded [start, end)."""
+    """(q_scope, sess_scope). SESSIONS is padded -7d wider (it lags ~3h) so a query whose
+    session opened up to 7 days before the window keeps its application; an older (long-lived)
+    session falls in NO_SESSION_RECORD. 'Last month' applies the bounded [start, end)."""
     if bounds is not None:
         _si, _ei = f"'{bounds[0].isoformat()}'", f"'{bounds[1].isoformat()}'"
         return (f"q.START_TIME >= {_si} AND q.START_TIME < {_ei}",
@@ -86,7 +98,7 @@ sess AS (
     WHERE {sess_scope}
     QUALIFY ROW_NUMBER() OVER (PARTITION BY SESSION_ID ORDER BY CREATED_ON DESC) = 1
 )
-SELECT COALESCE(s.APPLICATION, '(unknown)') AS APPLICATION,
+SELECT {_APP_OF} AS APPLICATION,
        COUNT(*) AS RUNS,
        ROUND(SUM(q.COMPILATION_TIME) / NULLIF(SUM(q.TOTAL_ELAPSED_TIME), 0) * 100, 1) AS COMPILE_PCT,
        ROUND(SUM(q.COMPILATION_TIME) / 1000, 1) AS TOTAL_COMPILE_SEC,
@@ -119,7 +131,7 @@ def chatter_families_for_application(application: str = "", days: int = 30,
     return f"""
 WITH q AS (
     SELECT q.SESSION_ID, q.QUERY_PARAMETERIZED_HASH, LEFT(q.QUERY_TEXT, 90) AS QUERY_TEXT,
-           q.QUERY_TYPE, q.COMPILATION_TIME, q.TOTAL_ELAPSED_TIME,
+           q.QUERY_TYPE, q.WAREHOUSE_NAME, q.COMPILATION_TIME, q.TOTAL_ELAPSED_TIME,
            COALESCE(q.CREDITS_USED_CLOUD_SERVICES, 0) AS CS_CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
     WHERE {q_where}
@@ -133,6 +145,8 @@ sess AS (
 SELECT q.QUERY_PARAMETERIZED_HASH,
        ANY_VALUE(q.QUERY_TEXT) AS SAMPLE_TEXT,
        ANY_VALUE(q.QUERY_TYPE) AS QUERY_TYPE,
+       -- R1-090: cs_driver reads 'NONE' as a warehouse-less (metadata) family -- deterministic for a mixed family
+       IFF(COUNT_IF(q.WAREHOUSE_NAME IS NULL) * 2 >= COUNT(*), 'NONE', MAX(q.WAREHOUSE_NAME)) AS WAREHOUSE_NAME,
        COUNT(*) AS RUNS,
        ROUND(AVG(q.COMPILATION_TIME) / 1000, 2) AS AVG_COMPILE_S,
        ROUND(AVG(q.TOTAL_ELAPSED_TIME) / 1000, 2) AS AVG_TOTAL_S,
@@ -140,7 +154,7 @@ SELECT q.QUERY_PARAMETERIZED_HASH,
        ROUND(SUM(q.CS_CREDITS), 4) AS CS_CREDITS
 FROM q
 LEFT JOIN sess s ON s.SESSION_ID = q.SESSION_ID
-WHERE COALESCE(s.APPLICATION, '(unknown)') = {sql_literal(application)}
+WHERE {_APP_OF} = {sql_literal(application)}
 GROUP BY 1
 HAVING COUNT(*) >= {min_runs}
 ORDER BY SUM(q.COMPILATION_TIME) DESC

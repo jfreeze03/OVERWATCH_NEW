@@ -1851,11 +1851,17 @@ ORDER BY 1
 
 def ml_forecast_daily() -> str:
     """Reader for the opt-in SNOWFLAKE.ML.FORECAST output table (see
-    snowflake/ml_forecast_option.sql). Absent = engine falls back."""
+    snowflake/ml_forecast_option.sql). Absent = engine falls back.
+
+    R1-230: INCLUDES today's row (>=, account clock per the TIMEZONE STANDARD).
+    Overview prorates today's own forecast row into the month-end projection
+    (#24) and then keeps only days strictly after today for the future sum; the
+    old strict ``>`` dropped that row here, so the today-remainder term was
+    always 0 while the basis still claimed it was prorated in."""
     return f"""
 SELECT TS::DATE AS DAY, FORECAST_CREDITS, LOWER_BOUND, UPPER_BOUND
 FROM {core_object("FORECAST_ML_DAILY")}
-WHERE TS::DATE > CURRENT_DATE()
+WHERE TS::DATE >= {account_today_sql()}
 ORDER BY DAY
 LIMIT 60
 """
@@ -2508,8 +2514,11 @@ FROM f_fn, l_fn
 def fleet_query_stats(days: int = 7, page: str = "") -> str:
     """Slow/failed fetches across ALL viewers (APP_QUERY_TELEMETRY, V021).
 
-    Only rows the app chose to persist land here (>=2s or failed), so this is
-    the regression surface, not a complete census — the note on the panel
+    The table persists every >=2s or failed fetch PLUS a ~2% healthy sample
+    (query.should_persist_telemetry); c09 R1-176: the WHERE keeps only the
+    >=2s-or-failed rows (the SLOW_2S threshold telemetry_by_page uses), so
+    SLOW_OR_FAILED, P50/P95 and the panel's clean state mean what they say.
+    The regression surface, not a complete census — the note on the panel
     says so.
 
     C6: ``page`` narrows to one page. The unfiltered call is LIMIT 40 by p95,
@@ -2535,6 +2544,7 @@ SELECT
     MAX_BY(QUERY_ID, IFF(QUERY_ID IS NOT NULL, ELAPSED_MS, NULL)) AS SLOWEST_QUERY_ID
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){page_filter}
+  AND (NOT OK OR ELAPSED_MS >= 2000)
 GROUP BY PAGE, QUERY_KEY
 ORDER BY P95_MS DESC NULLS LAST
 LIMIT 40
@@ -2580,8 +2590,18 @@ def fact_warehouse_pressure(days: int, company: str = "ALL", *, bounds: tuple | 
     the live scan was a top fleet pain key at 17.8s p50). Queued seconds,
     spill and counts are exact sums of the hourly fact; P95_ELAPSED_SEC is
     the PEAK hourly-group p95 — the caller labels it. Live stays as the
-    labeled fallback for pre-fact windows."""
-    days = max(1, min(int(days or 7), 90))
+    labeled fallback for pre-fact windows.
+
+    R1-018: the mart leg reads up to MAX_MART_WINDOW_DAYS instead of a hand-rolled
+    90-day clamp; the LIVE fallback stays clamped to 90. But the fact's 400-day
+    RETENTION is not COVERAGE (v4.606 holistic review): FACT_QUERY_HOURLY is
+    deliberately not backfilled (snowflake/backfill_365.sql) and its loader only
+    rewrites the trailing 48 hours, so it holds just the hours loaded since
+    OVERWATCH started. COVERED_DAYS carries that span: one scalar over the WHOLE
+    fact (not the window, the company or the HAVING-filtered warehouses), repeated
+    on every row. served_days() takes it over the requested window, and the
+    Contention caption says when the fact starts after the window does."""
+    days = bounded_days(days or 7, MAX_MART_WINDOW_DAYS)
     where = [scope_window_where("HOUR_TS", days, bounds=bounds),
              "WAREHOUSE_NAME IS NOT NULL"]
     if str(company).upper() != "ALL":
@@ -2592,7 +2612,10 @@ SELECT
     SUM(QUERY_COUNT) AS QUERY_COUNT,
     ROUND(SUM(COALESCE(QUEUED_SEC_SUM, 0)), 1) AS QUEUED_SEC,
     ROUND(SUM(COALESCE(SPILL_REMOTE_GB, 0)), 2) AS SPILL_REMOTE_GB,
-    MAX(COALESCE(P95_ELAPSED_SEC, 0)) AS P95_ELAPSED_SEC
+    MAX(COALESCE(P95_ELAPSED_SEC, 0)) AS P95_ELAPSED_SEC,
+    -- the days of history the fact holds (it is not backfilled), account clock; see the docstring
+    (SELECT GREATEST(1, DATEDIFF('day', MIN(cov.HOUR_TS), {account_today_sql()}) + 1)
+       FROM {core_object("FACT_QUERY_HOURLY")} cov) AS COVERED_DAYS
 FROM {core_object("FACT_QUERY_HOURLY")}
 WHERE {" AND ".join(where)}
 GROUP BY 1
@@ -3101,9 +3124,14 @@ SELECT
     -- route_send_failed row per failing route PER RUN, with the route id + integration
     -- in CONTEXT; collapse to distinct (route, day) so a persistent outage counts as
     -- route-days, not runs (mirrors the undelivered_expired once-per-24h grain).
-    (SELECT COUNT(DISTINCT CONTEXT || '|' || TO_VARCHAR(DATE_TRUNC('day', LOGGED_AT)))
+    -- R1-019: key on the ROUTE ID (CONTEXT token 2, the same key last_delivery_health
+    -- parses), not the whole CONTEXT string: since V164 one route writes two different
+    -- CONTEXT suffixes (the drain's '- will retry next run ...' and the escalation's
+    -- '- escalation re-post ...'), and a mid-day integration rename changes the text too,
+    -- so the full-string key counted one route-day twice.
+    (SELECT COUNT(DISTINCT SPLIT_PART(CONTEXT, ' ', 2) || '|' || TO_VARCHAR(DATE_TRUNC('day', LOGGED_AT)))
        FROM {core_object("APP_ERROR_LOG")}
-      WHERE ERROR_TYPE = 'route_send_failed'
+      WHERE PAGE = 'NotifyWebhook' AND ERROR_TYPE = 'route_send_failed'
         AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS ROUTE_FAILURES,
     -- rec19 (V064): the loud signal SP_NOTIFY_WEBHOOK itself raises when an OPEN
     -- eligible event ages past the 24h delivery window with no successful send.
@@ -3642,18 +3670,26 @@ ORDER BY HOURS_SINCE_LOAD DESC
 """
 
 
-def fact_contract_consumed(start_iso: str) -> str:
+def fact_contract_consumed(start_iso: str, end_iso: str | None = None) -> str:
     """Contract-period billed credits from the daily fact (r13 #7) — the live
     METERING_DAILY_HISTORY rescan becomes the coverage-guarded fallback.
 
     FACT_FIRST_DAY is the fact's OWN earliest day, computed WITHOUT the
     contract filter (Codex r14 #8: MIN(DAY) inside WHERE DAY >= start made a
     quiet contract-start day read as "no coverage" forever). The caller
-    trusts the sum only when FACT_FIRST_DAY <= contract start."""
+    trusts the sum only when FACT_FIRST_DAY <= contract start.
+
+    ``end_iso`` (R1-159) bounds the sum to the TERM, END-EXCLUSIVE — the same clock
+    forecast.contract_pace runs (term_days = end - start) — so a term that ended before
+    SETTINGS was rolled stops accruing post-term credits. The bound sits inside the IFF,
+    never a WHERE, so FACT_FIRST_DAY stays the unfiltered retention floor."""
     from datetime import date
     start = date.fromisoformat(str(start_iso)).isoformat()
+    in_term = f"DAY >= '{start}'"
+    if end_iso:
+        in_term += f" AND DAY < '{date.fromisoformat(str(end_iso)).isoformat()}'"
     return f"""
-SELECT SUM(IFF(DAY >= '{start}', CREDITS_BILLED, 0)) AS CREDITS_BILLED_TO_DATE,
+SELECT SUM(IFF({in_term}, CREDITS_BILLED, 0)) AS CREDITS_BILLED_TO_DATE,
        MIN(DAY) AS FACT_FIRST_DAY
 FROM {mart_object("FACT_METERING_DAILY")}
 """
@@ -3677,13 +3713,23 @@ GROUP BY 1, 2
 ORDER BY DAY
 """
 
-def unmapped_entities(days: int = 7) -> str:
+def unmapped_entities(days: int = 7, *, bounds: tuple | None = None) -> str:
     """V044 (#18): everything the loaders stamped UNKNOWN — the explicit-
     classification worklist behind honest chargeback. Mart-only (zero
     ACCOUNT_USAGE): rows appear as facts re-stamp (trailing 3d nightly,
     go-forward hourly). Fix = a COMPANY_SCOPE mapping row; the panel
-    prints the exact INSERT."""
-    days = bounded_days(days, 30)
+    prints the exact INSERT.
+
+    R1-145: serves the PAGE window. It used to clamp to 30 days while the panel's scope chip, KPI
+    help ("in this window"), 'Est. $ (window)' column and green "every entity in the window carries
+    company evidence" claimed the full window — so at 90/365d or Current year a warehouse billed
+    UNKNOWN 31+ days ago dropped out of the billed-blind $ and the clean state covered unchecked
+    days. All three sources are FACT_* tables (V014 retention 400d hourly / 800d daily), so the mart
+    window cap applies, not the 90d live one; ``bounds`` (date_windows.window_bounds) gives Last month
+    its calendar month and the period-to-date presets their exact range instead of a trailing span."""
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    _w_day = scope_window_where("DAY", days, bounds=bounds)
+    _w_hour = scope_window_where("HOUR_TS", days, bounds=bounds)
     # r7 uncapped-aggregate: only the WAREHOUSE grain carries credits, and it sorts LAST
     # alphabetically (DATABASE < USER < WAREHOUSE), so >300 unmapped DB+USER rows would
     # evict every credit-bearing warehouse row past the LIMIT — the "billed blind" $ then
@@ -3695,17 +3741,17 @@ WITH unm AS (
            'credits' AS MEASURE, ROUND(SUM(CREDITS_TOTAL), 2) AS VALUE,
            MAX(DAY) AS LAST_SEEN
     FROM {core_object("FACT_WAREHOUSE_DAILY")}
-    WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+    WHERE COMPANY = 'UNKNOWN' AND {_w_day}
     GROUP BY 2
     UNION ALL
     SELECT 'DATABASE', DATABASE_NAME, 'queries', SUM(QUERIES), MAX(DATE(HOUR_TS))
     FROM {core_object("FACT_QUERY_SCHEMA_HOURLY")}
-    WHERE COMPANY = 'UNKNOWN' AND HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
+    WHERE COMPANY = 'UNKNOWN' AND {_w_hour}
     GROUP BY 2
     UNION ALL
     SELECT 'USER', USER_NAME, 'logins', SUM(LOGINS), MAX(DAY)
     FROM {core_object("FACT_LOGIN_DAILY")}
-    WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+    WHERE COMPANY = 'UNKNOWN' AND {_w_day}
     GROUP BY 2
 )
 SELECT GRAIN, ENTITY, MEASURE, VALUE, LAST_SEEN,

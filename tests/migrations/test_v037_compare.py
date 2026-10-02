@@ -151,7 +151,11 @@ def test_delta_chip_survives_an_empty_b_side():
     from app.ui.pages.cost_parts.compare import _delta_chip
 
     assert pct_delta(42.0, 0.0) is None                   # the documented contract
-    assert _delta_chip(42.0, 0.0) == "no B-side data"     # never formats None
+    # never formats None. R1-150: "no B-side data" only when the B side returned no row at all; a
+    # LOADED B of zero is a real value, so the chip says what it is instead of claiming B is missing.
+    assert _delta_chip(42.0, 0.0, b_present=False) == "no B-side data"
+    assert _delta_chip(42.0, 0.0) == "up from 0 vs B"
+    assert _delta_chip(0.0, 0.0) == "0 on both sides"
     assert _delta_chip(110.0, 100.0) == "+10.0% vs B"
     src = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "compare.py").read_text(encoding="utf-8")
     assert "pct_delta(a, b):+" not in src                 # no direct format of pct_delta

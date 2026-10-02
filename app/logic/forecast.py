@@ -117,8 +117,15 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     covered_days = max(0, (today - cover_start).days)
     present_days = int(((frame["DAY"] >= cover_start) & (frame["DAY"] < today)).sum())
     missing_days = max(0, covered_days - present_days)
+    # Judge density over at least the trailing baseline window, not month-to-date alone: on the
+    # 2nd with the 1st lagging, MTD is 0 of 1 days present and the guard refused to fill the one
+    # lagged day, so month-end read a day low on the first days of every month. Only the MTD
+    # missing days are filled; the wider window only decides whether the account is dense.
+    dens_start = max(frame["DAY"].min(), today - timedelta(days=max(covered_days, _BASELINE_DAYS)))
+    dens_days = max(1, (today - dens_start).days)
+    dens_present = int(((frame["DAY"] >= dens_start) & (frame["DAY"] < today)).sum())
     gap_fill = (missing_days * float(baseline["USD"].mean())
-                if missing_days and present_days >= covered_days / 2 else 0.0)
+                if missing_days and dens_present >= dens_days / 2 else 0.0)
 
     # rec#15: a 14-day window gives day-of-week means only 2 samples each, so the
     # seasonal band came out over-narrow and over-confident. Widen the seasonal

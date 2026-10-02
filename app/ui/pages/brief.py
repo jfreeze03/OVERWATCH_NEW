@@ -12,6 +12,7 @@ from app.config import SAVINGS_ACTIVE_MONTHS
 from app.core.errors import safe_page
 from app.core.identity import viewer_name
 from app.core.query import run, run_batch
+from app.core.result import is_setup_absence
 from app.core.state import can_open, filters, request_navigation
 from app.data import mart_sql
 from app.logic import case_file, contract_planner
@@ -31,7 +32,14 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
-from app.logic.verdict import Signal, attention_bundle, attention_healthy, attention_signals, page_verdict
+from app.logic.verdict import (
+    NO_CONTRACT_RUNWAY,
+    attention_bundle,
+    attention_healthy,
+    attention_signals,
+    contract_runway_signal,
+    page_verdict,
+)
 from app.logic.workbench import my_queue_counts
 from app.ui import attention, charts
 from app.ui.components import (
@@ -412,14 +420,14 @@ def render() -> None:
         open_incidents=(_n_inc if _inc.ok else None),
         etl=_etl)
     _vsig = attention_signals(_attn)
-    if _best is not None:
-        _dl = _best["days_left"]
-        if 0 <= _dl <= 30:
-            _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days"))
-        elif 0 <= _dl <= 90:
-            _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days"))
+    # The Cost page's shared runway Signal: an overrun (days_left < 0) is Attention, a failed runway
+    # read is Watch, and with no contract configured the all-clear claims nothing about a contract.
+    _rsig = contract_runway_signal(_best, read_ok=exh.usable())
+    if _rsig is not None:
+        _vsig.append(_rsig)
+    _rclause = "contract runway healthy" if _best is not None else NO_CONTRACT_RUNWAY
     page_verdict_line(page_verdict(
-        _vsig, healthy=attention_healthy(_attn) + "; contract runway healthy"))
+        _vsig, healthy=f"{attention_healthy(_attn)}; {_rclause}"))
     contract_runway_bar(_best)
     panel_help(
         "Your one-scroll morning read: the headline numbers, then open fires, then the top "
@@ -516,6 +524,11 @@ def render() -> None:
                                          key="brief_fires_sel", height=TABLE_H_SM)
             # rec29 sticky-selection guard: st.dataframe re-emits the selection on
             # every rerun, so open the event's drawer only when the row CHANGES.
+            if _fire_sel is None:
+                # R1-215 re-arm (as components.selectable_nav_table): the drawer navigates away, so the
+                # table returns unselected -- a sentinel that outlived it swallowed the next click on
+                # the same row after Back. A None selection never navigates, so no rerun loop.
+                st.session_state.pop("_brief_fire_sel_last", None)
             if _fire_sel is not None and _fire_sel != st.session_state.get("_brief_fire_sel_last"):
                 st.session_state["_brief_fire_sel_last"] = _fire_sel
                 _eid = str(_fires.iloc[int(_fire_sel)]["EVENT_ID"])
@@ -528,8 +541,10 @@ def render() -> None:
         # rec23/house-rule-8: green means VERIFIED CLEAN, never "nothing loaded".
         if events.ok:
             empty_state("clean", "No open alerts.")
-        else:
+        elif is_setup_absence(events.error_kind):
             empty_state("needs_setup", "Alerting not installed yet.")
+        else:   # c09 R1-194: a timeout or other failure is a failed read, not "not installed"
+            empty_state("unavailable", "Couldn't read open alerts right now.", detail=events.error)
 
     section_header("Asks", "", "bolt")
     brief_action_lines: list[str] = []
@@ -580,8 +595,10 @@ def render() -> None:
     else:
         if actions.ok:
             empty_state("clean", "Action queue is empty.")
-        else:
+        elif is_setup_absence(actions.error_kind):
             empty_state("needs_setup", "Action queue not installed yet.")
+        else:   # c09 R1-194
+            empty_state("unavailable", "Couldn't read the action queue right now.", detail=actions.error)
 
     # Watch automation (owner ask 2026-08-17): the proactive half of "watch". If
     # any watched entity moved (cost spike/drop or health drop), the badge leads

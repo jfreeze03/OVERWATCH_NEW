@@ -509,7 +509,9 @@ def test_alert_recheck_humanizes_queued_minutes():
     assert _recheck_value_text("PERF_QUEUED_MINUTES", 145.0) == "2h 25m"
     assert _recheck_value_text("perf_queued_minutes", 30.0) == "30m"
     assert _recheck_value_text("COST_WH_DAILY_CREDITS", 12.345) == "12.35"
-    assert recheck_sql.recheck_label("PERF_QUEUED_MINUTES") == "queued time today"
+    # review R1-040 moved this lock deliberately: the queued-time re-check now reads the alert's own trailing-24h
+    # FACT_QUERY_HOURLY basis (was since-midnight), so its label names 24h, not "today"
+    assert recheck_sql.recheck_label("PERF_QUEUED_MINUTES") == "queued time (24h)"
     alerts = (_ROOT / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
     assert "{_rcv:,.2f}" not in alerts and "{safe_float(_rct):,.2f}" not in alerts
 

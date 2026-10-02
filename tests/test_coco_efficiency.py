@@ -81,7 +81,10 @@ def test_empty_and_missing_daily_degrade_without_raising():
     credit_only = coco_efficiency(None, _daily(), cap_credits=15.0)
     assert not credit_only.empty
     assert credit_only.set_index("USER_NAME").loc["CRUTCH", "FLAG"] == "🚩 Review"
-    assert (credit_only["CACHE_WRITE_PCT"] == 0).all()   # no token grain -> cache cols zero
+    # R1-104 changed this lock: no token grain means NO cache behaviour -- NaN ('—'), never a fabricated 0
+    # (house law 8; it rendered as the worst-possible "Cache hit % 0.0%" next to a "caching is high" note)
+    for col in ("CACHE_WRITE_PCT", "READ_AMP", "CACHE_HIT_PCT", "TOTAL"):
+        assert credit_only[col].isna().all(), col
 
 
 def test_a_sporadic_burst_is_not_flagged_as_a_chronic_crutch():

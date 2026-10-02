@@ -38,12 +38,61 @@ LIMIT 2000
 """
 
 
+# R1-060: an incident's auto-investigation reads the registries ANCHORED on its onset —
+# [onset - ONSET_LEAD_DAYS, onset + ONSET_AFTER_DAYS], nearest-to-onset first — instead of a
+# newest-first lookback from now: on a churny account the LIMIT 200 kept only post-onset CI
+# redeploys and silently cut the pre-onset trigger (rca caps post-onset changes at LOW anyway).
+ONSET_LEAD_DAYS = 3
+ONSET_AFTER_DAYS = 1
+
+
+def _onset_wall_clock(onset: object) -> str:
+    """``onset`` as an account-time (Central) wall-clock 'YYYY-MM-DD HH:MM:SS' — a naive datetime /
+    ISO string is taken as account time (INCIDENTS.STARTED_AT is NTZ); an aware one converts to it.
+    Raises ValueError on anything that is not a timestamp, so no text reaches the SQL."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    ts = onset if isinstance(onset, datetime) else datetime.fromisoformat(str(onset).strip())
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(ZoneInfo(ACCOUNT_TIMEZONE)).replace(tzinfo=None)
+    return ts.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _onset_prune_bounds(onset: object) -> tuple[str, str]:
+    """(lo, hi) for a PRUNE predicate on a raw TIMESTAMP_LTZ column (GRANTS_* CREATED_ON /
+    DELETED_ON) around ``onset``: _onset_window's range widened by a day on each side. Both are
+    TIMESTAMP_LTZ constants -- the column's own type, like the default feed's CURRENT_TIMESTAMP()
+    cutoff -- so the base scan prunes to the onset's few days however old the incident is. The day
+    of slack absorbs the session-vs-account clock (an LTZ literal reads in the session timezone);
+    the exact Central-wall-clock cut stays _onset_window's job."""
+    lit = f"'{_onset_wall_clock(onset)}'::TIMESTAMP_LTZ"
+    return (f"DATEADD('day', -{ONSET_LEAD_DAYS + 1}, {lit})",
+            f"DATEADD('day', {ONSET_AFTER_DAYS + 1}, {lit})")
+
+
+def _onset_window(column: str, onset: object) -> tuple[str, str]:
+    """(WHERE clause, ORDER BY key) for ``column`` (a TIMESTAMP_LTZ) around ``onset`` — a naive
+    account-time datetime / ISO string (INCIDENTS.STARTED_AT is NTZ); an aware one converts to
+    account time. Both sides compare as Central wall clock (the timezone standard in common.py).
+    Raises ValueError on anything that is not a timestamp, so no text reaches the SQL."""
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    lit = f"'{_onset_wall_clock(onset)}'::TIMESTAMP_NTZ"
+    seen = f"CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', {column})::TIMESTAMP_NTZ"
+    return (f"{seen} BETWEEN DATEADD('day', -{ONSET_LEAD_DAYS}, {lit}) "
+            f"AND DATEADD('day', {ONSET_AFTER_DAYS}, {lit})",
+            f"ABS(DATEDIFF('second', {seen}, {lit}))")
+
+
 def change_registry(days: int, company: str = "ALL", database: str = "",
-                    schema_contains: str = "") -> str:
-    """Tracked object changes: frozen baseline vs post-change stats + verdict."""
+                    schema_contains: str = "", *, onset: object = None) -> str:
+    """Tracked object changes: frozen baseline vs post-change stats + verdict. With ``onset``
+    the window is anchored on it (``days`` is ignored) and the cap keeps the nearest rows."""
     days = bounded_days(days, 120)
+    win = _onset_window("CHANGE_SEEN_AT", onset) if onset is not None else None
     where = and_where(
-        f"CHANGE_SEEN_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        win[0] if win else f"CHANGE_SEEN_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "" if company == "ALL" else f"COMPANY = {sql_literal(company)}",
         companies.database_equals_clause(database, "DATABASE_NAME"),
         contains_filter("SCHEMA_NAME", schema_contains),
@@ -61,7 +110,7 @@ SELECT
     COUNT(*) OVER () AS TOTAL_CHANGES
 FROM {core_object("OBJECT_CHANGE_REGISTRY")}
 WHERE {where}
-ORDER BY CHANGE_SEEN_AT DESC
+ORDER BY {win[1] if win else "CHANGE_SEEN_AT DESC"}
 LIMIT 200
 """
 
@@ -143,11 +192,15 @@ _WH_NAME_RE = re.compile(r"^[A-Za-z0-9_$]{1,200}$")
 
 
 def warehouse_change_registry(days: int, company: str = "ALL",
-                              warehouse_contains: str = "") -> str:
-    """Detected warehouse setting changes: frozen baseline vs after + verdict."""
+                              warehouse_contains: str = "", *, onset: object = None) -> str:
+    """Detected warehouse setting changes: frozen baseline vs after + verdict. With ``onset``
+    the window is anchored on it (``days`` is ignored) and the cap keeps the nearest rows. In
+    every mode TOTAL_CHANGES / TOTAL_REGRESSED / TOTAL_IMPROVED / TOTAL_PENDING carry the
+    pre-LIMIT window counts (R1-060 / R1-065)."""
     days = bounded_days(days, 180)
+    win = _onset_window("w.CHANGE_SEEN_AT", onset) if onset is not None else None
     where = and_where(
-        f"CHANGE_SEEN_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        win[0] if win else f"CHANGE_SEEN_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "" if company == "ALL" else f"COMPANY = {sql_literal(company)}",
         contains_filter("WAREHOUSE_NAME", warehouse_contains),
     )
@@ -156,7 +209,7 @@ SELECT
     WAREHOUSE_NAME, COMPANY, SETTING, OLD_VALUE, NEW_VALUE, CHANGE_SEEN_AT,
     CHANGED_BY,
     IFF(w.CHANGED_BY IS NULL, 'UNKNOWN',
-        IFF(POSITION(UPPER(w.CHANGED_BY) IN da.ACTORS) > 0,
+        IFF(POSITION(',' || UPPER(TRIM(w.CHANGED_BY)) || ',' IN da.ACTORS) > 0,
             'MANAGED', 'MANUAL')) AS CHANGE_SOURCE,
     VERDICT, VERDICT_DETAIL,
     BASELINE_QUERIES, AFTER_QUERIES, AFTER_DAYS,
@@ -165,15 +218,24 @@ SELECT
     BASELINE_QUEUED_MIN_PER_DAY, AFTER_QUEUED_MIN_PER_DAY,
     BASELINE_SPILL_GB_PER_DAY, AFTER_SPILL_GB_PER_DAY,
     BASELINE_FAIL_PCT, AFTER_FAIL_PCT,
-    TRACKING_UNTIL, ALERTED
+    TRACKING_UNTIL, ALERTED,
+    -- untruncated window totals for the KPI tiles and the onset-mode caption (window functions run
+    -- before the LIMIT; R1-065 / R1-060), so >200 changes in the window no longer reads 200 (wh_change.registry_kpis)
+    COUNT(*) OVER () AS TOTAL_CHANGES,
+    COUNT_IF(w.VERDICT = 'REGRESSED') OVER () AS TOTAL_REGRESSED,
+    COUNT_IF(w.VERDICT = 'IMPROVED') OVER () AS TOTAL_IMPROVED,
+    COUNT_IF(w.VERDICT = 'PENDING') OVER () AS TOTAL_PENDING
 FROM {core_object("WAREHOUSE_CHANGE_REGISTRY")} w
 -- uncorrelated by construction (live round 9): the setting resolves once,
 -- POSITION runs per row — no correlated-aggregate subquery for Snowflake
--- to reject. Empty ACTORS means POSITION()=0 -> every human is MANUAL.
-CROSS JOIN (SELECT UPPER(COALESCE(MAX(VALUE), '')) AS ACTORS
+-- to reject. R1-067: DEPLOY_ACTORS is a comma list, so match a WHOLE member —
+-- ',' || actor || ',' inside ',' || list-without-whitespace || ',' — never a
+-- substring ('SVC_FLYWAY' must not read MANAGED off 'SVC_FLYWAY_PRD'). An empty
+-- setting is ',,' -> POSITION()=0 -> every human is MANUAL.
+CROSS JOIN (SELECT ',' || REGEXP_REPLACE(UPPER(COALESCE(MAX(VALUE), '')), '[[:space:]]', '') || ',' AS ACTORS
             FROM DBA_MAINT_DB.OVERWATCH.SETTINGS WHERE KEY = 'DEPLOY_ACTORS') da
 WHERE {where}
-ORDER BY CHANGE_SEEN_AT DESC
+ORDER BY {win[1] if win else "CHANGE_SEEN_AT DESC"}
 LIMIT 200
 """
 

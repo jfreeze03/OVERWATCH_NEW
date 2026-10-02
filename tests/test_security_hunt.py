@@ -75,7 +75,7 @@ def test_breakglass_panel_reads_live_all_statements():
 def test_export_pack_mfa_sheet_has_live_proof():
     pack = _SEC.split("def _export_pack", 1)[1].split("\ndef ", 1)[0]
     assert 'name == "mfa_gaps_password_login" and res.ok and res.empty' in pack
-    assert "users_without_mfa_live(company)" in pack
+    assert "users_without_mfa_live(company, limit=_PACK_ROW_CAP)" in pack   # R1-190: the pack row cap
 
 
 # --- M1: overview gates on queue.ok before scoring -------------------------------------

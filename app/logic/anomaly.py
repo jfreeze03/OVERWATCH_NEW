@@ -6,9 +6,13 @@ inflating the baseline. Pure functions over pandas frames; no Streamlit.
 
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 
 import pandas as pd
+
+from .formulas import humanize_duration
+from .sizing import QUEUE_UP_MIN_PER_DAY
 
 # Standard-normal consistency constants (Iglewicz & Hoaglin modified z-scores).
 _MAD_K = 0.6745
@@ -240,16 +244,54 @@ def flag_anomalies(
     return out
 
 
+def unscorable_groups(df: pd.DataFrame, value_col: str, group_col: str, *,
+                      min_active_days: int = ANOMALY_MIN_ACTIVE_DAYS,
+                      min_value: float = ANOMALY_MIN_USD) -> int:
+    """How many groups flag_anomalies(..., min_value, min_active_days) can NEVER flag while
+    they hold a material day — the disclosure an all-clear owes its reader (E5).
+
+    The gate is flag_anomalies' own: a group with fewer than ``min_active_days`` non-zero
+    rows is never IS_ANOMALY (that also covers robust_zscores' <5-point cutoff, as long as
+    min_active_days >= 5). Only groups whose largest value reaches ``min_value`` count — a
+    group that never spent a material amount hides nothing the scorer would have raised.
+    R1-203: the caption used to count only warehouses with <5 distinct days, so an 8-day-old
+    warehouse's spike sat behind a clean triage whose caption implied it was scored."""
+    if df is None or df.empty or value_col not in df.columns or group_col not in df.columns:
+        return 0
+    vals = pd.to_numeric(df[value_col], errors="coerce").fillna(0.0)
+    by = vals.groupby(df[group_col], dropna=False)
+    active = (vals > 0).groupby(df[group_col], dropna=False).sum()
+    material = by.max() >= float(min_value)
+    return int(((active < int(min_active_days)) & material).sum())
+
+
 def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
-                    day_col: str = "DAY") -> list[dict]:
-    """Compact anomaly rows for KPI/alert surfaces, strongest first.
+                    day_col: str = "DAY", *, day_from: object = None,
+                    day_to: object = None) -> list[dict]:
+    """Compact anomaly rows for KPI/alert surfaces, strongest first (top 10).
 
     Each row carries its ``day`` (the value of ``day_col``, or None when the frame
     has no such column) so callers can age one-off spikes out instead of re-firing a
-    stale, dateless anomaly every rerun (r6-bug5)."""
+    stale, dateless anomaly every rerun (r6-bug5).
+
+    ``day_from`` / ``day_to`` (dates, inclusive; either may be None) keep only the hits
+    whose CALENDAR day falls in that window, BEFORE the top-10 cap. A caller that wants
+    one day's (or one window's) anomalies must filter here, never on the capped list:
+    MAD z-scores are window-wide, so 10+ stronger HISTORICAL spikes or weekend collapses
+    elsewhere in a 30-day frame would otherwise take every slot and silently evict the
+    current spike (R1-202; watch_monitor's cost arm cuts its frame the same way). The
+    comparison is on normalized dates, so a datetime64 DAY and a DATE DAY both match."""
     if df.empty or "IS_ANOMALY" not in df.columns:
         return []
     hits = df[df["IS_ANOMALY"]].copy()
+    if (day_from is not None or day_to is not None) and day_col in hits.columns:
+        _days = pd.to_datetime(hits[day_col], errors="coerce").dt.date
+        keep = _days.notna()
+        if day_from is not None:
+            keep &= _days >= pd.Timestamp(day_from).date()
+        if day_to is not None:
+            keep &= _days <= pd.Timestamp(day_to).date()
+        hits = hits[keep]
     if hits.empty:
         return []
     hits = hits.reindex(hits["Z_SCORE"].abs().sort_values(ascending=False).index)
@@ -265,20 +307,54 @@ def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
     ]
 
 
+# R1-074: PEAK_QUEUED is a single-interval MAX(AVG_QUEUED_LOAD), so on its own it cannot say
+# "sustained". ops_sql.warehouse_concurrency_peaks also returns QUEUED_INTERVALS: the intervals with
+# AVG_QUEUED_LOAD > 0.5, counted over the WHOLE read window (not per day). Queueing counts as
+# sustained, and sorts above every spend anomaly, only at sizing.QUEUE_UP_MIN_PER_DAY's
+# "sustained overload" RATE (30 min/day) across that window: 30 min x 14 days / 5 min = 84 queued
+# intervals on the opener. (Review r1: a flat 6 was 30 min per 14 days, ~2 min/day, so six scattered
+# 5-minute bursts still read "sustained".) The rate is the same; the measure differs: wall-clock
+# queued intervals here, summed per-query overload queue time in sizing. Below the rate a warehouse
+# whose peak reaches the floor still SHOWS, as a plain peak after the spend anomalies (review r2:
+# dropping it let the opener read clean over hours of real queueing).
+LOAD_INTERVAL_MIN = 5              # ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY's interval grain
+# The window the Warehouses opener reads warehouse_concurrency_peaks over
+# (operations._wh_activity_anomalies); tests/test_wh_attention.py locks the call sites to it.
+ATTENTION_PEAKS_WINDOW_DAYS = 14
+
+
+def sustained_queue_min_intervals(window_days: int = ATTENTION_PEAKS_WINDOW_DAYS) -> int:
+    """The QUEUED_INTERVALS count that reaches sizing.QUEUE_UP_MIN_PER_DAY (minutes of queueing per
+    day) over a ``window_days`` peaks window at the load view's LOAD_INTERVAL_MIN grain."""
+    return max(1, math.ceil(QUEUE_UP_MIN_PER_DAY * max(int(window_days), 1) / LOAD_INTERVAL_MIN))
+
+
 def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | None,
-                                *, queue_floor: float = 1.0) -> pd.DataFrame:
+                                *, queue_floor: float = 1.0,
+                                window_days: int = ATTENTION_PEAKS_WINDOW_DAYS) -> pd.DataFrame:
     """rec5: merge the two ALREADY-loaded warehouse signals — daily-spend anomalies and
     sustained concurrency queueing — into one worst-first "needs attention now" table for
     the Warehouses opener. Pure pandas: no Streamlit, no new read.
 
     ``anomalies`` is the flagged-anomaly subset (the IS_ANOMALY rows, cols WAREHOUSE_NAME,
-    USD, Z_SCORE). ``peaks`` is the concurrency-peaks frame (WAREHOUSE_NAME, PEAK_QUEUED),
-    or None when that read failed. Returns one row per flagged warehouse with WORST_Z
-    (max |z|), ANOM_DAYS (count of anomalous days), ANOM_USD (summed anomalous-day spend),
-    PEAK_QUEUED, and a human REASON — sorted queueing-first, then by |z|, then queue depth.
-    Empty frame when nothing is anomalous or queueing (so the opener shows the clean state).
-    Column names carry no _SEC/_MS suffix: these are counts and dollars, not durations."""
-    cols = ["WAREHOUSE_NAME", "WORST_Z", "ANOM_DAYS", "ANOM_USD", "PEAK_QUEUED", "REASON"]
+    USD, Z_SCORE). ``peaks`` is the concurrency-peaks frame (WAREHOUSE_NAME, PEAK_QUEUED,
+    QUEUED_INTERVALS) read over ``window_days``, or None when that read failed. A warehouse is in
+    the queue signal when its PEAK_QUEUED reaches ``queue_floor``; it is SUSTAINED queueing (called
+    so, and sorted above every spend anomaly) only when its QUEUED_INTERVALS also reach
+    ``sustained_queue_min_intervals(window_days)``, i.e. sizing's 30 min/day sustained-overload rate
+    across the window (R1-074: a one-off 5-minute burst, or a few scattered ones, is not "users
+    feeling it now"). A sub-bar count, or a frame without QUEUED_INTERVALS (an older shape), keeps
+    the row as a plain peak ("peak queued ~X") — shown, never called sustained, sorted after every
+    spend anomaly; it is demoted, never dropped, so a warehouse that queued below the bar cannot
+    leave the opener reading clean. Returns one row per flagged
+    warehouse with WORST_Z (max |z|), ANOM_DAYS (count of anomalous days), ANOM_USD (summed
+    anomalous-day spend),
+    PEAK_QUEUED, QUEUED_INTERVALS and a human REASON — sorted sustained-queueing-first, then by
+    |z|, then queue depth. Empty frame when nothing is anomalous or queueing (so the opener
+    shows the clean state). Column names carry no _SEC/_MS suffix: these are counts and
+    dollars, not durations."""
+    cols = ["WAREHOUSE_NAME", "WORST_Z", "ANOM_DAYS", "ANOM_USD", "PEAK_QUEUED", "QUEUED_INTERVALS",
+            "REASON"]
     if anomalies is not None and not anomalies.empty \
             and {"WAREHOUSE_NAME", "Z_SCORE"}.issubset(anomalies.columns):
         _a = anomalies.copy()
@@ -301,16 +377,32 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
             and {"WAREHOUSE_NAME", "PEAK_QUEUED"}.issubset(peaks.columns):
         _p = peaks.copy()
         _p["PEAK_QUEUED"] = pd.to_numeric(_p["PEAK_QUEUED"], errors="coerce")
-        queue = (_p[_p["PEAK_QUEUED"] >= queue_floor]
-                 .groupby("WAREHOUSE_NAME", as_index=False)["PEAK_QUEUED"].max())
+        # NaN when the frame predates the count: the peak then stays a plain (unsorted) peak
+        _p["QUEUED_INTERVALS"] = (pd.to_numeric(_p["QUEUED_INTERVALS"], errors="coerce")
+                                  if "QUEUED_INTERVALS" in _p.columns else float("nan"))
+        # Every warehouse whose peak reaches the floor stays IN the opener (review r2 on R1-074:
+        # deleting the sub-bar ones made a warehouse that queued for hours below the 30 min/day bar
+        # vanish, and the opener could then read "checked, clean"). The interval bar only decides
+        # whether the row is called sustained and sorted first (_HAS_Q below), never whether it shows.
+        _p = _p[_p["PEAK_QUEUED"] >= queue_floor]
+        queue = _p.groupby("WAREHOUSE_NAME", as_index=False).agg(
+            PEAK_QUEUED=("PEAK_QUEUED", "max"), QUEUED_INTERVALS=("QUEUED_INTERVALS", "max"))
     else:
         queue = pd.DataFrame({
             "WAREHOUSE_NAME": pd.Series(dtype=object),
             "PEAK_QUEUED": pd.Series(dtype="float64"),
+            "QUEUED_INTERVALS": pd.Series(dtype="float64"),
         })
     if spend.empty and queue.empty:
         return pd.DataFrame(columns=cols)
     merged = spend.merge(queue, on="WAREHOUSE_NAME", how="outer")
+    # sustained = a peak at the floor AND a known count at the bar; a sub-bar count and a count-less
+    # peak (NaN >= n is False) are both only a peak: shown, never called sustained, sorted after
+    # every spend anomaly (WORST_Z NaN sorts last)
+    _min_n = sustained_queue_min_intervals(window_days)
+    merged["_HAS_Q"] = (merged["PEAK_QUEUED"].notna()
+                        & pd.to_numeric(merged["QUEUED_INTERVALS"], errors="coerce").ge(_min_n))
+    _days = max(int(window_days), 1)
 
     def _reason(row) -> str:
         parts = []
@@ -320,13 +412,18 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
             parts.append(f"spend anomaly z={float(_z):.1f} on {_d} day{'s' if _d != 1 else ''}")
         _q = row.get("PEAK_QUEUED")
         if pd.notna(_q):
-            parts.append(f"queued ~{float(_q):.1f} sustained")
+            if row.get("_HAS_Q"):
+                # the per-day rate the gate measured, whole minutes, humanized (never raw minutes)
+                _per_day = round(float(row.get("QUEUED_INTERVALS") or 0) * LOAD_INTERVAL_MIN / _days)
+                parts.append(f"queued ~{float(_q):.1f} sustained "
+                             f"(~{humanize_duration(_per_day, 'min')}/day over {_days}d)")
+            else:
+                parts.append(f"peak queued ~{float(_q):.1f}")
         return " · ".join(parts)
 
     merged["REASON"] = merged.apply(_reason, axis=1)
-    # Worst-first: a queueing warehouse (users feeling it now) outranks a pure spend
+    # Worst-first: a SUSTAINED-queueing warehouse (users feeling it now) outranks a pure spend
     # anomaly, then by |z|, then by queue depth.
-    merged["_HAS_Q"] = merged["PEAK_QUEUED"].notna()
     merged = (merged.sort_values(by=["_HAS_Q", "WORST_Z", "PEAK_QUEUED"],
                                  ascending=[False, False, False], na_position="last")
               .drop(columns="_HAS_Q"))

@@ -121,7 +121,10 @@ version guard: each migration refuses to run if its predecessor is missing.
 
 Then `roles.sql` (idempotent; re-run after every upgrade) and
 `validate.sql` (every row should read OK). Deploy the app with
-`snow streamlit deploy --replace`.
+`snow streamlit deploy --replace`, from a clean, committed tree: it ships
+`snowflake.yml`'s artifacts as they are on disk, including the two
+snowflake/ templates every viewer can read on Alerts ▸ Native delivery
+(DEPLOYMENT.md §3).
 
 **Deploy order and the schema gate (since 4.602).** Every app read of a
 column a migration adds, and every caption that describes a migration's new
@@ -137,8 +140,18 @@ or at once on Refresh; Admin ▸ Migrations reads fresher.
 `webhook_delivery.sql` (notification integration + sender task — Microsoft
 Teams needs the Workflows Adaptive-Card recipe in that file, see §19),
 `native_alert_templates.sql` (CREATE ALERT equivalents if you prefer
-native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfill_365.sql`
-(one-time year of daily facts — run before ACCOUNT_USAGE history ages out).
+native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine; its
+procedure retrains the model on every run — see §7), `backfill_365.sql`
+(one-time year of daily facts and 180 days of security facts — run before
+ACCOUNT_USAGE history ages out; it suspends the hourly task graph around its
+extract-fed loads, each load
+is guarded so an error becomes a `FAILED:` row and Run All still reaches the
+RESUME, and its last pane's `BACKFILL_CALLS_FAILED` and `LOADER_ARMS_FAILED`
+must both read 0. If the worksheet stops early (a timeout or Stop), run its
+`ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME` and
+`SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY')`
+(the two statements just above the file's final verify SELECT) or
+`loader_chain_check.sql` step 0, or the hourly graph stays suspended).
 `teardown.sql` is the surgical uninstall (never drops the schema).
 
 ## 4. Scheduled automation (all times America/Chicago)
@@ -220,8 +233,11 @@ Admin → Settings, never in code.
 - **Open alerts** — COUNT of OPEN `ALERT_EVENTS` by severity.
 - **Platform score** — §6.
 - **Spend trend** — daily billed $ as bars (mart-first) with a 7-day
-  average line; the newest day renders dimmed (metering lags up to 24h —
-  partial, not a drop). Budget/day rule when a budget exists; the forecast
+  average line over calendar days (a day with no row counts as $0); the
+  caption's weekly pace compares the two calendar weeks ending on the newest
+  complete day. Only today's bar (account clock) renders dimmed — metering
+  lags up to 24h, so it is partial, not a drop; a window that ends before
+  today (Last month) dims nothing. Budget/day rule when a budget exists; the forecast
   range lives in the Projected KPI, not on the chart. Sparkline strip
   beneath = 14-day spend / query count / failures (from FACT_QUERY_HOURLY).
 - **Top actions** — top 5 OPEN `ACTION_QUEUE` rows ranked by severity, due
@@ -263,7 +279,11 @@ Admin → Settings, never in code.
   inside the "Load company attribution" toggle only.
 - **Contract** — pacing: consumed share vs elapsed-time share of
   `CONTRACT_CREDITS` between `CONTRACT_START_DATE`/`END`; pace ratio >1 =
-  burning faster than the clock. **Renewal planner**: growth scenarios on
+  burning faster than the clock. Consumed counts the term only, up to
+  (not including) `CONTRACT_END_DATE`. Once the term is over the section
+  shows the final term consumption and the over/unused credits, and
+  withholds pace, the projection and the steering levers until the new
+  term's three settings are entered. **Renewal planner**: growth scenarios on
   trailing 30d burn; recommended commit = term consumption × (1+buffer).
 - **Chargeback** — department = warehouse owner (`DEPARTMENT_MAP`):
   exact per-department billed credits; role-share within a warehouse as a
@@ -357,7 +377,11 @@ Admin → Settings, never in code.
   on a multi-cluster warehouse raise MAX_CLUSTER_COUNT only if its
   queries reach the current maximum, checked on Cost ▸ Idle & sizing ▸
   Check cluster use; the Sizing & efficiency table says so under the
-  table for its unchecked Add a cluster rows).
+  table for its unchecked Add a cluster rows). The opener's attention list
+  calls queueing "sustained", and ranks it above spend anomalies, only at
+  peak queued ≥1 plus ~30 min/day of queued 5-minute intervals across its
+  14-day read (84 intervals); a failed concurrency read shows "—", never a
+  green "nobody is queueing".
 - **Contention** — lock waits (LOCK_WAIT_HISTORY).
 - **Optimize** (v4.597, was Decision Studio ▸ Portfolio) — the
   recurring-query fix queue. Each measured query family gets its observed
@@ -416,7 +440,10 @@ SOC. **Governance drift score** at top (§6). Sections:
   evidence), failed logins, break-glass role holders, expiring credentials
   (10d horizon since V028, EXPIRED/EXPIRING), dormant-user scan (toggled; 90d no
   login but roles still granted, severity by age/role count), role grants
-  in window, auditor export pack (multi-sheet download).
+  in window, auditor export pack (multi-sheet download: each sheet reads
+  up to its own row cap, at most 10,000 rows; MANIFEST.txt states the span
+  each windowed sheet covers and marks any sheet that hit its cap
+  TRUNCATED).
 - **Changes** — recent DDL stacked by change kind (create/alter/drop/
   grants) with a who-changed-most bar beside it, failed-login reasons
   (network-policy vs credential), break-glass activity trend.
@@ -454,13 +481,23 @@ SOC. **Governance drift score** at top (§6). Sections:
   below. **MTTA/MTTR** KPIs = mean minutes RAISED→ACK and RAISED→RESOLVED
   over 90d.
 - **Rules** — ALERT_CONFIG: enable/disable, thresholds (SQL generated,
-  operator executes).
+  operator executes). The generator opens on the picked rule's current
+  threshold and Enabled and its UPDATE sets only what you changed (toggling
+  Enabled leaves THRESHOLD_NUM alone); a new threshold of 0 warns that most
+  rules would then fire on every row.
 - **History** — events by day, colored by severity.
-- **Native delivery** — ALERT_ROUTES viewer + add-route recipe; generated
-  CREATE ALERT templates for native-alert preference.
+- **Native delivery** — delivery status (TASK_ALERT_NOTIFY state from SHOW
+  TASKS on the 5-minute tier; a failed or empty task read says the state is
+  unknown, never "suspended"), ALERT_ROUTES viewer + add-route recipe,
+  and both snowflake/ templates to view or download — `native_alert_templates.sql`
+  (CREATE ALERT equivalents for native-alert preference) and
+  `webhook_delivery.sql` (Slack / Teams); both ship with the app as
+  `snowflake.yml` artifacts.
 
 ### Admin
-Settings (edit any SETTINGS key with typed confirm) ·
+Settings (edit any key the app reads — `config.DEFAULT_SETTINGS`, incl.
+`DEPLOY_ACTORS` — with typed confirm; a SETTINGS row outside that list is
+flagged "no longer read (safe to delete)") ·
 Migrations & freshness (SCHEMA_VERSION vs the expected V001-to-tip set — admin.py
 `_EXPECTED_MIGRATIONS` — with a drift warning, and the on-demand Task health check) ·
 App self-cost (the app's own queries/failures on WH_ALFA_ADMIN) · Org
@@ -561,8 +598,16 @@ fixed (drift items are countable facts).
   day-of-week mean (28d baseline); band from residuals vs weekday means;
   auto-falls back to linear under 14 data points.
 - **ml_forecast**: reads `FORECAST_ML_DAILY` (materialized by the opt-in
-  `ml_forecast_option.sql`: SNOWFLAKE.ML.FORECAST model + weekly refresh
-  task); credits × rate; falls back to seasonal when absent.
+  `ml_forecast_option.sql`: `SP_REFRESH_ML_FORECAST` retrains the
+  SNOWFLAKE.ML.FORECAST model on every complete day, then writes the 45 days
+  after it; the weekly task, created suspended, repeats both); MTD actual +
+  today's forecast prorated by the hours left + the forecast days to
+  month-end, credits × rate; falls back to seasonal when the table is absent,
+  when it has no day from today onward (the basis says so and says to
+  retrain), or when its days from today onward stop short of month-end (the
+  basis names the table's last day and says to retrain). Installed before
+  v4.606.0? Re-run `ml_forecast_option.sql` once — the old procedure never retrained, so its
+  horizon drained week by week.
 Every basis string names the engine in the KPI help.
 
 ## 8. AI engines (all grounded, all optional)
@@ -603,10 +648,17 @@ required "inconclusive" escape, word limits.
 
 - **Idle advisor / sizing / efficiency scans** find waste (§5 Cost).
 - **Guarded remediation** (Cost → Optimization): pick warehouse → generated
-  fix (`AUTO_SUSPEND 60` or an off-hours suspend/resume task pair from the
-  14-day hour-of-day profile; it refuses to propose when no ≥4h quiet
-  window pays) → typed confirm → execute → append-only REMEDIATION_LOG row
-  → ESTIMATED savings-ledger item.
+  fix. `AUTO_SUSPEND 60` → typed confirm → execute → append-only
+  REMEDIATION_LOG row; the daily change scan books and settles a tightened
+  timer against 14 days of actuals (V038), so the app books an ESTIMATED
+  savings-ledger item only for a change the scan can't book (e.g. a first
+  timer on a never-suspend warehouse). An off-hours suspend/resume task pair
+  (from the 14-day hour-of-day profile; it refuses to propose when no ≥4h
+  quiet window pays) is **review-only**: a multi-statement CREATE TASK
+  script OVERWATCH never runs (outside the executor allow-list). Run it in a
+  worksheet, then an operator's **Book estimated saving** adds one ESTIMATED
+  ledger item for that warehouse (a repeat click adds nothing unless the
+  earlier item was REJECTED).
 - **Savings verifier** (monthly) compares actual before/after spend and
   flips items to VERIFIED or REJECTED. Estimated and verified totals are
   never combined.
@@ -694,7 +746,10 @@ AI_RUNAWAY_INCLUDE_FUNCTIONS FALSE (COST_AI_USER_RUNAWAY, V163; the cap
 multiple is the rule's THRESHOLD_NUM, the cap is COCO_DAILY_CAP_CREDITS) ·
 ESCALATE_AFTER_MIN 120 (0 = off) and ESCALATE_EMAIL_INTEGRATION
 OVERWATCH_EMAIL (blank = no email leg; recipients = that integration's
-DEFAULT_RECIPIENTS, set in Snowsight, never stored here) (V164, §19). Values
+DEFAULT_RECIPIENTS, set in Snowsight, never stored here) (V164, §19) ·
+DEPLOY_ACTORS '' (comma list of deploy service users whose warehouse changes
+read MANAGED; §21 Attribution — deleting a populated row flips them to
+MANUAL). Values
 are strings; bad numbers fall back to defaults. Changes take effect within
 one cache cycle (≤5 min) or after Refresh.
 
@@ -901,7 +956,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 | ORGANIZATION_USAGE not granted | Org spend tab shows the grant hint, nothing else breaks |
 | TRUST_CENTER not granted | Trust Center section shows the grant hint |
 | Cortex/model unavailable | The morning digest sends the templated facts digest and logs `digest_ai_failed` (V165); AI panels surface the error; nothing else breaks |
-| FORECAST_ML_DAILY absent | Forecast engine silently uses seasonal, basis string says so |
+| FORECAST_ML_DAILY absent, empty from today on, or stops before month-end | Forecast engine uses seasonal, basis string says so (a table with days from today on that stops short: its last day + "retrain it with SP_REFRESH_ML_FORECAST"; a table with no day from today on: "no row for today or later" + the same retrain hint) |
 | Webhook integration missing | SP_NOTIFY_WEBHOOK returns a friendly failure; per-route errors log to APP_ERROR_LOG; events stay queued (NOTIFIED_AT null) |
 | ALTER SESSION unsupported (SiS) | SiS stamps its own app QUERY_TAG on every statement (self-traffic keys on it); the warehouse-level timeout is the backstop for reads; Cortex also sends a 1m 30s per-statement timeout |
 | Schema/db filters on mart-only panels | Panels that lack the dimension switch to live sources automatically |
@@ -1066,7 +1121,11 @@ routes retry every chain run inside the 24h window; events aging out
 undelivered write a loud `undelivered_expired` error-log row. **V022 has
 not run against the live account yet** — apply, re-run roles.sql, then
 prove it with the fire drill. Opt-in scripts: `alert_drill.sql` (monthly
-synthetic CRITICAL; resolve as EXPECTED; Admin → Canary scores the streak).
+synthetic CRITICAL; resolve as EXPECTED; Admin → Canary scores the streak:
+consecutive calendar months (account time), counted back from the month whose
+drill is due now (this month once the 1st's 09:00 CT run plus a 1h grace has
+passed, else last month), each with a drill both delivered and
+acknowledged — a failed month or a month with no drill ends it).
 
 **Rule catalogue additions (§12).** `OPS_ALERT_DRILL` (PLATFORM, CRITICAL,
 ENABLED=FALSE — the drill task inserts events directly; the scan never
@@ -1076,9 +1135,16 @@ fixed per family in `SP_ALERT_SCAN`; edit thresholds, not windows.
 **Alert lifecycle.** Resolutions carry a kind — ACTIONED / NOISE /
 EXPECTED. Kinds feed the per-rule precision score and the threshold
 suggestions on Alerts → Rules (keep ≥90% of ACTIONED, cut NOISE, basis
-stated). Drills and maintenance closures are EXPECTED so they never skew
+stated — it counts only tagged resolutions with a metric value, shows the
+untagged count, and adds a caveat when untagged closes outnumber tagged
+ones). Drills and maintenance closures are EXPECTED so they never skew
 precision. The drawer's "Re-check condition now" replays supported rules
-against today's data before you resolve.
+on the alert's own basis before you resolve: daily credits and the
+cloud-services ratio since account-midnight; query fail %, queued time
+and remote spill over the trailing 24h of FACT_QUERY_HOURLY (what the scan
+and its auto-clear sweep read). A daily-credits alert for an earlier,
+closed day re-checks only today's partial day, so it can read "Still over"
+but never "Condition clear".
 
 **Trust surfaces (Admin → Canary).** Mart reconciliation (fact totals vs
 live ACCOUNT_USAGE; ±2% is late-arrival noise, past ±5% re-run the scoped
@@ -1106,10 +1172,27 @@ require an Adaptive Card envelope — `{"text": "..."}` fails inside the flow
 ("text card" error). Setup lives in `snowflake/webhook_delivery.sql` v2: a
 `OVERWATCH_WEBHOOK_TEAMS` integration whose `WEBHOOK_BODY_TEMPLATE` wraps
 `SNOWFLAKE_WEBHOOK_MESSAGE` in the card envelope, plus an `ALERT_ROUTES` row.
+The file is safe to re-run: the route is added only when no row names that
+integration (a route you disabled is never re-added), and an unedited copy
+stops at the placeholder guard before it can overwrite the live secret or
+recreate the integration.
 
 Symptoms → fixes:
 - `route_send_failed` hourly with a Teams route → integration still uses the
-  `{"text"}` template: recreate it with the Adaptive-Card template.
+  `{"text"}` template: recreate it with the Adaptive-Card template (re-run
+  the setup, then `SHOW GRANTS ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS` —
+  CREATE OR REPLACE drops its grants).
+- Deliveries fail with webhook/HTTP errors after the Workflows URL was
+  regenerated (alert_pipeline_check.sql STEP 4 / FIX C) → rotate the secret
+  only: the ROTATION RUNBOOK step of `webhook_delivery.sql`, one
+  `ALTER SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL SET SECRET_STRING = '...'`
+  pasted in Snowsight (never into the file). The integration, its grants
+  and ALERT_ROUTES stay as they are; do not re-run the whole file for a
+  rotation.
+- Every card arrives twice → a duplicate `OVERWATCH_WEBHOOK_TEAMS` route
+  left by an older, unguarded re-run of the setup: keep the oldest enabled
+  `ALERT_ROUTES` row and set `ENABLED = FALSE` on the newer ones (query in
+  the rotation runbook).
 - Card arrives but truncated/garbled line breaks → V026 not applied (sender
   v3 JSON-escapes quotes/newlines/tabs; `\n` renders as a line break in the
   card). `SELECT MAX(VERSION) FROM SCHEMA_VERSION;` should be ≥ 26.
@@ -1235,14 +1318,19 @@ forward-only — reopen is a NEW incident carrying REOPENED_FROM.
 CONFIG_CHANGE / DATA / CAPACITY / EXTERNAL / UNKNOWN), one-line note, type
 RESOLVE. Only OPEN/MITIGATED rows move — resolved history never rewrites.
 
-**Metrics** (Control Room KPI strip, 90d): TTD (earliest evidence ->
-detection), incident MTTA/MTTR, reopen rate (14d window —
-INCIDENT_REOPEN_DAYS), alerts-per-incident compression, change-correlated %
-(incidents with a WH_CHANGE/DEPLOY member — rises as IaC attribution lands).
+**Metrics** (Alerts → History, "Incident lifecycle (90d, incident grain)",
+company-scoped): incident MTTA (detected -> first response, AUTO-declared
+incidents only), time to mitigate, MTTR (medians) and alerts per incident
+(storm compression). Reopen rate (INCIDENT_REOPEN_DAYS) and
+change-correlated % are no longer shown: no writer persists REOPENED_FROM or
+a WH_CHANGE/DEPLOY member, so both read a permanent 0% (Admin → Settings
+lists INCIDENT_REOPEN_DAYS as a row the app no longer reads). Change
+correlation lives in the Control Room RCA.
 
 **Attribution (V033):** the warehouse-change scorecard shows CHANGED_BY and
-CHANGE_SOURCE. MANAGED = a DEPLOY_ACTORS service user (Settings; empty
-until Flyway/Terraform land), MANUAL = a human, UNKNOWN = no matching ALTER
+CHANGE_SOURCE. MANAGED = a DEPLOY_ACTORS service user (Settings; a comma
+list, matched as a whole member, case- and space-insensitive, never a
+substring; empty until Flyway/Terraform land), MANUAL = a human, UNKNOWN = no matching ALTER
 found near the snapshot. Populate DEPLOY_ACTORS the day a deploy tool gets
 a service user. Since V159 the hourly attribution pass tries each change for
 about 3 hours after the scan sees it (its fixed evidence window around

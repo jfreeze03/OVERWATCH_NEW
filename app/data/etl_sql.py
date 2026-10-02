@@ -148,7 +148,9 @@ SELECT
     q.ERROR_MESSAGE,
     q.WAREHOUSE_NAME,
     q.USER_NAME,
-    q.TOTAL_ELAPSED_TIME,
+    -- R1-064: milliseconds, so name the unit — the shared table machinery humanizes an _MS
+    -- column to Hr/Min/Sec (the bare TOTAL_ELAPSED_TIME rendered as a raw '145,230').
+    q.TOTAL_ELAPSED_TIME AS TOTAL_ELAPSED_MS,
     COALESCE(c.CREDITS, 0) AS WASTE_CREDITS
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
 LEFT JOIN cred c ON c.QUERY_ID = q.QUERY_ID

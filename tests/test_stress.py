@@ -136,8 +136,13 @@ def _stub_runtime(monkeypatch):
     monkeypatch.setattr(main_mod, "connection_available", lambda: True)
     monkeypatch.setattr(main_mod, "current_role", lambda: "SNOW_SYSADMINS")
     monkeypatch.setattr(main_mod, "run", _keyed_run)
-    monkeypatch.setattr(main_mod, "execute_statement", lambda *_a, **_k: (True, "stub"))
-    monkeypatch.setattr(main_mod, "execute_statement_async", lambda *_a, **_k: True)
+    # Writes are stubbed at their SOURCE module: app.main binds neither name (its execute_statement is a
+    # function-local import, resolved through app.core.query at call time, like the buffered telemetry
+    # flush), so patching app.main raised AttributeError and errored every test at setup (R1-284).
+    # tests/test_stress_harness_targets.py keeps these targets honest without OW_STRESS.
+    import app.core.query as query_mod
+    monkeypatch.setattr(query_mod, "execute_statement", lambda *_a, **_k: (True, "stub"))
+    monkeypatch.setattr(query_mod, "execute_statement_async", lambda *_a, **_k: True)
     settings = dict(DEFAULT_SETTINGS)
     settings["_source"] = "stress-stub"
     settings["MONTHLY_BUDGET_USD"] = 100_000.0
@@ -170,7 +175,10 @@ def _render_page(page: str) -> AppTest:
     at.run()
     # rec14: navigate through the workflow-grouped nav (target sits in one group
     # radio; set_value fires the _nav_pick callback that updates _ow_page).
-    if at.session_state.get("_ow_page") != page:
+    # AppTest's session_state proxy has no .get (attribute access maps to key access): the _ss idiom
+    # from test_pages_apptest.
+    current = at.session_state["_ow_page"] if "_ow_page" in at.session_state else None  # noqa: SIM401
+    if current != page:
         for r in at.radio:
             if str(getattr(r, "key", "") or "").startswith("_ow_nav_") and page in list(r.options):
                 r.set_value(page)

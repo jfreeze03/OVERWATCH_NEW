@@ -191,7 +191,12 @@ def classify_row(row: pd.Series | dict) -> tuple[str, str]:
     if compile_pct >= _COMPILE_DOMINANT_PCT:
         # compile phase dominates. Sub-second total => metadata-only (no real
         # warehouse execution); otherwise a genuinely compile-heavy plan.
-        if 0 < total_s <= _METADATA_MAX_TOTAL_S or _text(row, "WAREHOUSE_NAME") in ("", "NONE", "NULL"):
+        # R1-090: "no warehouse" is a NULL / 'NONE' WAREHOUSE_NAME VALUE, never an absent column -- the
+        # Cost ▸ Spend compile-heavy builders (live + mart, and the per-warehouse drill) select none, so
+        # every compile-dominated family there read Metadata chatter and COMPILE_HEAVY could never appear.
+        # ("in" checks a dict's keys and a Series' index.)
+        no_warehouse = "WAREHOUSE_NAME" in row and _text(row, "WAREHOUSE_NAME") in ("", "NONE", "NULL")
+        if 0 < total_s <= _METADATA_MAX_TOTAL_S or no_warehouse:
             return METADATA_CHATTER, conf("MEDIUM")
         return COMPILE_HEAVY, conf("MEDIUM")
     if compile_pct > 0 and total_s > 0:
@@ -314,17 +319,49 @@ def driver_summary(df: pd.DataFrame) -> dict:
     are RESIZE NOT INDICATED, and the owner that recurs most. ``df`` is assumed to have
     already passed through ``classify_families``."""
     if df.empty or "DRIVER_CLASS" not in df.columns:
-        return {"total": 0, "not_indicated": 0, "by_class": {}, "top_owner": ""}
+        return {"total": 0, "not_indicated": 0, "by_class": {}, "not_indicated_by_class": {}, "top_owner": ""}
     classes = [str(c) for c in df["DRIVER_CLASS"].tolist()]
     owners = [str(o) for o in df.get("REMEDIATION_OWNER", pd.Series(dtype="object")).tolist() if o]
-    not_indicated = int((df["RESIZE_VERDICT"].astype(str) == RESIZE_NOT_INDICATED).sum())
+    not_ind = (df["RESIZE_VERDICT"].astype(str) == RESIZE_NOT_INDICATED).tolist()
     top_owner = Counter(owners).most_common(1)[0][0] if owners else ""
     return {
         "total": len(classes),
-        "not_indicated": not_indicated,
+        "not_indicated": int(sum(not_ind)),
         "by_class": dict(Counter(classes)),
+        # R1-090 review: the not-indicated families per class, so a caption can name each class's own fix
+        "not_indicated_by_class": dict(Counter(c for c, n in zip(classes, not_ind, strict=True) if n)),
         "top_owner": top_owner,
     }
+
+
+# R1-090 review: the fix each RESIZE-NOT-INDICATED class group needs, for the caption under a classified family
+# table. Before COMPILE_HEAVY was reachable every such row was metadata chatter, so one behavioural remedy (cache
+# metadata, cut polling) fit them all; a compile-heavy plan is the SQL author's to simplify, not a cadence problem.
+_REMEDY_GROUPS: tuple[tuple[frozenset[str], str, str], ...] = (
+    (frozenset({COMPILE_HEAVY}), "compile heavy",
+     "simplify the plan or parameterize huge IN-lists (the SQL author)"),
+    (frozenset({METADATA_CHATTER, JDBC_ODBC_DISCOVERY, INFORMATION_SCHEMA, STAGE_FILE, GOVERNANCE_DISCOVERY}),
+     "metadata / discovery chatter", "behavioural: cache metadata, batch the calls, cut polling / reconnects"),
+    (frozenset({SLEEP_POLLING}), "sleep polling", "move the wait out of Snowflake (the scheduler / task owner)"),
+    (frozenset({SYSTEM_GENERATED}), "platform-issued", "usually leave it; confirm the feature is wanted"),
+)
+
+
+def not_indicated_remedies(summary: dict) -> str:
+    """The per-class fix for the families ``driver_summary`` counted RESIZE NOT INDICATED: '<n> <group> — <fix>'
+    parts joined by '; ', in _REMEDY_GROUPS order; '' when none. A class outside the groups (none today) is
+    counted as 'other' and pointed at the Remediation owner column rather than given a guessed fix."""
+    by_class = summary.get("not_indicated_by_class") or {}
+    parts, grouped = [], 0
+    for classes, label, fix in _REMEDY_GROUPS:
+        n = sum(int(by_class.get(c, 0)) for c in classes)
+        grouped += n
+        if n:
+            parts.append(f"{n:,} {label} — {fix}")
+    other = sum(int(v) for v in by_class.values()) - grouped
+    if other > 0:
+        parts.append(f"{other:,} other — see the Remediation owner column")
+    return "; ".join(parts)
 
 
 # ---------------------------------------------------------------------------

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pandas as pd
 
+from app.config import clamp_days
 from app.core.sqlsafe import sql_literal, sql_number
 from app.logic.formulas import account_today, safe_float
 
@@ -44,8 +45,89 @@ class DomainPosture:
     newest: object = None
 
 
+#: A calendar window keeps up to a full month under a reader's day cap, so a complete 'Last month' or
+#: 'Current month' is never clipped by a day on a 30-day reader (see capped_window).
+CALENDAR_MONTH_DAYS = 31
+
+
+def capped_window(days: object, bounds: tuple | None, cap_days: int) -> tuple[int, tuple | None]:
+    """The window a capped Security reader actually serves: ``(served_days, served_bounds)``.
+
+    A trailing window clamps to ``cap_days`` exactly as ``bounded_days`` does. A calendar window
+    (``bounds``, set for Last month, Current month AND Current year) used to bypass the cap, because
+    ``resolve_effective_window`` ignores ``days`` once bounds are set: 'Current year' ran a 273-day live
+    LOGIN_HISTORY scan behind a '(reader capped at 30d)' caption, and read a 180-day-purged fact as if
+    it held the whole year. The bounds are now intersected with the LAST ``max(cap_days, 31)`` days of
+    the range (the ops_sql.lock_contention precedent); a whole calendar month still fits a 30-day
+    reader. ``served_days`` is the served span for bounds (for labels), the clamped offset otherwise."""
+    eff = clamp_days(days, cap_days)
+    if bounds is None:
+        return eff, None
+    start, end = bounds
+    start = max(start, end - timedelta(days=max(int(cap_days), CALENDAR_MONTH_DAYS)))
+    return (end - start).days, (start, end)
+
+
+def window_was_capped(days: object, bounds: tuple | None, served_bounds: tuple | None,
+                      cap_days: int) -> bool:
+    """True when ``capped_window`` served less than the page's selected window."""
+    if bounds is None:
+        try:
+            return int(days) > int(cap_days)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return False
+    return served_bounds is not None and served_bounds[0] > bounds[0]
+
+
+def served_window_text(days: int, bounds: tuple | None, *, short: bool = False) -> str:
+    """The served window in words: 'the last 30 days' / '30d', or 'Aug 31 - Sep 30' for bounds."""
+    if bounds is None:
+        n = int(days)
+        return f"{n}d" if short else f"the last {n} day{'' if n == 1 else 's'}"
+    start, end = bounds
+    last = end - timedelta(days=1)
+    return f"{start:%b} {start.day} - {last:%b} {last.day}"
+
+
+def coverage_required_days(days: int, bounds: tuple | None, *, lookback: int = 0,
+                           today: date | None = None) -> int:
+    """Distinct fact days a served span must hold before the page trusts the fact over live.
+
+    Pairs with ``security_sql.security_login_fact_coverage(days, bounds=..., lookback=...)``, which
+    counts density over exactly these COMPLETE days. Trailing: ``days + lookback`` days before today.
+    Bounds: every day from ``start - lookback`` up to the earlier of the range end and today. Today's
+    partition (partial, or not loaded yet) is neither required here nor counted there: counting it
+    let a loaded today stand in for a missing interior day.
+
+    The first day of a period-to-date window (the 1st under 'Current month', Jan 1 under 'Current
+    year', no baseline) serves today alone, so the span holds NO complete day: this returns 0, and
+    ``fact_coverage_complete`` then decides on freshness alone. That used to be clamped to 1 against
+    a count that can only be 0 there, so the fact could never serve on that day."""
+    if bounds is None:
+        return max(1, int(days) + int(lookback))
+    start, end = bounds
+    current = today or account_today()
+    return max(0, (min(end, current) - (start - timedelta(days=int(lookback)))).days)
+
+
+def window_total(frame: pd.DataFrame | None, column: str, fallback: int) -> int:
+    """A builder's pre-LIMIT window total (UNCAPPED-AGGREGATE), or ``fallback`` when the frame
+    predates the column (a cached old-shape result) or carries no readable value. Every row carries
+    the same total, so the first readable one is it."""
+    if frame is None or getattr(frame, "empty", True) or column not in frame.columns:
+        return int(fallback)
+    values = pd.to_numeric(frame[column], errors="coerce").dropna()
+    return int(values.iloc[0]) if len(values) else int(fallback)
+
+
 def fact_coverage_complete(result: object, days: int, *, lag_days: int = 1) -> bool:
-    """True only when a fact result proves both span and recent freshness."""
+    """True only when a fact result proves both span and recent freshness.
+
+    ``days`` = 0 (``coverage_required_days`` on the first day of a period-to-date window, a span with
+    no complete day) leaves freshness as the whole proof: LAST_DAY >= today - lag. The calendar
+    coverage read only sees days from the span start (today) on, so that passes only once today's
+    partition is loaded; until then the live reader serves instead of an empty fact (no fabricated
+    zero). A missing ``days`` still asks for one day."""
     if result is None or not bool(getattr(result, "usable", lambda: False)()):
         return False
     frame = getattr(result, "df", pd.DataFrame())
@@ -54,7 +136,7 @@ def fact_coverage_complete(result: object, days: int, *, lag_days: int = 1) -> b
     row = frame.iloc[0]
     coverage = int(safe_float(row.get("COVERAGE_DAYS")))
     last_day = pd.to_datetime(row.get("LAST_DAY"), errors="coerce")
-    required = max(1, min(int(days or 1), 3650))
+    required = max(0, min(int(1 if days is None else days), 3650))
     return (
         coverage >= required
         and not pd.isna(last_day)
@@ -78,6 +160,10 @@ def domain_posture(exceptions: pd.DataFrame, coverage: pd.DataFrame) -> tuple[Do
         else:
             impacts = pd.Series(1, index=one.index, dtype="float64")
             findings = len(one)
+        # The frame is capped per domain (security_exception_queue) for SCORING; the count shown is the
+        # domain's uncapped DOMAIN_FINDINGS (same NULL->1, floor-1 rule), so ~4,000 queued CHANGE RISK
+        # rows no longer read '100 open'. The penalty below stays on the capped rows (it saturates).
+        findings = window_total(one, "DOMAIN_FINDINGS", findings)
         if status != "COMPLETE":
             state = {
                 "ON_DEMAND": "On demand",

@@ -376,6 +376,11 @@ def role_share(days: int, company: str = "ALL", *, bounds: tuple | None = None) 
                  else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
     where = and_where(scope_window_where("HOUR_TS", days, bounds=bounds),  # verify round: match live twin's anchor
                       _company_arm(company),
+                      # R1-020: same population as the live twin's WAREHOUSE_NAME IS NOT NULL. The
+                      # loader stores warehouse-less statements as COALESCE(WAREHOUSE_NAME, 'NONE'),
+                      # which under Company=ALL surfaced a $0 'NONE' warehouse (and used LIMIT slots)
+                      # that vanished whenever the panel fell to the live leg.
+                      "UPPER(WAREHOUSE_NAME) <> 'NONE'",
                       # Coverage gate — abstain (zero rows -> live fallback + pool-rematch) ONLY when
                       # the role-hour fact is MATERIALLY SHORTER than the credit POOL fact AND the
                       # window reaches past the role fact's earliest day. That is the only case the
@@ -780,15 +785,20 @@ LIMIT 30
 """
 
 
-def lock_wait_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+def lock_wait_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None,
+                    database: str = "") -> str:
     """Lock waits from MART_LOCK_WAIT_DAILY (V035) — the live scan read
     46-56 GB per view; the daily task pays that once. Same ranking as the
-    live builder: never-acquired first (those are the aborted statements)."""
+    live builder: never-acquired first (those are the aborted statements).
+    ``database`` narrows BEFORE the LIMIT 50 (PR-1 R1-133), as lock_wait_spikes does."""
     d = bounded_days(days, 90)
     comp = ""
     if company and company != "ALL":
         comp = (f"    AND (c.COMPANY = {companies.sql_literal(company)}"
                 " OR UPPER(c.COMPANY) = 'ALL')\n")
+    dbf = companies.database_equals_clause(database, "c.DATABASE_NAME")
+    if dbf:
+        comp += f"    AND {dbf}\n"
     return f"""SELECT
     c.DATABASE_NAME,
     c.SCHEMA_NAME,
@@ -879,11 +889,33 @@ FROM (
 {comp}ORDER BY w.MONTH, w.WAREHOUSE_NAME"""
 
 
+# v4.606 holistic review (reverts R1-015's 365-day widening): a TRAILING pattern read stays at 90 days.
+# V120 fixed SP_LOAD_PATTERN_COST's RUNS fan-out (RUNS counted QUERY_ATTRIBUTION_HISTORY rows, so an
+# hour-spanning query counted more than once and CREDITS_PER_RUN came out low) but re-stamped only the
+# last 90 days (CALL SP_LOAD_PATTERN_COST(90), applied 2026-09-02). MART_PATTERN_COST_DAILY keeps rows
+# for FACT_RETENTION_DAYS_DAILY and V047's first fill reaches back to about mid-April, so rows older
+# than that re-stamp horizon may still carry the inflated RUNS: a wider trailing read would understate
+# $/run for exactly the long-running patterns V120 fixed, and pass the run floor on inflated counts.
+# The re-stamp CALL (SP_LOAD_PATTERN_COST(365)) is queued for a later migration; raise this only after
+# it has run. The Unit costs caption and page note name this window.
+PATTERN_COST_MAX_DAYS = 90
+# The first day V120's re-stamp reached: CALL SP_LOAD_PATTERN_COST(90) on 2026-09-02 re-merged
+# START_TIME >= DATEADD('day', -90, CURRENT_DATE()), i.e. DAY >= 2026-06-04. A calendar preset keeps
+# its exact bounds (the SQL is unchanged), so a calendar window that starts before this day (Current
+# year) still sums un-restamped rows; the Unit costs caption says so. Retire it with the clamp above
+# once SP_LOAD_PATTERN_COST(365) has run.
+PATTERN_COST_RESTAMP_FROM = date(2026, 6, 4)
+
+
 def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25, *, bounds: tuple | None = None) -> str:
     """Measured $ per repeated statement pattern (V036) — the silent-spend
     table. Attribution credits are MEASURED compute; the sample text rides
-    in from the family mart by hash."""
-    d = bounded_days(days, 90)
+    in from the family mart by hash.
+
+    A TRAILING window clamps to PATTERN_COST_MAX_DAYS (90: see the constant —
+    older rows predate V120's RUNS re-stamp). A calendar preset reads its exact
+    [start, end) bounds (scope_window_where ignores ``d`` there), as before."""
+    d = bounded_days(days, PATTERN_COST_MAX_DAYS)
     # bounds -> scale the run-rate floor to the calendar-month span, not the trailing d
     span = (bounds[1] - bounds[0]).days if bounds is not None else d
     min_runs = max(2, (5 * span + 29) // 30)
@@ -1378,35 +1410,84 @@ ORDER BY 2, 1
 """
 
 
+# SP_LOAD_OPS_DIAG (V062) keeps TOP_ELAPSED rows with QUALIFY ROW_NUMBER() OVER (PARTITION BY
+# the HOUR, all companies together) <= 50. ops_diag_top_queries' exactness certificate keys on it.
+OPS_DIAG_HOURLY_TOP_N = 50
+# Both ops_diag readers cap a trailing window at 90 days (the live twins' cap too); disclosed in the
+# Operations > Queries section contract.
+OPS_DIAG_MAX_DAYS = 90
+
+
 def ops_diag_top_queries(days: int, company: str = "ALL", limit: int = 50, *,
                          bounds: tuple | None = None) -> str:
     """ops_sql.top_queries_by_elapsed contract from MART_OPS_DIAG_HOURLY
     (V041 R7, corrected v4.36.1) — the UNFILTERED Operations first paint
     only: an entity or schema filter needs the true filtered top-N, which
-    only the live scan has. The mart keeps each hour's top-50: a member of
-    the global top-50 is by construction inside its own hour's top-50, so
-    the unfiltered panel is EXACT, not a sample. Coverage-gated while the
-    mart accrues toward the asked window."""
-    days = bounded_days(days, 90)
+    only the live scan has. The mart keeps each hour's top-50 ACROSS ALL
+    COMPANIES: a member of the global top-50 is by construction inside its
+    own hour's top-50, so the Company=ALL panel (limit <= 50) is EXACT, not
+    a sample. Coverage-gated while the mart accrues toward the asked window.
+
+    A COMPANY-scoped (or limit > 50) read is NOT exact by construction (R1-014):
+    in an hour where 50 heavier queries of another company filled the cut, this
+    company's query was never stored, and the filtered list silently promoted a
+    lighter one. So that read carries an exactness certificate and returns ZERO
+    rows — run_mart_first's live fallback (the true filtered top-N) then serves —
+    unless the stored rows provably hold the scope's true top-N: the scope has at
+    least ``limit`` stored rows AND every hour the loader cut (50 rows kept) has
+    its lightest kept row strictly below the scope's N-th heaviest. An unstored
+    query of any hour ran no longer than that hour's lightest kept row, so it
+    could not have ranked. Exact-or-live, never a quiet sample."""
+    # R1-018: 90 is deliberate (both legs): the mart was first-filled 90d and a wider ask trips the
+    # coverage gate into the live QUERY_HISTORY scan, itself capped at 90 — so a 180/365d trailing
+    # Window serves 90 days either way, cheaper from here. The Queries section contract discloses it.
+    days = bounded_days(days, OPS_DIAG_MAX_DAYS)
     limit = max(1, min(int(limit), 500))
     cov_bound = (f"'{bounds[0].isoformat()}'" if bounds is not None
                  else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
-    where = and_where(
-        "d.KIND = 'TOP_ELAPSED'",
-        scope_window_where("d.HOUR_TS", days, bounds=bounds),
-        _company_arm(company, "d.COMPANY"),
-    )
+    win = scope_window_where("d.HOUR_TS", days, bounds=bounds)
+    company_arm = _company_arm(company, "d.COMPANY")
+    where = and_where("d.KIND = 'TOP_ELAPSED'", win, company_arm)
+    needs_cert = bool(company_arm) or limit > OPS_DIAG_HOURLY_TOP_N
+    cert_ctes = cert_where = ""
+    if needs_cert:
+        cert_ctes = f""",
+cut_hours AS (
+    -- every hour in the window the loader TRUNCATED (all companies share the per-hour cut)
+    SELECT d.HOUR_TS, MIN(d.ELAPSED_SEC) AS FLOOR_SEC
+    FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
+    WHERE {and_where("d.KIND = 'TOP_ELAPSED'", win)}
+    GROUP BY d.HOUR_TS
+    HAVING COUNT(*) >= {OPS_DIAG_HOURLY_TOP_N}
+),
+nth AS (
+    -- the scope's N-th heaviest STORED elapsed (and how many it has, up to N)
+    SELECT COUNT(*) AS N_SCOPE, MIN(s.ELAPSED_SEC) AS NTH_SEC
+    FROM (
+        SELECT d.ELAPSED_SEC
+        FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
+        WHERE {where}
+        ORDER BY d.ELAPSED_SEC DESC NULLS LAST
+        LIMIT {limit}
+    ) s
+)"""
+        cert_where = f"""
+  -- exactness certificate (R1-014): no cut hour could hide a query of this scope's top-{limit}
+  AND NOT EXISTS (
+      SELECT 1 FROM cut_hours h CROSS JOIN nth n
+      WHERE NOT COALESCE(n.N_SCOPE >= {limit} AND h.FLOOR_SEC < n.NTH_SEC, FALSE)
+  )"""
     return f"""
 WITH cov AS (
     SELECT MIN(HOUR_TS) AS FIRST_TS FROM {mart_object("MART_OPS_DIAG_HOURLY")}
-)
+){cert_ctes}
 SELECT
     d.QUERY_ID, d.START_TIME, d.USER_NAME, d.WAREHOUSE_NAME, d.WAREHOUSE_SIZE,
     d.DATABASE_NAME, d.QUERY_TYPE, d.EXECUTION_STATUS, d.ELAPSED_SEC, d.QUEUED_SEC,
     d.SPILL_REMOTE_GB, d.QUERY_PREVIEW
 FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
 WHERE {where}
-  AND (SELECT FIRST_TS FROM cov) <= {cov_bound}
+  AND (SELECT FIRST_TS FROM cov) <= {cov_bound}{cert_where}
 ORDER BY d.ELAPSED_SEC DESC
 LIMIT {limit}
 """
@@ -1417,8 +1498,8 @@ def ops_diag_failures(days: int, company: str = "ALL", *, bounds: tuple | None =
     corrected v4.36.1). USERS_AFFECTED combines the mart's hourly HLL states
     (V037 precedent) — an honest window approx-distinct, not a peak-hour
     stand-in. Unfiltered first paint only; coverage-gated like the
-    top-queries reader."""
-    days = bounded_days(days, 90)
+    top-queries reader. Same deliberate 90-day cap (see ops_diag_top_queries)."""
+    days = bounded_days(days, OPS_DIAG_MAX_DAYS)
     cov_bound = (f"'{bounds[0].isoformat()}'" if bounds is not None
                  else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
     where = and_where(

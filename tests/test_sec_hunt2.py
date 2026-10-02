@@ -33,8 +33,14 @@ def _src(rel: str) -> str:
 
 # ---- HIGH (#1/#9): login fact-coverage measures day density, not calendar span -----
 def test_login_fact_coverage_uses_distinct_day_density():
-    for sql in (security_sql.login_fact_coverage(30), security_sql.security_login_fact_coverage(30)):
-        assert "COUNT(DISTINCT DAY) AS COVERAGE_DAYS" in sql
+    # R1-101 follow-up (2026-10-01): the V075 security gate counts COMPLETE days only (today excluded),
+    # the same days coverage_required_days asks for, so a loaded today can't fill an interior hole.
+    for sql, density in (
+        (security_sql.login_fact_coverage(30), "COUNT(DISTINCT DAY) AS COVERAGE_DAYS"),
+        (security_sql.security_login_fact_coverage(30),
+         "COUNT(DISTINCT IFF(DAY < CURRENT_DATE(), DAY, NULL)) AS COVERAGE_DAYS"),
+    ):
+        assert density in sql
         assert "DATEDIFF('day', MIN(DAY), MAX(DAY)) + 1 AS COVERAGE_DAYS" not in sql
         sqlglot.parse(sql, dialect="snowflake")
 
@@ -108,8 +114,11 @@ def test_dormant_severity_sorts_high_first():
     assert out.iloc[0]["SEVERITY"] == "High"
 
 
-# ---- LOW (#8): new_network_logins_fact volume bounded to 90d like the live sibling --
+# ---- LOW (#8): new_network_logins_fact volume bounded like the live sibling --
+# R1-025 (2026-09-30): the bound is now the triage window itself (the live twin's pair logins all fall
+# inside it), and the first-seen history is window + 90 days so a real baseline precedes the window.
 def test_new_network_logins_fact_bounds_volume_join_to_90d():
     sql = security_sql.new_network_logins_fact(7, "ALFA")
-    assert "AND h.DAY >= DATEADD('day', -90, CURRENT_DATE())" in sql
+    assert "AND h.DAY >= DATEADD('day', -7, CURRENT_DATE())" in sql
+    assert "f.DAY >= DATEADD('day', -97, CURRENT_DATE())" in sql
     sqlglot.parse(sql, dialect="snowflake")
