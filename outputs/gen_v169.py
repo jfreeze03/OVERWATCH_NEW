@@ -26,13 +26,17 @@ else is byte-identical to V163 and the V169 test normalizes it back:
                  drill's predicate), top destination = that day's largest per-region total. Key unchanged.
   I24   R1-071   [24] COST_IDLE_OPPORTUNITY reads a NULL snapshot timer as 0 = never suspends (insights parity).
   T29   R1-233   [29] SEC_TRUST_REGRESSION: a THRESHOLD_NUM below 1 reads as 1.
+  O22   holistic #4/#9   [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' /
+                 'StorageTruth' row -- V166's SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back, log and re-raise)
+                 and the DETAIL says that run FAILED; every other loader's row keeps 'returned normally, so its task
+                 still reads SUCCEEDED'. Byte-identical to V168's hourly twin (the V157 shared-arm design).
   R     the RETURN label names V169 (the tally stays 14: no arm is added).
 
 R2-045 (pace ratio as METRIC_VALUE) is NOT here: it waits on the owner (owner_questions). The COST_EGRESS_SPIKE NAME
 refresh touches the row only while NAME still equals its V043 seed. No CALL, DROP, task or ALERT_EVENTS write at
 apply time. With PREFLIGHT_OUT / PART_B_OUT / REPAIR_OUT set, also writes the read-only PREFLIGHT (P169.1-P169.7),
-the RUN_NEXT PART B verify grids (V169.1-V169.4) and the comment-only owner repair notes, built from the SAME arm
-text. The byte-identity test never sets them.
+the RUN_NEXT PART B verify grids (V169.1-V169.4) and the comment-only owner repair notes (the OPTIONAL R169.1
+block, every statement commented out), built from the SAME arm text. The byte-identity test never sets them.
 
 Run: python outputs/gen_v169.py
 """
@@ -86,6 +90,7 @@ S19 = ("    -- [19] COST_EGRESS_SPIKE", "    -- [22] OPS_PIPELINE_DEGRADED")
 S24 = ("    -- [24] COST_IDLE_OPPORTUNITY", "    -- [25] COST_SLEEP_POLLING")
 S29 = ("    -- [29] SEC_TRUST_REGRESSION", "    -- [17] PIPE_REF_GAP")
 S18 = ("    -- [18] DQ_RECON_ERROR", "    IF (fails > 0) THEN")
+S22 = ("    -- [22] OPS_PIPELINE_DEGRADED", "    -- [24] COST_IDLE_OPPORTUNITY")
 
 # ---- M (R2-041) ------------------------------------------------------------------------------------
 AI_PRED = ("(SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%' OR "
@@ -258,6 +263,36 @@ T29_HEAD_NEW = ("    --      Center shows the live count). Company ALL, HIGH (c.
 T29_PRED_OLD = "         AND s.CUR_N - s.PRIOR_N >= COALESCE(c.THRESHOLD_NUM, 1)\n"
 T29_PRED_NEW = "         AND s.CUR_N - s.PRIOR_N >= GREATEST(COALESCE(c.THRESHOLD_NUM, 1), 1)\n"
 
+# ---- O22 (holistic #4/#9; identical constants in outputs/gen_v168.py -- the twin arm) --------------
+# V166 made SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back, log fact_load_failed (PAGE 'AppCost' /
+# 'StorageTruth') and RE-RAISE, so their task reads FAILED; every earlier ERR-leg source logs and returns normally.
+O22_RERAISE_PAGES = ("AppCost", "StorageTruth")
+O22_HEAD_OLD = (
+    "    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged and swallowed\n"
+    "    --      (its task still reads SUCCEEDED) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one\n")
+O22_HEAD_NEW = (
+    "    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged -- most\n"
+    "    --      loaders swallow it (their task still reads SUCCEEDED); V166's SP_LOAD_APP_COST and\n"
+    "    --      SP_LOAD_STORAGE_TRUTH roll back to the previous fill and re-raise (their task reads FAILED), and\n"
+    "    --      the DETAIL says which (RERAISED, V168 + V169) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS"
+    " -- one\n")
+O22_ERRS_OLD = "                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG\n"
+O22_ERRS_NEW = (
+    "                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG,\n"
+    "                   MAX(IFF(PAGE IN ("
+    + ", ".join(f"'{p}'" for p in O22_RERAISE_PAGES)
+    + "), 1, 0)) AS RERAISED   -- the V166 loads that roll back and re-raise\n")
+O22_DETAIL_OLD = (
+    "               LEFT('The loader logged this and returned normally, so its task still reads SUCCEEDED and readers '\n"
+    "                   || 'keep the previous fill. Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '\n")
+O22_DETAIL_NEW = (
+    "               LEFT(IFF(x.RERAISED = 1,\n"
+    "                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '\n"
+    "                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',\n"
+    "                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '\n"
+    "                        || 'readers keep the previous fill.')\n"
+    "                   || ' Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '\n")
+
 # ---- R ------------------------------------------------------------------------------------------------
 RET_163 = ("'alert scan daily v5 (V163: + COST_AI_USER_RUNAWAY + SEC_TRUST_REGRESSION, [07] burst-vs-lockout "
            "wording): '")
@@ -269,6 +304,7 @@ assert daily.count("fails := fails + 1") == 14
 assert daily.count(M_ANCHOR) == 2 and daily.count("AS DAILY_BURN") == 1
 assert daily.count(S12_PART_OLD) == 3 and daily.count("c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())") == 2
 assert daily.count("COALESCE(c.THRESHOLD_NUM, 1)") == 3
+assert daily.count("still reads SUCCEEDED") == 3 and "RERAISED" not in daily
 _burn = _between(daily, "                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / NULLIF(COUNT(DISTINCT DAY), 0)",
                  "AS DAILY_BURN")
 
@@ -298,6 +334,9 @@ daily = _swap_in(daily, *S24, I24_COL_OLD, I24_COL_NEW, "I24b")
 daily = _swap_in(daily, *S24, I24_PRED_OLD, I24_PRED_NEW, "I24c")
 daily = _swap_in(daily, *S29, T29_HEAD_OLD, T29_HEAD_NEW, "T29a")
 daily = _swap_in(daily, *S29, T29_PRED_OLD, T29_PRED_NEW, "T29b")
+daily = _swap_in(daily, *S22, O22_HEAD_OLD, O22_HEAD_NEW, "O22a")
+daily = _swap_in(daily, *S22, O22_ERRS_OLD, O22_ERRS_NEW, "O22b")
+daily = _swap_in(daily, *S22, O22_DETAIL_OLD, O22_DETAIL_NEW, "O22c")
 daily = _swap(daily, RET_163, RET_169, "R")
 
 # ---- post-asserts on the derived body -----------------------------------------------------------------
@@ -320,6 +359,9 @@ assert "$$" not in _d_body and "\\" not in _d_body
 assert set(re.findall(r"SNOWFLAKE\.ACCOUNT_USAGE\.(\w+)", _d_body)) == set(
     re.findall(r"SNOWFLAKE\.ACCOUNT_USAGE\.(\w+)", extract_proc(V163, "SP_ALERT_SCAN_DAILY()")))
 assert "ct_hour" not in daily                                                      # the daily scan stays ungated
+_a22 = _between(daily, *S22)
+assert _a22.count("AS RERAISED") == 1 and _a22.count("x.RERAISED = 1") == 1 and "RERAISED" not in daily.replace(_a22, "")
+assert _a22.count("the run FAILED") == 1 and _a22.count("returned normally, so its task still reads SUCCEEDED") == 1
 
 # ---------------------------------------------------------------------------------------------------
 # The ALERT_CONFIG NAME refresh (guarded on the V043 seed text)
@@ -352,7 +394,9 @@ HEADER = f"""-- {NAME}
 -- COST_EGRESS_SPIKE named the destination of the largest single row in 14 days, counted same-region internal
 -- moves, and its rolling window never counted the ~2h before each scan. (R1-071) COST_IDLE_OPPORTUNITY skipped a
 -- never-suspend warehouse (SHOW reports a NULL timer). (R1-233) SEC_TRUST_REGRESSION fired on unchanged counts at
--- a threshold of 0.
+-- a threshold of 0. (Holistic #4/#9) the OPS_PIPELINE_DEGRADED ERR DETAIL told every logged loader failure 'its task
+-- still reads SUCCEEDED', but V166's SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back and re-raise, so
+-- TASK_HISTORY shows those runs FAILED.
 --
 --   ~ SP_ALERT_SCAN_DAILY re-derived from V163 (its current definer), byte-identical except:
 --     ~ both mtd CTEs + MTD_COMPLETE_USD (DAY < today, the two-partition pricing): [08] pace and [09] forecast use
@@ -365,6 +409,10 @@ HEADER = f"""-- {NAME}
 --     ~ [19]: the previous complete Central day of TRUE egress (TARGET_REGION or TARGET_CLOUD set), top
 --       destination = the largest per-region total of that day; TITLE 'Egress N GB on <day> (14d avg ...)'.
 --     ~ [24]: a NULL snapshot timer reads as 0 (never suspends); [29]: GREATEST(COALESCE(THRESHOLD_NUM, 1), 1).
+--     ~ [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' / 'StorageTruth' row, the V166
+--       loaders that roll back, log and re-raise); the DETAIL says that run FAILED (TASK_HISTORY shows it), and
+--       keeps 'returned normally, so its task still reads SUCCEEDED' for every other loader. Keys, sources and
+--       windows unchanged; byte-identical to V168's hourly twin.
 --     ~ the RETURN label names V169; the 14-block tally is unchanged.
 --   ~ ALERT_CONFIG NAME of COST_EGRESS_SPIKE, only while it still equals the V043 seed text.
 --
@@ -403,7 +451,7 @@ $$;
 
 MARKER = ("-- >>> derived:SP_ALERT_SCAN_DAILY  (from V163; [08]/[09] complete-day MTD, [16] contract start gate + "
           "end bound, [12] live DATABASE_ID, [18] error-cycle-day key, [19] previous-day true egress, [24] NULL timer "
-          "as 0, [29] threshold floor, V169)\n")
+          "as 0, [29] threshold floor, [22] ERR re-raise wording, V169)\n")
 
 DESCRIPTION = (
     "Round-2 review, alerts cluster (R2-041, R2-042, R2-103, R2-044, R2-020, R2-043, R2-047, R1-071, R1-233). "
@@ -414,7 +462,9 @@ DESCRIPTION = (
     "or when the exhaustion falls on or after its end; COST_STORAGE_SURGE compares per live DATABASE_ID; "
     "DQ_RECON_ERROR keys on the newest error-cycle date; COST_EGRESS_SPIKE reads the previous complete Central day "
     "of true egress with the top destination by per-region total; COST_IDLE_OPPORTUNITY reads a NULL snapshot timer "
-    "as never suspends; SEC_TRUST_REGRESSION floors its threshold at 1; RETURN names V169, tally 14 unchanged. "
+    "as never suspends; SEC_TRUST_REGRESSION floors its threshold at 1; the OPS_PIPELINE_DEGRADED ERR detail says a "
+    "run of the V166 app-cost or storage-truth loader rolled back and FAILED instead of claiming its task still reads "
+    "SUCCEEDED; RETURN names V169, tally 14 unchanged. "
     "ALERT_CONFIG NAME of COST_EGRESS_SPIKE refreshed only while it equals the seed text. No task change, no new "
     "object, no procedure run at apply time.")
 assert len(DESCRIPTION) <= 4000 and "'" not in DESCRIPTION
@@ -442,7 +492,8 @@ assert "COALESCE(SUM(CREDITS_BILLED), 0) / 30" not in out                       
 for _new in (HEADER, MARKER, M_ADD, P08_TITLE_NEW, P08_DETAIL_NEW, P08_PRED_NEW, P09_TITLE_NEW, P09_DETAIL_NEW,
              P09_PRED_NEW, K16_COMMENT_NEW, K16_COLS_NEW, K16_TOTAL_NEW, K16_CONSUMED_NEW, K16_JOIN_NEW, S12_HEAD_NEW,
              S12_WHERE_NEW, R18_R_NEW, R18_KEY_NEW, E19_CTE_NEW, E19_TITLE_NEW, E19_EG_NEW, I24_HEAD_NEW, I24_COL_NEW,
-             I24_PRED_NEW, T29_HEAD_NEW, T29_PRED_NEW, RET_169, NAMES, VERSION_ROW):
+             I24_PRED_NEW, T29_HEAD_NEW, T29_PRED_NEW, O22_HEAD_NEW, O22_ERRS_NEW, O22_DETAIL_NEW, RET_169, NAMES,
+             VERSION_ROW):
     assert _new.isascii(), _new[:60]                     # (V163's carried body keeps its own em dashes)
 for line in out.splitlines():
     assert not line.lstrip().upper().startswith("CALL ") or line.startswith("        "), line
@@ -544,7 +595,8 @@ ORDER BY m.USAGE_DATE DESC, m.DATABASE_NAME;
 --        that key exists. FOLDS_INTO_OLDER_EVENT = the key was raised BEFORE the newest cycle loaded: after V169
 --        that cycle is not paged (V169 FIRST RUN (a), once at the transition; a NEWEST_LOAD_HOUR after the ~07:00
 --        scan makes it likely around the apply). Then the DQ_RECON_ERROR events of the last 90 days in raise order
---        (a next-day twin of the same TITLE is a duplicate page; resolve a still-OPEN older twin in Alerts).
+--        (a next-day twin of the same TITLE is a duplicate page; close a still-OPEN / ACK older twin as SUPERSEDED
+--        with the OPTIONAL owner repair R169.1 -- the Alerts RESOLVE radios cannot set that machine-close kind).
 WITH n AS (
     SELECT MAX(LATEST_LOAD) AS NEWEST_LOAD FROM DBA_MAINT_DB.OVERWATCH.ETL_RECON_RESULTS
 )
@@ -605,7 +657,7 @@ SELECT (SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
 PART_B_PRESENT = ("alert scan daily v6 (V169:", "AS MTD_COMPLETE_USD", "AS TERM_END", "PARTITION BY DATABASE_ID",
                   "AND DELETED IS NULL", "AS NEWEST_LOAD", "TARGET_CLOUD IS NOT NULL", "AS GB_DAY",
                   "COALESCE(w.AUTO_SUSPEND, 0) AS AUTO_SUSPEND", "GREATEST(COALESCE(c.THRESHOLD_NUM, 1), 1)",
-                  "/14 rule blocks ok (daily)", "AS DAILY_BURN")
+                  "/14 rule blocks ok (daily)", "AS DAILY_BURN", "AS RERAISED")
 PART_B_ABSENT = ("GB_24H", "AND w.AUTO_SUSPEND IS NOT NULL", "PARTITION BY DATABASE_NAME", "alert scan daily v5 (V163:")
 _body163 = extract_proc(V163, "SP_ALERT_SCAN_DAILY()")
 _body163 = _body163[_body163.index("$$") + 2:_body163.rindex("$$")]
@@ -676,16 +728,37 @@ LEFT JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
 # the V169.4 grid keys exactly as arm [18] does for a non-empty table (the COALESCE only covers no rows)
 assert "TO_VARCHAR(COALESCE(TO_DATE(r.NEWEST_LOAD), CURRENT_DATE()))" in _between(daily, *S18)
 
-REPAIR = """\
--- V169 owner repairs: NONE run here. The facts are correct; only the arms' arithmetic changed. Resolve historic
+# The Alerts RESOLVE radios offer ACTIONED / NOISE / EXPECTED only (app/ui/pages/alerts.py RESOLUTION_KINDS), so a
+# next-day DQ_RECON_ERROR twin -- a machine duplicate, which belongs under SUPERSEDED (left out of the RESOLVED count,
+# MTTR and per-rule precision, mart_sql.py) -- gets the one guarded SQL exception, R169.1, shaped like V168's R168.1:
+# COMMENTED OUT, bounded by the EVENT_IDs the owner pastes from P169.4, the rule and OPEN / ACK. Its placeholder matches
+# no EVENT_ID (a UUID string), so the block uncommented as written changes nothing.
+R169_1_PLACEHOLDER = "'<older-twin EVENT_ID from P169.4>'"
+REPAIR = f"""\
+-- Run in a Central session (RAISED_AT is Central wall-clock; the RUN_NEXT file leads with the timezone pin).
+-- V169 owner repairs: NONE run at apply. The facts are correct; only the arms' arithmetic changed. Resolve historic
 -- events in the Alerts UI (bulk resolve; ALERT_AUDIT records who and why), from these read-only PREFLIGHT grids:
 --   P169.1 COST_BUDGET_PACE events of days 2-5 the complete-day ratio would not have raised (NOISE);
 --   P169.2 COST_CONTRACT_BREACH events with WOULD_RAISE_NEW = FALSE (NOISE), and their auto-declared incidents;
 --   P169.3 COST_STORAGE_SURGE events on a re-created database (EXPECTED, note 're-created database pairing');
---   P169.4 DQ_RECON_ERROR next-day duplicates still OPEN (SUPERSEDED);
+--   P169.4 DQ_RECON_ERROR next-day duplicates still OPEN / ACK: NOT in the Alerts UI -- use R169.1 below;
 --   P169.7 SEC_TRUST_REGRESSION events with METRIC_VALUE < 1 (EXPECTED).
+-- R169.1 OPTIONAL (owner decision), the one exception to resolving in the Alerts UI: close the OLDER twin of each
+-- next-day DQ_RECON_ERROR duplicate that PREFLIGHT P169.4 lists (its second grid: the earlier of two events with the
+-- same TITLE on consecutive days) as SUPERSEDED. SUPERSEDED is a machine-close kind the Alerts RESOLVE radios do not
+-- offer: they set ACTIONED / NOISE / EXPECTED, which count in the RESOLVED total and MTTR (and ACTIONED / NOISE also
+-- move the rule's precision); SUPERSEDED stays out of all three, like the scans' own escalation supersede. Replace
+-- the placeholder with those EVENT_IDs, each quoted, comma-separated. Only a listed row of this rule still OPEN or
+-- ACK can change; a SNOOZED twin is left to wake, and the placeholder as written matches no row. No ALERT_AUDIT row
+-- is written (the scans' machine closes write none either). Uncomment to run.
+-- UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+--    SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'SUPERSEDED'
+--  WHERE EVENT_ID IN ({R169_1_PLACEHOLDER})
+--    AND RULE_ID = 'DQ_RECON_ERROR'
+--    AND STATUS IN ('OPEN', 'ACK');
 -- Never DELETE an ALERT_EVENTS row and never rewrite DEDUPE_KEY.
 """
+assert all(ln.startswith("--") for ln in REPAIR.splitlines() if ln.strip())       # every statement commented out
 
 for _name, _sql in (("PREFLIGHT", PREFLIGHT), ("PART B", PART_B), ("REPAIR", REPAIR)):
     assert "\r" not in _sql and _sql.isascii() and "$$" not in _sql, _name

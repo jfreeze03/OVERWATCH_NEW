@@ -586,6 +586,146 @@ def test_auto_clear_still_never_touches_a_rule_that_is_not_opted_in():
     assert s.state() == {ev["DEDUPE_KEY"]: ("OPEN", None)}
 
 
+# ============================================================================================================
+# [22] OPS_PIPELINE_DEGRADED ERR leg (holistic #4/#9): the DETAIL says whether the loader re-raised
+# ============================================================================================================
+_V169 = read("snowflake/migrations/V169__alert_scan_daily_windows_and_keys.sql")
+_V163 = read("snowflake/migrations/V163__ai_runaway_trust_regression.sql")
+_V166 = read("snowflake/migrations/V166__fact_loader_window_integrity.sql")
+_A22_H = ("    -- [22] OPS_PIPELINE_DEGRADED", "    END IF;   -- /V157 cadence gate: [22]")
+_A22_D = ("    -- [22] OPS_PIPELINE_DEGRADED", "    -- [24] COST_IDLE_OPPORTUNITY")
+_ARM22 = {"V168 hourly": _arm(_H, *_A22_H),
+          "V169 daily": _arm(_proc(_V169, "SP_ALERT_SCAN_DAILY()"), *_A22_D)}
+_ARM22_OLD = {"V162 hourly": _arm(_H162, *_A22_H),
+              "V163 daily": _arm(_proc(_V163, "SP_ALERT_SCAN_DAILY()"), *_A22_D)}
+_ERR_TYPES = ("mart_load_failed", "fact_load_failed", "extract_load_failed", "cloud_svc_mart_failed",
+              "object_cost_load_failed")
+_RERAISED = "The loader rolled back to its previous fill, logged this and re-raised: the run FAILED (TASK_HISTORY "
+_SWALLOWED = "The loader logged this and returned normally, so its task still reads SUCCEEDED and readers keep "
+
+
+def _to_varchar22(x, fmt=None):
+    if x is None or isinstance(x, str):
+        return x                                  # a DATE ('YYYY-MM-DD') renders as itself
+    assert fmt == "YYYY-MM-DD HH24:MI", fmt
+    return _dt(x).strftime("%Y-%m-%d %H:%M")
+
+
+class _MaxBy:
+    def __init__(self) -> None:
+        self.v, self.k = None, None
+
+    def step(self, v, k) -> None:
+        if k is not None and (self.k is None or k > self.k):
+            self.v, self.k = v, k
+
+    def finalize(self):
+        return self.v
+
+
+def _run22(arm: str, errors: list[dict], now: datetime) -> list[dict]:
+    """Run the arm's own INSERT ... SELECT on sqlite: OPS_PIPELINE_DEGRADED enabled, no freshness row and no
+    enabled route (so the STALE and NOTIFY legs raise nothing), the given APP_ERROR_LOG rows."""
+    con = sqlite3.connect(":memory:")
+    funcs = {
+        "NOW_TS": (0, lambda: _ms(now)), "DATEADD": (3, _dateadd), "TO_DATE": (1, _to_date),
+        "TO_VARCHAR": (-1, _to_varchar22), "IFF": (3, lambda c, a, b: a if c else b),
+        "LEFT": (2, _nullsafe(lambda s, n: str(s)[:max(int(n), 0)])),
+        "SPLIT_PART": (3, _nullsafe(lambda s, d, n: (str(s).split(d) + [""] * int(n))[int(n) - 1])),
+        "DATEDIFF": (3, _nullsafe(lambda u, a, b: (int(b) - int(a)) // _UNIT_MS[str(u).lower()])),
+    }
+    for name, (narg, fn) in funcs.items():
+        con.create_function(name, narg, fn)
+    con.create_aggregate("MAX_BY", 2, _MaxBy)
+    for table, cols in {"ALERT_CONFIG": "RULE_ID, SEVERITY, ENABLED", "ALERT_EVENTS": "DEDUPE_KEY",
+                        "SOURCE_FRESHNESS_STATE": "SOURCE_NAME, LAST_LOAD_TS, STATUS",
+                        "APP_ERROR_LOG": "PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, LOGGED_AT",
+                        "OW_SENDER_LEASE": "LEASE_NAME, ACQUIRED_AT", "ALERT_ROUTES": "ENABLED"}.items():
+        con.execute(f"CREATE TABLE {table} ({cols})")
+    con.execute("INSERT INTO ALERT_CONFIG VALUES ('OPS_PIPELINE_DEGRADED', 'HIGH', 1)")
+    con.executemany("INSERT INTO APP_ERROR_LOG VALUES (?, ?, ?, ?, ?)",
+                    [(e["PAGE"], e["ERROR_TYPE"], e["MSG"], e["CONTEXT"], _ms(e["AT"])) for e in errors])
+    # the arm's only casts are CONVERT_TIMEZONE(...)::TIMESTAMP_NTZ (Central wall-clock = the identity here)
+    cur = con.execute(_sq(arm.replace("::TIMESTAMP_NTZ", "")))
+    assert tuple(c[0] for c in cur.description) == _EVENT_COLS
+    return [dict(zip(_EVENT_COLS, r, strict=True)) for r in cur.fetchall()]
+
+
+def _v166_context(proc: str) -> tuple[str, str]:
+    """(PAGE, CONTEXT) of the fact_load_failed row the V166 loader logs before it RAISEs -- the fixture's source."""
+    body = _proc(_V166, proc)
+    m = re.search(r"SELECT '(\w+)', 'fact_load_failed', LEFT\(:emsg, 2000\), '([^']+)', CURRENT_ROLE\(\);\n\s+RAISE;",
+                  body)
+    assert m, proc
+    return m.group(1), m.group(2)
+
+
+_NOW22 = datetime(2026, 9, 30, 8, 7)
+
+
+def _errors22() -> list[dict]:
+    app_page, app_ctx = _v166_context("SP_LOAD_APP_COST(DAYS_BACK FLOAT)")
+    st_page, st_ctx = _v166_context("SP_LOAD_STORAGE_TRUTH(DAYS_BACK FLOAT)")
+    return [
+        {"PAGE": app_page, "ERROR_TYPE": "fact_load_failed", "MSG": "Numeric value 'x' is not recognized",
+         "CONTEXT": app_ctx, "AT": datetime(2026, 9, 30, 6, 55)},
+        {"PAGE": st_page, "ERROR_TYPE": "fact_load_failed", "MSG": "Warehouse suspended",
+         "CONTEXT": st_ctx, "AT": datetime(2026, 9, 30, 6, 30)},
+        {"PAGE": "MartLoader", "ERROR_TYPE": "mart_load_failed", "MSG": "Object does not exist",
+         "CONTEXT": "MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected", "AT": datetime(2026, 9, 30, 6, 52)},
+        {"PAGE": "DailyFacts", "ERROR_TYPE": "fact_load_failed", "MSG": "Division by zero",
+         "CONTEXT": "FACT_TASK_DAILY - other daily facts unaffected", "AT": datetime(2026, 9, 30, 6, 40)},
+    ]
+
+
+@pytest.mark.parametrize("label", sorted(_ARM22))
+def test_arm22_err_detail_says_a_reraised_load_failed_and_a_swallowed_one_succeeded(label):
+    got = {r["TITLE"]: r for r in _run22(_ARM22[label], _errors22(), _NOW22)}
+    assert set(got) == {"fact_load_failed: FACT_APP_COST_DAILY failed 1x on 2026-09-30",
+                        "fact_load_failed: FACT_STORAGE_ACCOUNT_DAILY failed 1x on 2026-09-30",
+                        "mart_load_failed: MART_WAREHOUSE_EFFICIENCY_DAILY failed 1x on 2026-09-30",
+                        "fact_load_failed: FACT_TASK_DAILY failed 1x on 2026-09-30"}
+    app = got["fact_load_failed: FACT_APP_COST_DAILY failed 1x on 2026-09-30"]["DETAIL"]
+    assert app == ("The loader rolled back to its previous fill, logged this and re-raised: the run FAILED "
+                   "(TASK_HISTORY shows it) and readers keep the previous fill. Last at 2026-09-30 06:55: Numeric "
+                   "value 'x' is not recognized. Admin > Errors & telemetry (persisted error log).")
+    for title, row in got.items():
+        reraised = "FACT_APP_COST_DAILY" in title or "FACT_STORAGE_ACCOUNT_DAILY" in title
+        assert row["DETAIL"].startswith(_RERAISED if reraised else _SWALLOWED), title
+        assert ("SUCCEEDED" in row["DETAIL"]) is not reraised, title
+        assert row["DEDUPE_KEY"].startswith("OPS_PIPELINE_DEGRADED|ERR|") and row["METRIC_VALUE"] == 1
+
+
+@pytest.mark.parametrize("label", sorted(_ARM22_OLD))
+def test_arm22_teeth_the_v162_v163_text_told_a_reraised_load_its_task_succeeded(label):
+    got = {r["TITLE"]: r["DETAIL"] for r in _run22(_ARM22_OLD[label], _errors22(), _NOW22)}
+    assert got["fact_load_failed: FACT_APP_COST_DAILY failed 1x on 2026-09-30"].startswith(_SWALLOWED)
+    assert all("re-raised" not in d for d in got.values())
+    # the keys and titles are unchanged by the fix (only the DETAIL wording branches)
+    new = _run22(_ARM22["V168 hourly"], _errors22(), _NOW22)
+    old = _run22(_ARM22_OLD[label], _errors22(), _NOW22)
+    drop = ("DETAIL",)
+    assert ([{k: v for k, v in r.items() if k not in drop} for r in new]
+            == [{k: v for k, v in r.items() if k not in drop} for r in old])
+
+
+def test_arm22_reraise_pages_are_exactly_the_loaders_that_log_then_raise():
+    """The RERAISED PAGE list must track the code: every latest proc that logs one of the five ERR-leg types and
+    then RAISEs is listed, and no listed PAGE also logs one and returns normally. A future loader that starts
+    re-raising (or stops) fails here until the [22] wording follows it."""
+    from tests.test_alert_rule_consistency import _latest_proc_bodies
+    listed = set(re.findall(r"'(\w+)'", _between(_ARM22["V168 hourly"], "MAX(IFF(PAGE IN (", ")")))
+    ins = re.compile(r"INSERT INTO DBA_MAINT_DB\.OVERWATCH\.APP_ERROR_LOG\b[^;]*?(?:SELECT|VALUES\s*\()\s*'(\w+)',\s*"
+                     r"'(" + "|".join(_ERR_TYPES) + r")'[^;]*;(?P<tail>.*?)\bEND;", re.S)
+    reraise, swallow = set(), set()
+    for body in _latest_proc_bodies().values():
+        for m in ins.finditer(body):
+            (reraise if re.search(r"^\s*RAISE;", m["tail"], re.M) else swallow).add(m.group(1))
+    assert reraise == listed == {"AppCost", "StorageTruth"}, (reraise, listed)
+    assert not reraise & swallow, reraise & swallow
+    assert "MartLoader" in swallow and "DailyFacts" in swallow and "ExtractLoader" in swallow     # the regex has reach
+
+
 def test_the_translator_fails_closed():
     with pytest.raises(AssertionError):
         _sq(_ARM14.replace("LAST_LOAD_TIME)) AS FAIL_DAY", "LAST_LOAD_TIME))::DATE AS FAIL_DAY", 1))

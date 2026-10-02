@@ -9,7 +9,9 @@
 -- user|IP with no date, so a network quiet for 90+ days -- which the rule name, playbook and Security panel promise
 -- to re-flag -- never alerted again. (R2-039) the same arm counted failed attempts as logins and always said
 -- 'logged in', and a failures-only event blocked the success that followed it. (R2-091) SEC_NEW_EXPOSURE pointed
--- at Security -> Access, where no PUBLIC-grant panel exists. (R2-040) two dead prologue reads.
+-- at Security -> Access, where no PUBLIC-grant panel exists. (R2-040) two dead prologue reads. (Holistic #4/#9)
+-- the OPS_PIPELINE_DEGRADED ERR DETAIL told every logged loader failure 'its task still reads SUCCEEDED', but V166's
+-- SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back and re-raise, so TASK_HISTORY shows those runs FAILED.
 --
 --   ~ SP_ALERT_SCAN re-derived from V162 (its current definer), byte-identical except:
 --     ~ arm [14] PIPE_COPY_FAILURES: keyed by the Central FAILURE day over whole Central days (yesterday + today,
@@ -29,6 +31,10 @@
 --       the three -24h windows are unchanged).
 --     - the dead budget_usd / ai_credit_price prologue reads (arm [17] keeps :credit_price; the daily scan keeps
 --       its own copies).
+--     ~ arm [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' / 'StorageTruth' row, the
+--       V166 loaders that roll back, log and re-raise); the DETAIL says that run FAILED (TASK_HISTORY shows it),
+--       and keeps 'returned normally, so its task still reads SUCCEEDED' for every other loader. Keys, sources,
+--       cadence gate and windows unchanged; byte-identical to V169's daily twin.
 --     ~ the RETURN label names V168; the 14-block tally is unchanged.
 --   ~ ALERT_CONFIG NAME of PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK, only while it still equals the seed text.
 --
@@ -64,7 +70,7 @@ BEGIN
 END;
 $$;
 
--- >>> derived:SP_ALERT_SCAN  (from V162; [14] failure-day key, [18] outcome + first-seen-day key + 48h episode guard, [20] pointer, V067 FAILED supersede, V091 sweep any raise day, dead prologue reads, V168)
+-- >>> derived:SP_ALERT_SCAN  (from V162; [14] failure-day key, [18] outcome + first-seen-day key + 48h episode guard, [20] pointer, V067 FAILED supersede, V091 sweep any raise day, dead prologue reads, [22] ERR re-raise wording, V168)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -893,8 +899,10 @@ BEGIN
     --      past the shared name-rule cadence (DAILY/METERING in the name 30h, else 3h -- the app health strip,
     --      Admin, Control Room and NATIVE_ALERT_STALE_FACTS judge it the same way), including the scans' own
     --      heartbeat rows ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY -- at most one event per source per last-load
-    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged and swallowed
-    --      (its task still reads SUCCEEDED) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one
+    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged -- most
+    --      loaders swallow it (their task still reads SUCCEEDED); V166's SP_LOAD_APP_COST and
+    --      SP_LOAD_STORAGE_TRUTH roll back to the previous fill and re-raise (their task reads FAILED), and
+    --      the DETAIL says which (RERAISED, V168 + V169) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one
     --      event per (type, source, Central day). The three OPTIONAL SP_LOAD_MARTS_V27 arm sources (tag
     --      coverage, task node, AI usage) are left to the STALE leg, so a persistently failing optional arm
     --      raises once per episode instead of every day. (c) NOTIFY: SP_NOTIFY_WEBHOOK has not acquired its
@@ -917,7 +925,8 @@ BEGIN
         errs AS (
             SELECT ERROR_TYPE, SPLIT_PART(COALESCE(CONTEXT, ''), ' ', 1) AS SRC,
                    TO_DATE(LOGGED_AT) AS ERR_DAY, COUNT(*) AS N,
-                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG
+                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG,
+                   MAX(IFF(PAGE IN ('AppCost', 'StorageTruth'), 1, 0)) AS RERAISED   -- the V166 loads that roll back and re-raise
             FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
             WHERE ERROR_TYPE IN ('mart_load_failed', 'fact_load_failed', 'extract_load_failed',
                                  'cloud_svc_mart_failed', 'object_cost_load_failed')
@@ -961,8 +970,12 @@ BEGIN
         UNION ALL
         SELECT c.RULE_ID, 'ALL', c.SEVERITY,
                LEFT(x.ERROR_TYPE || ': ' || x.SRC || ' failed ' || x.N || 'x on ' || TO_VARCHAR(x.ERR_DAY), 300),
-               LEFT('The loader logged this and returned normally, so its task still reads SUCCEEDED and readers '
-                   || 'keep the previous fill. Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '
+               LEFT(IFF(x.RERAISED = 1,
+                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '
+                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',
+                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '
+                        || 'readers keep the previous fill.')
+                   || ' Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '
                    || COALESCE(LEFT(x.LAST_MSG, 600), '—') || '. Admin > Errors & telemetry (persisted error log).', 2000),
                x.N,
                c.RULE_ID || '|ERR|' || x.ERROR_TYPE || '|' || x.SRC || '|' || TO_VARCHAR(x.ERR_DAY)
@@ -1344,5 +1357,5 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 168 AS VERSION,
-       'Round-2 review, alerts cluster (R2-034, R2-035, R2-036, R2-039, R2-040, R2-091). SP_ALERT_SCAN re-derived from V162, byte-identical except: arm [14] PIPE_COPY_FAILURES keyed by the Central failure day over whole Central days (yesterday and today), TITLE names the day, band and trailing date kept; arm [18] SEC_NEW_ADMIN_NETWORK counts SUCCESSES, says logged in only when one succeeded (else N failed login attempts, 0 successful), keys on user, IP, FAILED for a failures-only pair, and the first-seen Central day (a network quiet 90 days alerts again), with a 48h same-episode guard on the exact date-stripped base; arm [20] SEC_NEW_EXPOSURE DETAIL points at Security, Changes; the V067 sweep supersedes a failures-only SEC_NEW_ADMIN_NETWORK event once the success event opens; the V091 auto-clear sweep re-checks every OPEN PERF event whatever its raise day; the dead budget and AI-price prologue reads are gone; RETURN names V168, tally 14 unchanged. ALERT_CONFIG NAME of PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK refreshed only while it equals the seed text. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
+       'Round-2 review, alerts cluster (R2-034, R2-035, R2-036, R2-039, R2-040, R2-091). SP_ALERT_SCAN re-derived from V162, byte-identical except: arm [14] PIPE_COPY_FAILURES keyed by the Central failure day over whole Central days (yesterday and today), TITLE names the day, band and trailing date kept; arm [18] SEC_NEW_ADMIN_NETWORK counts SUCCESSES, says logged in only when one succeeded (else N failed login attempts, 0 successful), keys on user, IP, FAILED for a failures-only pair, and the first-seen Central day (a network quiet 90 days alerts again), with a 48h same-episode guard on the exact date-stripped base; arm [20] SEC_NEW_EXPOSURE DETAIL points at Security, Changes; the V067 sweep supersedes a failures-only SEC_NEW_ADMIN_NETWORK event once the success event opens; the V091 auto-clear sweep re-checks every OPEN PERF event whatever its raise day; the dead budget and AI-price prologue reads are gone; the OPS_PIPELINE_DEGRADED ERR detail says a run of the V166 app-cost or storage-truth loader rolled back and FAILED instead of claiming its task still reads SUCCEEDED; RETURN names V168, tally 14 unchanged. ALERT_CONFIG NAME of PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK refreshed only while it equals the seed text. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 168);

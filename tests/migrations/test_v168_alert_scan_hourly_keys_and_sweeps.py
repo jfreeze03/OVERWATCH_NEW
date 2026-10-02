@@ -53,10 +53,12 @@ _H162 = _proc(_V162, "SP_ALERT_SCAN()")
 # Test-side copies of every declared delta (independent of outputs/gen_v168.py).
 # ---------------------------------------------------------------------------------------------------
 _MARKER = ("-- >>> derived:SP_ALERT_SCAN  (from V162; [14] failure-day key, [18] outcome + first-seen-day key + 48h "
-           "episode guard, [20] pointer, V067 FAILED supersede, V091 sweep any raise day, dead prologue reads, V168)\n")
+           "episode guard, [20] pointer, V067 FAILED supersede, V091 sweep any raise day, dead prologue reads, [22] ERR "
+           "re-raise wording, V168)\n")
 _A14 = ("    -- [14] PIPE_COPY_FAILURES\n", "    -- [17] COST_DEPT_BUDGET_PACE\n")
 _A18 = ("    -- [18] SEC_NEW_ADMIN_NETWORK", "    IF (MOD(ct_hour, 4) = 1) THEN   -- V157 cadence gate: [20]")
 _A20 = ("    -- [20] SEC_NEW_EXPOSURE", "    END IF;   -- /V157 cadence gate: [20]")
+_A22 = ("    -- [22] OPS_PIPELINE_DEGRADED", "    END IF;   -- /V157 cadence gate: [22]")
 
 _DELTAS: list[tuple[str, str, tuple[str, str] | None]] = [
     # (V162 text, V168 text, arm slice or None for a whole-body unique anchor)
@@ -163,6 +165,29 @@ _DELTAS: list[tuple[str, str, tuple[str, str] | None]] = [
      "'alert scan v14 (V168: [14] failure-day key, [18] outcome + first-seen-day key, auto-clear any raise day; "
      "V162 arms and V157 gates unchanged): '", None),
 ]
+# holistic #4/#9 (appended, so the index-16 placeholder above keeps its slot): the [22] ERR leg names a re-raised load
+_A22_DELTAS: list[tuple[str, str, tuple[str, str] | None]] = [
+    ("    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged and swallowed\n"
+     "    --      (its task still reads SUCCEEDED) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one\n",
+     "    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged -- most\n"
+     "    --      loaders swallow it (their task still reads SUCCEEDED); V166's SP_LOAD_APP_COST and\n"
+     "    --      SP_LOAD_STORAGE_TRUTH roll back to the previous fill and re-raise (their task reads FAILED), and\n"
+     "    --      the DETAIL says which (RERAISED, V168 + V169) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS"
+     " -- one\n", _A22),
+    ("MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG\n",
+     "MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG,\n"
+     "                   MAX(IFF(PAGE IN ('AppCost', 'StorageTruth'), 1, 0)) AS RERAISED   -- the V166 loads that roll "
+     "back and re-raise\n", _A22),
+    ("               LEFT('The loader logged this and returned normally, so its task still reads SUCCEEDED and readers '\n"
+     "                   || 'keep the previous fill. Last at ' ",
+     "               LEFT(IFF(x.RERAISED = 1,\n"
+     "                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '\n"
+     "                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',\n"
+     "                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '\n"
+     "                        || 'readers keep the previous fill.')\n"
+     "                   || ' Last at ' ", _A22),
+]
+_DELTAS += _A22_DELTAS
 _V096_BOUND = ("           AND ev.RAISED_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP())                    -- V096: "
                "recent window (was date-in-key); catches next-day-cleared 24h conditions\n")
 _DWELL_PAIR = _DELTAS[16][0]
@@ -380,9 +405,10 @@ def test_v168_normalize_check_has_teeth(victim):
     assert _reverse(_H.replace(victim, victim[:-1], 1)) != _H162
 
 
-@pytest.mark.parametrize("i", range(19))
+@pytest.mark.parametrize("i", range(22))
 def test_v168_every_declared_delta_is_real(i):
     """Skipping any one delta's reversal leaves a body that is NOT V162's."""
+    assert len(_DELTAS) == 22
     assert _reverse(_H, [d for k, d in enumerate(_DELTAS) if k != i]) != _H162
 
 
@@ -453,6 +479,37 @@ def test_v168_arm20_points_where_investigate_lands():
     assert "LOGIN_HISTORY - review in Security -> Access" in arm26              # [26] stays on Access
 
 
+def test_v168_arm22_err_detail_names_a_reraised_load_and_keeps_the_swallowed_wording():
+    """Holistic #4/#9: V166's SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back, log fact_load_failed and RE-RAISE
+    (their task reads FAILED), yet the ERR DETAIL told every logged failure 'its task still reads SUCCEEDED'. The
+    leg now branches on RERAISED (a PAGE 'AppCost' / 'StorageTruth' row); every other loader keeps the old clause.
+    tests/migrations/test_v168_harness.py runs the arm; this pins the text and the twin."""
+    a = _between(_H, *_A22)
+    assert a.count("MAX(IFF(PAGE IN ('AppCost', 'StorageTruth'), 1, 0)) AS RERAISED") == 1
+    assert a.count("LEFT(IFF(x.RERAISED = 1,\n") == 1 and "RERAISED" not in _H.replace(a, "")
+    assert a.count("'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '") == 1
+    assert a.count("'The loader logged this and returned normally, so its task still reads SUCCEEDED and '") == 1
+    assert "logged and swallowed\n" not in a and "V166's SP_LOAD_APP_COST and\n" in a      # the [22] header comment
+    # keys, sources and windows unchanged: only the three declared deltas separate it from V162's arm
+    assert _between(_reverse(_H, _A22_DELTAS), *_A22) == _between(_H162, *_A22)
+    # V157 design: byte-identical in both scans (V169 re-derives the daily twin with the same three deltas)
+    v169 = _proc(read("snowflake/migrations/V169__alert_scan_daily_windows_and_keys.sql"), "SP_ALERT_SCAN_DAILY()")
+    assert a == _between(v169, "    -- [22] OPS_PIPELINE_DEGRADED", "    -- [24] COST_IDLE_OPPORTUNITY")
+
+
+def test_v168_ops_pipeline_degraded_playbook_names_both_err_outcomes():
+    """Holistic #9: the playbook said every finding arrives 'while its tasks still read SUCCEEDED' and that a loader
+    'logged a failure and carried on'; since V166 the app-cost and storage-truth loaders roll back and re-raise."""
+    from app.logic.playbooks import PLAYBOOKS
+    means = PLAYBOOKS["OPS_PIPELINE_DEGRADED"].split("\n\n", 1)[0]
+    assert "stopped while its tasks still read SUCCEEDED" not in means
+    assert "a loader logged a failure and carried on" not in means
+    for phrase in ("often while its tasks still read SUCCEEDED", "most loaders carry on and their task reads SUCCEEDED",
+                   "`SP_LOAD_APP_COST` and `SP_LOAD_STORAGE_TRUTH` roll back to their previous fill and re-raise",
+                   "so their task reads FAILED", "the alert DETAIL says which"):
+        assert phrase in means, phrase
+
+
 def test_v168_v067_sweep_supersedes_a_failures_only_new_network_event_only():
     sweep = _between(_H, "    -- V067 #40: supersede", "    -- [auto-clear sweep] V091:")
     for pair in ("REPLACE(lo.DEDUPE_KEY, '|WARN|', '|CRIT|')", "REPLACE(lo.DEDUPE_KEY, '|MED|', '|HIGH|')",
@@ -490,7 +547,8 @@ def test_v168_leaves_every_other_block_alone():
     for start, end in (("    -- [01] COST_DAILY_CREDITS", "    -- [03] PERF_QUERY_FAIL_PCT"),
                        ("    -- [10] SEC_CRED_EXPIRY", "    -- [14] PIPE_COPY_FAILURES"),
                        ("    -- [17] COST_DEPT_BUDGET_PACE", "    -- [18] SEC_NEW_ADMIN_NETWORK"),
-                       ("    -- [21] SEC_POSTURE_METRIC", "    -- V067 #40: supersede"),
+                       ("    -- [21] SEC_POSTURE_METRIC", "    -- [22] OPS_PIPELINE_DEGRADED"),
+                       ("    END IF;   -- /V157 cadence gate: [22]", "    -- V067 #40: supersede"),
                        ("    -- [condition-ended sweep] V157", "    -- [snooze carry-forward sweep] V117"),
                        ("    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS ev\n           SET STATUS = 'SNOOZED'",
                         "    RETURN ")):
@@ -513,14 +571,14 @@ def test_v168_tally_and_footprint_unchanged():
 def test_v168_changed_arm_statements_parse():
     sqlglot = pytest.importorskip("sqlglot")
     from sqlglot import exp
-    for span in (_A14, _A18, _A20):
+    for span in (_A14, _A18, _A20, _A22):
         arm = _between(_H, *span)
         stmt = arm[arm.index("INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS"):arm.index(";\n    EXCEPTION")]
         (parsed,) = sqlglot.parse(stmt, dialect="snowflake")
         assert [c.name for c in parsed.this.expressions] == ["RULE_ID", "COMPANY", "SEVERITY", "TITLE", "DETAIL",
                                                              "METRIC_VALUE", "DEDUPE_KEY"]
         (b,) = [s for s in parsed.find_all(exp.Subquery) if s.alias == "b"]
-        assert len(b.this.expressions) == 7
+        assert len(b.this.selects) == 7          # a Select, or the [22] UNION of three legs
     for start in ("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS lo\n", "UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS ev\n"
                   "           SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'AUTO_CLEARED'"):
         stmt = _H[_H.index(start):_H.index(";\n", _H.index(start))]
@@ -563,7 +621,7 @@ def test_v168_keys_fit_varchar_300_and_strip_to_one_identity_per_outcome():
 # -- RUN_NEXT PART B ------------------------------------------------------------------------------------------
 _PART_B_PRESENT = ("alert scan v14 (V168:", "AS FAIL_DAY", "GROUP BY 1, 2, 3, 4", "AS SUCCESSES", "(0 successful)",
                    "LEFT(nn.USER_NAME, 200)", "Changes (Recent grant changes)", "____-__-__", "/14 rule blocks ok",
-                   "SP_SCAN_ETL_CYCLE")
+                   "SP_SCAN_ETL_CYCLE", "AS RERAISED")
 _PART_B_ABSENT = ("failed file load(s) (24h)", "ev.RAISED_AT >= DATEADD", "budget_usd", "alert scan v13 (V162:")
 
 

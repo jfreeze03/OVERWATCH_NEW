@@ -53,7 +53,7 @@ _D163 = _proc(_V163, "SP_ALERT_SCAN_DAILY()")
 # ---------------------------------------------------------------------------------------------------
 _MARKER = ("-- >>> derived:SP_ALERT_SCAN_DAILY  (from V163; [08]/[09] complete-day MTD, [16] contract start gate + "
            "end bound, [12] live DATABASE_ID, [18] error-cycle-day key, [19] previous-day true egress, [24] NULL "
-           "timer as 0, [29] threshold floor, V169)\n")
+           "timer as 0, [29] threshold floor, [22] ERR re-raise wording, V169)\n")
 _S08 = ("    -- [08] COST_BUDGET_PACE\n", "    -- [09] COST_FORECAST_BREACH\n")
 _S09 = ("    -- [09] COST_FORECAST_BREACH\n", "    -- [13b] COST_AI_CREEP\n")
 _S16 = ("    -- [16] COST_CONTRACT_BREACH\n", "    -- [12] COST_STORAGE_SURGE\n")
@@ -62,6 +62,7 @@ _S19 = ("    -- [19] COST_EGRESS_SPIKE", "    -- [22] OPS_PIPELINE_DEGRADED")
 _S24 = ("    -- [24] COST_IDLE_OPPORTUNITY", "    -- [25] COST_SLEEP_POLLING")
 _S29 = ("    -- [29] SEC_TRUST_REGRESSION", "    -- [17] PIPE_REF_GAP")
 _S18 = ("    -- [18] DQ_RECON_ERROR", "    IF (fails > 0) THEN")
+_S22 = ("    -- [22] OPS_PIPELINE_DEGRADED", "    -- [24] COST_IDLE_OPPORTUNITY")
 _AI = ("(SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%' OR "
        "SERVICE_TYPE ILIKE '%COCO%' OR SERVICE_TYPE ILIKE '%COWORK%')")
 _MTD_ADD = (
@@ -190,6 +191,29 @@ _DELTAS: list[tuple[str, str, tuple[str, str] | None, int]] = [
      "'alert scan daily v6 (V169: [08]/[09] complete-day MTD, [16] contract term, [12] live database id, [18] "
      "error-cycle day, [19] previous-day true egress, [24] NULL timer, [29] floor): '", None, 1),
 ]
+# holistic #4/#9: the [22] ERR leg names a re-raised load (the same three deltas as V168's hourly twin)
+_S22_DELTAS = [
+    ("    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged and swallowed\n"
+     "    --      (its task still reads SUCCEEDED) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one\n",
+     "    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged -- most\n"
+     "    --      loaders swallow it (their task still reads SUCCEEDED); V166's SP_LOAD_APP_COST and\n"
+     "    --      SP_LOAD_STORAGE_TRUTH roll back to the previous fill and re-raise (their task reads FAILED), and\n"
+     "    --      the DETAIL says which (RERAISED, V168 + V169) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS"
+     " -- one\n", _S22, 1),
+    ("MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG\n",
+     "MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG,\n"
+     "                   MAX(IFF(PAGE IN ('AppCost', 'StorageTruth'), 1, 0)) AS RERAISED   -- the V166 loads that roll "
+     "back and re-raise\n", _S22, 1),
+    ("               LEFT('The loader logged this and returned normally, so its task still reads SUCCEEDED and readers '\n"
+     "                   || 'keep the previous fill. Last at ' ",
+     "               LEFT(IFF(x.RERAISED = 1,\n"
+     "                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '\n"
+     "                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',\n"
+     "                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '\n"
+     "                        || 'readers keep the previous fill.')\n"
+     "                   || ' Last at ' ", _S22, 1),
+]
+_DELTAS += _S22_DELTAS
 
 
 def _reverse(d: str, deltas=None) -> str:
@@ -294,6 +318,65 @@ def test_v169_preflight_carries_the_arm_text(tmp_path):
     assert not _strip_noise(rp).strip() and "Never DELETE an ALERT_EVENTS row" in rp
 
 
+def _r169_1(rp: str) -> str:
+    lines = rp.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("-- UPDATE "))
+    end = next(i for i in range(start, len(lines)) if lines[i].rstrip().endswith(";"))
+    return "\n".join(ln[3:] for ln in lines[start:end + 1])
+
+
+def test_v169_owner_repair_r169_1_is_the_guarded_superseded_exception(tmp_path):
+    """Holistic #0: the repair note told the owner to resolve the P169.4 DQ_RECON_ERROR twins '(SUPERSEDED)' in the
+    Alerts UI, whose RESOLVE radios offer ACTIONED / NOISE / EXPECTED only -- every one of which counts in the
+    RESOLVED total and MTTR. SUPERSEDED (a machine close, out of RESOLVED / MTTR / precision) now has its own
+    guarded, fully commented R169.1 block, the one named exception to 'resolve in the Alerts UI'."""
+    from app.ui.pages.alerts import RESOLUTION_KINDS
+    assert "SUPERSEDED" not in RESOLUTION_KINDS                         # why the UI cannot do it
+    pre, _, rp = _extras(tmp_path)
+    assert all(ln.startswith("--") for ln in rp.splitlines() if ln.strip())
+    assert not _strip_noise(rp).strip()
+    assert "in a Central session" in rp[:400]
+    flat = " ".join(ln.lstrip("- ") for ln in rp.splitlines())
+    assert "(SUPERSEDED);" not in flat
+    assert "P169.4 DQ_RECON_ERROR next-day duplicates still OPEN / ACK: NOT in the Alerts UI -- use R169.1 below;" in flat
+    assert "R169.1 OPTIONAL (owner decision), the one exception to resolving in the Alerts UI" in flat
+    assert "Uncomment to run." in flat and "never rewrite DEDUPE_KEY" in flat
+    p4 = pre[pre.index("-- P169.4 "):pre.index("-- P169.5 ")]
+    assert "resolve a still-OPEN older twin in Alerts" not in p4 and "owner repair R169.1" in p4
+    stmt = _r169_1(rp)
+    assert stmt == ("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS\n"
+                    "   SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'SUPERSEDED'\n"
+                    " WHERE EVENT_ID IN ('<older-twin EVENT_ID from P169.4>')\n"
+                    "   AND RULE_ID = 'DQ_RECON_ERROR'\n"
+                    "   AND STATUS IN ('OPEN', 'ACK');")
+    sqlglot = pytest.importorskip("sqlglot")
+    (tree,) = sqlglot.parse(stmt, dialect="snowflake")
+    assert tree.key == "update"
+
+
+def test_v169_owner_repair_r169_1_closes_only_the_listed_open_or_acked_dq_twins(tmp_path):
+    """Executed: uncommented as written the block changes nothing (the placeholder is no EVENT_ID); with the
+    owner's pasted EVENT_IDs only a listed DQ_RECON_ERROR row still OPEN / ACK closes as SUPERSEDED."""
+    import sqlite3
+
+    _, _, rp = _extras(tmp_path)
+    stmt = _r169_1(rp).replace("DBA_MAINT_DB.OVERWATCH.", "").replace("CURRENT_TIMESTAMP()", "'2026-10-01 09:00:00'")
+    rows = [("a1", "DQ_RECON_ERROR", "OPEN"), ("a2", "DQ_RECON_ERROR", "ACK"), ("a3", "DQ_RECON_ERROR", "SNOOZED"),
+            ("a4", "DQ_RECON_ERROR", "RESOLVED"), ("b1", "COST_EGRESS_SPIKE", "OPEN"), ("a5", "DQ_RECON_ERROR", "OPEN")]
+
+    def run(sql: str) -> dict:
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE ALERT_EVENTS (EVENT_ID, RULE_ID, STATUS, RESOLVED_AT, RESOLUTION_KIND)")
+        con.executemany("INSERT INTO ALERT_EVENTS VALUES (?, ?, ?, NULL, NULL)", rows)
+        con.execute(sql)
+        return {r[0]: (r[1], r[2]) for r in con.execute("SELECT EVENT_ID, STATUS, RESOLUTION_KIND FROM ALERT_EVENTS")}
+
+    untouched = {eid: (status, None) for eid, _, status in rows}
+    assert run(stmt) == untouched                                             # the placeholder matches no row
+    listed = stmt.replace("'<older-twin EVENT_ID from P169.4>'", "'a1', 'a2', 'a3', 'a4', 'b1'")
+    assert run(listed) == {**untouched, "a1": ("RESOLVED", "SUPERSEDED"), "a2": ("RESOLVED", "SUPERSEDED")}
+
+
 # -- guard, order, shape -------------------------------------------------------------------------------------
 
 def test_v169_first_line_guard_and_version():
@@ -376,9 +459,9 @@ def test_v169_normalize_check_has_teeth(victim):
     assert _reverse(_D.replace(victim, victim[:-1], 1)) != _D163
 
 
-@pytest.mark.parametrize("i", range(28))
+@pytest.mark.parametrize("i", range(31))
 def test_v169_every_declared_delta_is_real(i):
-    assert len(_DELTAS) == 28
+    assert len(_DELTAS) == 31
     assert _reverse(_D, [d for k, d in enumerate(_DELTAS) if k != i]) != _D163
 
 
@@ -477,11 +560,15 @@ def test_v169_leaves_every_other_block_alone():
     for start, end in (("BEGIN\n", "    -- [08] COST_BUDGET_PACE"),
                        ("    -- [13b] COST_AI_CREEP", "    -- [16] COST_CONTRACT_BREACH"),
                        ("    -- [13] COST_SERVERLESS_CREEP", "    -- [19] COST_EGRESS_SPIKE"),
-                       ("    -- [22] OPS_PIPELINE_DEGRADED", "    -- [24] COST_IDLE_OPPORTUNITY"),
                        ("    -- [25] COST_SLEEP_POLLING", "    -- [29] SEC_TRUST_REGRESSION"),
                        ("    -- [17] PIPE_REF_GAP", "    -- [18] DQ_RECON_ERROR"),
                        ("    IF (fails > 0) THEN", "    RETURN ")):
         assert _between(_D, start, end) == _between(_D163, start, end), start
+    # [22] differs from V163 only by its three declared deltas (holistic #4/#9) and stays V168's hourly twin
+    assert _between(_reverse(_D, _S22_DELTAS), *_S22) == _between(_D163, *_S22)
+    v168 = _proc(read("snowflake/migrations/V168__alert_scan_hourly_keys_and_sweeps.sql"), "SP_ALERT_SCAN()")
+    assert _between(_D, *_S22) == _between(v168, "    -- [22] OPS_PIPELINE_DEGRADED",
+                                           "    END IF;   -- /V157 cadence gate: [22]")
     v160 = _proc(read("snowflake/migrations/V160__sleep_polling_alert.sql"), "SP_ALERT_SCAN_DAILY()")
     assert _between(v160, "    -- [25] COST_SLEEP_POLLING", "    -- [17] PIPE_REF_GAP") in _D
     assert "ct_hour" not in _D and "cadence gate" not in _D
@@ -505,7 +592,7 @@ def test_v169_changed_arm_statements_parse():
     sqlglot = pytest.importorskip("sqlglot")
     from sqlglot import exp
     binds = {":budget_usd": "100", ":ai_credit_price": "2.2", ":credit_price": "3.68"}
-    for span in (_S08, _S09, _S16, _S12, _S19, _S24, _S29, _S18):
+    for span in (_S08, _S09, _S16, _S12, _S19, _S24, _S29, _S18, _S22):
         arm = _between(_D, *span)
         stmt = arm[arm.index("INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS"):arm.index(";\n    EXCEPTION")]
         for k, v in binds.items():
@@ -514,14 +601,14 @@ def test_v169_changed_arm_statements_parse():
         assert [c.name for c in parsed.this.expressions] == ["RULE_ID", "COMPANY", "SEVERITY", "TITLE", "DETAIL",
                                                              "METRIC_VALUE", "DEDUPE_KEY"], span
         (b,) = [s for s in parsed.find_all(exp.Subquery) if s.alias == "b"]
-        assert len(b.this.expressions) == 7, span
+        assert len(b.this.selects) == 7, span    # a Select, or the [22] UNION of three legs
 
 
 # -- RUN_NEXT PART B ------------------------------------------------------------------------------------------
 _PART_B_PRESENT = ("alert scan daily v6 (V169:", "AS MTD_COMPLETE_USD", "AS TERM_END", "PARTITION BY DATABASE_ID",
                    "AND DELETED IS NULL", "AS NEWEST_LOAD", "TARGET_CLOUD IS NOT NULL", "AS GB_DAY",
                    "COALESCE(w.AUTO_SUSPEND, 0) AS AUTO_SUSPEND", "GREATEST(COALESCE(c.THRESHOLD_NUM, 1), 1)",
-                   "/14 rule blocks ok (daily)", "AS DAILY_BURN")
+                   "/14 rule blocks ok (daily)", "AS DAILY_BURN", "AS RERAISED")
 _PART_B_ABSENT = ("GB_24H", "AND w.AUTO_SUSPEND IS NOT NULL", "PARTITION BY DATABASE_NAME", "alert scan daily v5 (V163:")
 
 

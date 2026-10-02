@@ -28,6 +28,10 @@ byte-identical to V162 and the V168 test normalizes it back:
   S91  R2-034   the V091 auto-clear sweep drops V096's >= -48h RAISED_AT bound (a multi-day or hysteresis-held PERF
                 condition stranded its older day-keyed events OPEN for good); its two stale comment lines are fixed
   S117 R2-036 D4   the V117 carry-forward comment names [18]'s first-seen day
+  A22  holistic #4/#9   arm [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' /
+                'StorageTruth' row -- V166's SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back, log and re-raise),
+                and the DETAIL says that run FAILED; every other loader's row keeps 'returned normally, so its task
+                still reads SUCCEEDED'. Byte-identical to V169's daily twin (the V157 shared-arm design).
   R    the RETURN label names V168 (the tally stays 14: no arm is added)
 
 The two NAME refreshes (PIPE_COPY_FAILURES, SEC_NEW_ADMIN_NETWORK) touch a row only while NAME still equals its seed
@@ -216,8 +220,39 @@ S117_NEW = ("    -- GENUINE future re-raises, leaving a pre-existing untriaged O
             "    -- only keys (grant time) never end in a bare date so they are never stripped -- untouched. The\n"
             "    -- [18] first-seen day (V168) strips to user|IP or user|IP|FAILED; a re-raise needs 90 quiet days.\n")
 
+# ---- A22 (holistic #4/#9; identical constants in outputs/gen_v169.py -- the twin arm) --------------
+# V166 made SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back, log fact_load_failed (PAGE 'AppCost' /
+# 'StorageTruth') and RE-RAISE, so their task reads FAILED; every earlier ERR-leg source logs and returns normally.
+A22_START, A22_END = "    -- [22] OPS_PIPELINE_DEGRADED", "    END IF;   -- /V157 cadence gate: [22]"
+A22_RERAISE_PAGES = ("AppCost", "StorageTruth")
+A22_HEAD_OLD = (
+    "    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged and swallowed\n"
+    "    --      (its task still reads SUCCEEDED) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one\n")
+A22_HEAD_NEW = (
+    "    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged -- most\n"
+    "    --      loaders swallow it (their task still reads SUCCEEDED); V166's SP_LOAD_APP_COST and\n"
+    "    --      SP_LOAD_STORAGE_TRUTH roll back to the previous fill and re-raise (their task reads FAILED), and\n"
+    "    --      the DETAIL says which (RERAISED, V168 + V169) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS"
+    " -- one\n")
+A22_ERRS_OLD = "                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG\n"
+A22_ERRS_NEW = (
+    "                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG,\n"
+    "                   MAX(IFF(PAGE IN ("
+    + ", ".join(f"'{p}'" for p in A22_RERAISE_PAGES)
+    + "), 1, 0)) AS RERAISED   -- the V166 loads that roll back and re-raise\n")
+A22_DETAIL_OLD = (
+    "               LEFT('The loader logged this and returned normally, so its task still reads SUCCEEDED and readers '\n"
+    "                   || 'keep the previous fill. Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '\n")
+A22_DETAIL_NEW = (
+    "               LEFT(IFF(x.RERAISED = 1,\n"
+    "                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '\n"
+    "                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',\n"
+    "                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '\n"
+    "                        || 'readers keep the previous fill.')\n"
+    "                   || ' Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '\n")
+
 # ---- R ------------------------------------------------------------------------------------------------
-RET_162 = "'alert scan v13 (V162: + SEC_LOGIN_TAKEOVER + SEC_ADMIN_GRANT hourly; V157 gates unchanged): '"
+RET_162 ="'alert scan v13 (V162: + SEC_LOGIN_TAKEOVER + SEC_ADMIN_GRANT hourly; V157 gates unchanged): '"
 RET_168 = ("'alert scan v14 (V168: [14] failure-day key, [18] outcome + first-seen-day key, auto-clear any raise "
            "day; V162 arms and V157 gates unchanged): '")
 
@@ -226,6 +261,7 @@ assert hourly.count("fails := fails + 1") == 14
 assert hourly.count(":credit_price") == 2 and hourly.count(":budget_usd") == 1 and hourly.count(":ai_credit_price") == 1
 assert hourly.count("GROUP BY 1, 2, 3\n") == 2 and hourly.count(A18_DEDUPE_OLD) == 9
 assert hourly.count("LAST_LOAD_TIME") == 1 and hourly.count("review in Security -> Access") == 2
+assert hourly.count("still reads SUCCEEDED") == 3 and "RERAISED" not in hourly
 
 hourly = _swap(hourly, P1_DECL_BUDGET, "    credit_price FLOAT;\n", "P1a")
 hourly = _swap(hourly, P1_DECL_AI, "    credit_price FLOAT;\n", "P1b")
@@ -246,6 +282,9 @@ hourly = _swap(hourly, S91_HEAD_OLD, S91_HEAD_NEW, "S91a")
 hourly = _swap(hourly, S91_TODAY_OLD, S91_TODAY_NEW, "S91b")
 hourly = _swap(hourly, S91_BOUND, "", "S91c")
 hourly = _swap(hourly, S117_OLD, S117_NEW, "S117")
+hourly = _swap_in(hourly, A22_START, A22_END, A22_HEAD_OLD, A22_HEAD_NEW, "A22a")
+hourly = _swap_in(hourly, A22_START, A22_END, A22_ERRS_OLD, A22_ERRS_NEW, "A22b")
+hourly = _swap_in(hourly, A22_START, A22_END, A22_DETAIL_OLD, A22_DETAIL_NEW, "A22c")
 hourly = _swap(hourly, RET_162, RET_168, "R")
 
 # ---- post-asserts on the derived body ---------------------------------------------------------------
@@ -258,6 +297,9 @@ assert hourly.count(":credit_price") == 2 and hourly.count("INTO :credit_price\n
 assert "ev.RAISED_AT >=" not in hourly                                               # no age bound in the sweep
 assert hourly.count("ev.RAISED_AT <= DATEADD('hour', -1, CURRENT_TIMESTAMP())") == 3  # V091 + the two V157 clears
 assert hourly.count("review in Security -> Access") == 1                             # [26] keeps its pointer
+_a22 = hourly[hourly.index(A22_START):hourly.index(A22_END)]
+assert _a22.count("AS RERAISED") == 1 and _a22.count("x.RERAISED = 1") == 1 and "RERAISED" not in hourly.replace(_a22, "")
+assert _a22.count("the run FAILED") == 1 and _a22.count("returned normally, so its task still reads SUCCEEDED") == 1
 assert hourly.count("SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY") == 1
 _a18 = hourly[hourly.index(A18_START):hourly.index(A18_END)]
 assert _a18.count("ROLE IN (") == 1 and "ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')" in _a18
@@ -301,7 +343,9 @@ HEADER = f"""-- {NAME}
 -- user|IP with no date, so a network quiet for 90+ days -- which the rule name, playbook and Security panel promise
 -- to re-flag -- never alerted again. (R2-039) the same arm counted failed attempts as logins and always said
 -- 'logged in', and a failures-only event blocked the success that followed it. (R2-091) SEC_NEW_EXPOSURE pointed
--- at Security -> Access, where no PUBLIC-grant panel exists. (R2-040) two dead prologue reads.
+-- at Security -> Access, where no PUBLIC-grant panel exists. (R2-040) two dead prologue reads. (Holistic #4/#9)
+-- the OPS_PIPELINE_DEGRADED ERR DETAIL told every logged loader failure 'its task still reads SUCCEEDED', but V166's
+-- SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back and re-raise, so TASK_HISTORY shows those runs FAILED.
 --
 --   ~ SP_ALERT_SCAN re-derived from V162 (its current definer), byte-identical except:
 --     ~ arm [14] PIPE_COPY_FAILURES: keyed by the Central FAILURE day over whole Central days (yesterday + today,
@@ -321,6 +365,10 @@ HEADER = f"""-- {NAME}
 --       the three -24h windows are unchanged).
 --     - the dead budget_usd / ai_credit_price prologue reads (arm [17] keeps :credit_price; the daily scan keeps
 --       its own copies).
+--     ~ arm [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' / 'StorageTruth' row, the
+--       V166 loaders that roll back, log and re-raise); the DETAIL says that run FAILED (TASK_HISTORY shows it),
+--       and keeps 'returned normally, so its task still reads SUCCEEDED' for every other loader. Keys, sources,
+--       cadence gate and windows unchanged; byte-identical to V169's daily twin.
 --     ~ the RETURN label names V168; the 14-block tally is unchanged.
 --   ~ ALERT_CONFIG NAME of PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK, only while it still equals the seed text.
 --
@@ -359,7 +407,8 @@ $$;
 """
 
 MARKER = ("-- >>> derived:SP_ALERT_SCAN  (from V162; [14] failure-day key, [18] outcome + first-seen-day key + 48h "
-          "episode guard, [20] pointer, V067 FAILED supersede, V091 sweep any raise day, dead prologue reads, V168)\n")
+          "episode guard, [20] pointer, V067 FAILED supersede, V091 sweep any raise day, dead prologue reads, [22] ERR "
+          "re-raise wording, V168)\n")
 
 DESCRIPTION = (
     "Round-2 review, alerts cluster (R2-034, R2-035, R2-036, R2-039, R2-040, R2-091). SP_ALERT_SCAN re-derived from "
@@ -370,7 +419,9 @@ DESCRIPTION = (
     "again), with a 48h same-episode guard on the exact date-stripped base; arm [20] SEC_NEW_EXPOSURE DETAIL points "
     "at Security, Changes; the V067 sweep supersedes a failures-only SEC_NEW_ADMIN_NETWORK event once the success "
     "event opens; the V091 auto-clear sweep re-checks every OPEN PERF event whatever its raise day; the dead "
-    "budget and AI-price prologue reads are gone; RETURN names V168, tally 14 unchanged. ALERT_CONFIG NAME of "
+    "budget and AI-price prologue reads are gone; the OPS_PIPELINE_DEGRADED ERR detail says a run of the V166 "
+    "app-cost or storage-truth loader rolled back and FAILED instead of claiming its task still reads SUCCEEDED; "
+    "RETURN names V168, tally 14 unchanged. ALERT_CONFIG NAME of "
     "PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK refreshed only while it equals the seed text. No task change, no "
     "new object, no procedure run at apply time.")
 assert len(DESCRIPTION) <= 4000 and "'" not in DESCRIPTION
@@ -398,8 +449,8 @@ assert set(re.findall(r"UPDATE DBA_MAINT_DB\.OVERWATCH\.(\w+)", _top)) == {"ALER
 assert "V168 requires V167 first" in out and "SELECT 168 AS VERSION" in out
 for _new in (HEADER.replace("—", ""), MARKER, P1_READ_NEW, A14_COMMENT_NEW, A14_TITLE_NEW, A14_KEY_NEW,
              A14_COL_NEW, A14_WHERE_NEW, A14_GROUP_NEW, A18_HEAD_NEW.replace("—", ""), A18_SELECT_NEW,
-             A18_COUNT_NEW, A18_DEDUPE_NEW, A20_NEW, S67_NEW, S91_HEAD_NEW, S91_TODAY_NEW, S117_NEW, RET_168, NAMES,
-             VERSION_ROW):
+             A18_COUNT_NEW, A18_DEDUPE_NEW, A20_NEW, S67_NEW, S91_HEAD_NEW, S91_TODAY_NEW, S117_NEW, A22_HEAD_NEW,
+             A22_ERRS_NEW, A22_DETAIL_NEW, RET_168, NAMES, VERSION_ROW):
     assert _new.isascii(), _new[:60]                       # (V162's carried body keeps its own em dashes)
 for line in out.splitlines():
     assert not line.lstrip().upper().startswith("CALL ") or line.startswith("        "), line
@@ -529,7 +580,7 @@ ORDER BY e.RAISED_AT DESC;
 # ---------------------------------------------------------------------------------------------------
 PART_B_PRESENT = ("alert scan v14 (V168:", "AS FAIL_DAY", "GROUP BY 1, 2, 3, 4", "AS SUCCESSES", "(0 successful)",
                   "LEFT(nn.USER_NAME, 200)", "Changes (Recent grant changes)", "____-__-__", "/14 rule blocks ok",
-                  "SP_SCAN_ETL_CYCLE")
+                  "SP_SCAN_ETL_CYCLE", "AS RERAISED")
 PART_B_ABSENT = ("failed file load(s) (24h)", "ev.RAISED_AT >= DATEADD", "budget_usd", "alert scan v13 (V162:")
 _body162 = extract_proc(V162, "SP_ALERT_SCAN()")
 _body162 = _body162[_body162.index("$$") + 2:_body162.rindex("$$")]

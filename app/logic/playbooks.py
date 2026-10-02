@@ -218,10 +218,12 @@ PLAYBOOKS: dict[str, str] = {
         "a failure the next daily scan redoes the week."
     ),
     "OPS_PIPELINE_DEGRADED": (
-        "**Means:** part of OVERWATCH's own pipeline stopped while its tasks still read SUCCEEDED: a "
-        "telemetry source is past its load cadence (hourly sources 3h, `DAILY`/`METERING` sources "
-        "30h), a loader logged a failure and carried on, or the alert notifier has not acquired its "
-        "sender lease in 3h while a delivery route is enabled. `ALERT_SCAN_HOURLY` / "
+        "**Means:** part of OVERWATCH's own pipeline stopped, often while its tasks still read SUCCEEDED: "
+        "a telemetry source is past its load cadence (hourly sources 3h, `DAILY`/`METERING` sources "
+        "30h), a loader logged a failure (most loaders carry on and their task reads SUCCEEDED; "
+        "since V166 `SP_LOAD_APP_COST` and `SP_LOAD_STORAGE_TRUTH` roll back to their previous fill and "
+        "re-raise, so their task reads FAILED — the alert DETAIL says which), or the alert notifier has "
+        "not acquired its sender lease in 3h while a delivery route is enabled. `ALERT_SCAN_HOURLY` / "
         "`ALERT_SCAN_DAILY` are the alert scans' own heartbeats: that scan stopped, or its heartbeat "
         "stamp keeps failing (`scan_heartbeat_failed`). Checked every 3 hours by the hourly scan (02, 05, "
         "08, 11, 14, 17, 20 and 23 Central) and once each morning by the daily scan, so a finding can "
