@@ -634,15 +634,20 @@ def render_admin_grant_anomalies(company: str) -> None:
     )
     if not st.toggle("Load admin-grant timing check", key="sec_admin_grant_ctx_on"):
         return
+    # R2-101: 'hourly' (1h), like every other GRANTS_TO_USERS read (Recent grant changes, the admin
+    # holders batch). The 4h metadata tier kept a clean "no admin grants" verdict up to 4h after a grant
+    # reached GRANTS_TO_USERS, so this panel stayed green while SEC_ADMIN_GRANT ([27]) was already open.
+    # 'hourly' also lifts the statement timeout from 30s to 120s for the PRIOR_GRANTS subquery.
     result = run(
         security_sql.admin_grant_context(90, company),
         page=_PAGE,
         key=f"sec_admin_grant_ctx_{company}",
-        tier="metadata",
+        tier="hourly",
         source="admin-role grants + prior-tenure history (on demand)",
     )
     if result.ok and result.empty:
         empty_state("clean", "No admin-role grants landed in the last 90 days for this scope.")
+        result_caption(result)   # a clean verdict still names its read (and its age, in audit mode)
         return
     if not result.usable():
         _grant_read_failed(result, "The admin-grant timing check")

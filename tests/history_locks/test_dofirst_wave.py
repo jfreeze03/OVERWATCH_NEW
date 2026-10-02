@@ -445,7 +445,9 @@ def test_n1_forecast_excludes_partial_today_from_rate():
 
 def test_n1_forecast_source_comment_present():
     assert "N1:" in _src("app/logic/forecast.py")
-    assert 'frame["DAY"] < today' in _src("app/logic/forecast.py")
+    # R2-050: the complete days end at the first incomplete day -- today by default, never later
+    assert 'complete = frame[frame["DAY"] < cut]' in _src("app/logic/forecast.py")
+    assert "cut = today if complete_before is None else min(complete_before, today)" in _src("app/logic/forecast.py")
     contract = _src("app/ui/pages/cost_parts/contract.py")
     assert contract.count("< account_today()") >= 1  # burn tail + planner both fixed
     assert 'cydf["DAY"] < today' in contract

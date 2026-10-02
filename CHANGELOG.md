@@ -1,5 +1,45 @@
 # Changelog
 
+## 4.608.0 - Bug-hunt round 2: 63 app-side bug fixes, a replayable rebuild and a safe CI smoke (2026-10-01)
+
+App-only, no migration. Round 2 of the hunt aimed 20 finders at round 1's blind spots (older loaders and alert arms, the
+migration replay, the account clock, zero-day windows, the Streamlit floor, canary coverage, failed reads, the alert-rule
+matrix, cache-gated writes, settings parity) and confirmed 119 findings. This release fixes 63 of the 68 app-side bugs among
+them (R2-057 shipped in 4.606.0; R2-056, R2-073, R2-077 and R2-096 were already fixed there and are now locked) and 25 side
+findings the earlier fixers logged, each re-verified against v4.607.0 first, in seven clusters, each reviewed
+adversarially and fixed again. The 35 server-side findings are queued for one later migration.
+
+- **Account clock and windows.**
+  - Overview's platform score measures queueing and remote spill per day over the real time its own read covered (account clock, DST change days included), so a steady workload no longer picks up a deduction every evening that disappears at midnight, or one in the hour after midnight from a window cached just before it. Control Room's Pulse shares that read's hourly cache entry.
+  - Before the 06:45 Central load, yesterday's partial metering row no longer counts as a whole day in the MTD pace, the budget-pace card, the budget burndown under it and the projected month-end (whose basis now names the newest loaded day).
+  - Fetch times, error references and Admin error/telemetry timestamps show account (Central) time.
+  - Entity 360's metric cards follow the selected Window (on the 1st, Current month shows today; Last month shows the calendar month), and Security ▸ Egress compares the right periods on the 1st.
+  - The live DDL fallback reads the same rolling span as the change fact (the last N x 24 hours, not N days plus today since midnight), and the legacy login-fact gate counts complete days only, as the security login-fact gate does.
+- **Failed reads never look clean.**
+  - The task failure timeline no longer trusts a zero from the once-a-day task mart (it could hide a failure for up to a day): it runs its live 7-day scan unless a live TASK_HISTORY count already showed no failures. Overview's top cost drivers, monthly spend and runway; the Brief's ledger, spend trend, AI digest and contract tile; Proof's open actions; Entity 360's metrics, evidence and catalog; the posture trend; watched warehouses (no longer "steady" after a failed read); the alert drawer's history; and the prior-month storage tile all say the read failed instead of showing nothing, a zero or an all-clear.
+  - A read that times out or fails for a reason other than a missing object, grant, function or column no longer shows a "not installed / apply migration / grant" hint, and a successful empty read never shows one.
+  - Security's governance score names the data it used, the service-account lookup says when it failed, and when their totals read fails, unload tiles show as lower bounds ('≥') if the 300-row feed is full (below the cap the fallback sums are exact).
+- **Alerts and Investigate.**
+  - Investigate opens the page that holds the evidence for data-quality, warehouse-change, contract, org-spend, task-failure and PUBLIC-grant alerts, and never sets a database filter from a dotted user or metric name, or from appended AI text.
+  - Warehouses not named WH_* keep the re-check, closed-loop fix, AI evidence and Investigate filter. Explain with AI covers warehouse spikes from the anomaly sweep and is withheld for rules with no matching evidence pack.
+  - Suggested thresholds are not offered for rules that never read their threshold, or from metric values in the wrong units; data-quality breach suggestions use the z-score's magnitude.
+  - Control Room triage keeps anomaly-sweep spikes on service series. Rule precision counts empty resolution kinds as UNTAGGED. The ETL SLA settings parse exactly as the nightly push scan parses them.
+- **Fresher reads before writes and verdicts.**
+  - The storage retention control, the native-delivery integration check, the admin-grant timing check, the share inventory and the timeout posture note read live or recent data instead of a 4-hour cache (or say how old it is). Emergency levers accept a typed warehouse name, and a later pick clears it.
+- **Cost and history honesty.**
+  - The cloud-services statement mart and the object cost ledger are not backfilled: panels and Ask say how many of the window's days they actually hold, and compare like with like, instead of passing a few months off as a year.
+- **Security.**
+  - Change risk can reach COMPLETE again (it expected an 'OK' stamp the extract never writes); "Who changed what" serves the change fact only when every complete day of the window holds fact rows, otherwise it keeps the live QUERY_HISTORY read (an extract outage longer than 72 hours leaves a hole the freshness stamps cannot see); Trust Center counts only scanners that worsened; the admin-grant check refreshes hourly and the share inventory every 5 minutes.
+- **Admin.**
+  - CORTEX_MODEL saves in the form every reader runs (a blank no longer turns off the scheduled AI); retention editors start at the purge's minimums; CREDIT_PRICE_OVERRIDE is editable and validated; the rate can no longer be saved as 0; fleet slow fetches drop batch wall-clock rows.
+  - Action Center "Assigned to me" filters before the 500-item cap, so other owners' items no longer push your own work off the list, and its counts cover all of your work.
+- **Canary coverage.**
+  - 34 more readers are canaried (35 canary statements; Overview's score read gained a second shape): every ACCESS_HISTORY column the app reads, six of the seven ORGANIZATION_USAGE readers (GAP without the org-viewer grant; Marketplace paid usage keeps its documented exemption), the Operations operator boards and chatter readers, query insights (optional, GAP when absent), the AI-usage fact's V042 columns, alert resolution notes and several marts. New locks fail any new cost or mart builder, or any ACCESS_HISTORY reader, that has no canary or stated reason, and check every "covered by a twin" exemption against the columns the canaries actually compile. RUNBOOK lists the probe readers still without a canary.
+- **Rebuild and CI.**
+  - Run All of the rebuild bundle no longer stops at V006: its generated header re-creates the two retired roles V006-V008 grant to, and the roles step drops them again.
+  - The full-rebuild runbook restores WH_ALFA_ADMIN's statement timeout after the replay (V002 resets it to 300 s) and records its resource monitor, which the replay detaches, for the owner to re-attach. It restores routes, rule flags and thresholds, settings, department rows and the savings ledger from the pre-teardown clones, closes the events the replay raised for rules that are off again, re-creates delivery afterwards, and drops the retired roles before roles.sql runs. Bundle locks now catch hand edits to the generated headers and see one-time DML inside EXECUTE IMMEDIATE blocks.
+  - The optional CI Snowflake smoke can no longer change production. It skips warehouse, resource-monitor, retired-role and EXECUTE TASK statements, keeps cloned tasks suspended, refuses an admin-inheriting role, and turns off delivery and the escalation email in the clone. Its rewrite admits only the top-level statement kinds the migration chain uses, matches the production database name in any case, and refuses grants, account, user, database and integration DDL, unlisted SYSTEM$ functions, writes or CALLs naming another database, and notifier or digest CALLs at any depth (procedure bodies, dynamic SQL and comment-split tokens included). It also refuses what the snow CLI would expand or split differently before Snowflake sees it (client templating, ! commands, comment-joined names, `//` comments outside a body, unusual string escapes) and procedure bodies in languages other than SQL. The CI role's privileges remain the backstop for SQL assembled at run time.
+
 ## 4.607.0 - Cleanup: dead code, files and tests removed; operator docs brought up to date (2026-10-01)
 
 App-only, no migration. The non-bug half of the round-1 hunt (163 dead-code, file, test and doc findings) plus round 2's

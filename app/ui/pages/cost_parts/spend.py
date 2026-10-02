@@ -250,6 +250,21 @@ _CS_BILLED_WHY = (
     "wait each statement asks for.")
 
 
+def _cs_mart_coverage_note(df, span: int, covers: str) -> str:
+    """R2-012: '' when MART_CLOUD_SVC_DAILY holds every day of the window, else one sentence naming how many it
+    holds (the reader's COVERED_DAYS: distinct days in the window, account-wide). The statement mart is loaded
+    hourly and never backfilled, so a window that starts before its first load sums fewer days than its label.
+    ``covers`` names what the shortfall limits."""
+    if df is None or getattr(df, "empty", True) or "COVERED_DAYS" not in df.columns:
+        return ""
+    cov = pd.to_numeric(df["COVERED_DAYS"].iloc[0], errors="coerce")
+    span = max(1, int(span))
+    if pd.isna(cov) or int(cov) >= span:
+        return ""
+    return (f"The statement mart holds {int(cov)} of this window's {span} days (it is loaded hourly and never "
+            f"backfilled), so {covers} cover those days only.")
+
+
 def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str, *,
                               bounds: tuple | None = None, prefetched=None) -> None:
     """v4.595: statement families ranked by the cloud-services credits they BILL, with sleep polling
@@ -309,6 +324,13 @@ def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str,
                  "two are recorded separately and need not match exactly."},
     ])
     st.caption(md_dollars(_CS_BILLED_WHY))
+    # R2-012: the metered side starts at the statement mart's first day (SQL), so on a window older than the
+    # mart the 'N% of metered' sub-line compares the same days; say how many days that is.
+    _cov_note = _cs_mart_coverage_note(
+        res.df, (bounds[1] - bounds[0]).days if bounds is not None else days,
+        "the ranking, the sleep-polling total and the metered comparison")
+    if _cov_note:
+        st.caption(_cov_note)
     styled_table(view, height=380, slug="cs-billed-families", sort_label="CS credits desc",
                  column_config={
                      "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),
@@ -960,7 +982,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                     mart_source="MART_CLOUD_SVC_DAILY (CS credits by QUERY_TYPE, loaded hourly)",
                     live_source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, live fallback)")
             if guard(cs_types, "No cloud-services credits recorded on queries in this window."):
-                styled_table(cs_types.df, height=220)
+                styled_table(cs_types.df.drop(columns=["COVERED_DAYS"], errors="ignore"), height=220)
                 result_caption(cs_types)
                 # K1: the TRAILING live builder clamps to MAX_LIVE_WINDOW_DAYS, so on a long
                 # page window the fallback answers a SHORTER window than the header implies.
@@ -969,12 +991,19 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 # reads pass bounds (stamped with the span) and the caption compares against
                 # the span -- `days` is only the day OFFSET there (272 for Current year on
                 # Sep 30, a 273-day range), and clamp_days(offset) falsely read "90d of 272d".
+                # R2-012: the MART leg can be short too -- MART_CLOUD_SVC_DAILY is never backfilled, so
+                # its COVERED_DAYS (which served_days takes) can be under the span; name that reason,
+                # never the live clamp, when the mart answered.
                 _cs_span = (bounds[1] - bounds[0]).days if bounds is not None else days
                 _cs_days = served_days(cs_types, _cs_span)
+                _cs_live = bool(getattr(cs_types.df, "attrs", {}).get("_ow_served_live"))
                 st.caption("Metadata storms show up here — SHOW/DESCRIBE floods bill "
                            "cloud services without ever touching a warehouse."
-                           + (f" Scanned {_cs_days}d of the {_cs_span}d window (the live "
-                              "fallback caps its scan)." if _cs_days != _cs_span else ""))
+                           + ("" if _cs_days == _cs_span else
+                              f" Scanned {_cs_days}d of the {_cs_span}d window (the live "
+                              "fallback caps its scan)." if _cs_live else
+                              f" The statement mart holds {_cs_days} of this window's {_cs_span} days (it is "
+                              "loaded hourly and never backfilled), so these totals cover those days only."))
 
     # V055: shape/user drill-down from MART_CLOUD_SVC_DAILY — for ANY warehouse
     # (not only ELEVATED), no live QUERY_HISTORY scan. Names the exact query
@@ -993,8 +1022,10 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                                  "not only ELEVATED. '(all warehouses)' includes the no-warehouse "
                                  "metadata bucket (WAREHOUSE_NAME resolves to NONE).")
         wh_arg = "" if pick == _ALL else pick
-        shapes = run(mart_sql.cloud_svc_top_shapes(days, company, wh_arg, bounds=bounds), page=_PAGE,
-                     key=f"cs_shapes_{company}_{days}_{pick}", tier="hourly",
+        # R2-012: coverage=True adds COVERED_DAYS (the days the never-backfilled statement mart holds in
+        # the window), so a window older than the mart says how many days these rankings sum.
+        shapes = run(mart_sql.cloud_svc_top_shapes(days, company, wh_arg, bounds=bounds, coverage=True),
+                     page=_PAGE, key=f"cs_shapes_{company}_{days}_{pick}", tier="hourly",
                      source="MART_CLOUD_SVC_DAILY (per-query CS credits, loaded hourly)")
         if guard(shapes, "No cloud-services credits recorded for this warehouse yet "
                          "(the mart loads hourly; needs V055 deployed)."):
@@ -1002,17 +1033,23 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                        "shown above). High RUNS + tiny AVG_EXEC_S + high AVG_CACHE_PCT = a polling / "
                        "metadata storm; a heavy CS_CREDITS_PER_1K on a SELECT = a compile-heavy plan. "
                        "That triage is the fix.")
-            styled_table(shapes.df, height=300, column_config={
+            _drill_cov = _cs_mart_coverage_note(
+                shapes.df, (bounds[1] - bounds[0]).days if bounds is not None else days,
+                "the shape and user rankings")
+            if _drill_cov:
+                st.caption(_drill_cov)
+            styled_table(shapes.df.drop(columns=["COVERED_DAYS"], errors="ignore"), height=300, column_config={
                 "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),
                 "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%d%%")})
             result_caption(shapes)
-            users = run(mart_sql.cloud_svc_by_user(days, company, wh_arg, bounds=bounds), page=_PAGE,
-                        key=f"cs_users_{company}_{days}_{pick}", tier="hourly",
+            users = run(mart_sql.cloud_svc_by_user(days, company, wh_arg, bounds=bounds, coverage=True),
+                        page=_PAGE, key=f"cs_users_{company}_{days}_{pick}", tier="hourly",
                         source="MART_CLOUD_SVC_DAILY (CS credits by user/role)")
             if guard(users, "No per-user cloud-services credits for this warehouse yet."):
                 st.markdown("**Who's driving it** (user / role / tool)")
-                styled_table(with_user_names(users.df, _PAGE), height=220, column_config={
-                    "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f")})
+                styled_table(with_user_names(users.df.drop(columns=["COVERED_DAYS"], errors="ignore"), _PAGE),
+                             height=220, column_config={
+                                 "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f")})
                 result_caption(users)
 
 def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "",
@@ -1379,9 +1416,15 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             # day into the warehouses that drove it, with a one-line narrative and a
             # contribution waterfall (the deltas sum to the day's total move).
             _top = hits[0]
+            _waterfall = False
             if _top.get("day"):
                 exp = explain_by_warehouse(flagged, _top["day"])
+                if not exp.ok or not exp.drivers:
+                    # lead (c06): a refused explanation (too little history before the flagged day, R1-070)
+                    # or an in-line day left no waterfall, yet the how-to below said to open it. Say why.
+                    st.caption(md_dollars(f"No root-cause waterfall for {_top['day']}: {exp.narrative}"))
                 if exp.ok and exp.drivers:
+                    _waterfall = True
                     with st.expander(f"Why did {exp.flagged_day} move? — root-cause waterfall",
                                      expanded=False):
                         # md_dollars: the narrative carries several $ amounts; unescaped,
@@ -1402,10 +1445,11 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                         # every rerun, even collapsed).
                         _below_warehouse_drill(company, exp, str(_top["label"]), rate)
             st.caption(
-                "How to investigate a flag: open the waterfall above, break the warehouse down by "
-                "user, database and setting changes, then jump to **Operations ▸ Queries** for that "
-                "warehouse; the **Wasted spend** board on Operations shows what failed, killed or "
-                "aborted queries cost."
+                "How to investigate a flag: "
+                + ("open the waterfall above, break the warehouse down by user, database and setting changes, "
+                   "then jump" if _waterfall else "jump")
+                + " to **Operations ▸ Queries** for that warehouse; the **Wasted spend** board on Operations "
+                "shows what failed, killed or aborted queries cost."
             )
         else:
             empty_state("clean", "No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
@@ -1515,12 +1559,11 @@ def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> N
          "sql": change_impact_sql.warehouse_change_registry(_ANOM_CHANGE_LOOKBACK_DAYS, company, wh),
          "source": "WAREHOUSE_CHANGE_REGISTRY (daily 06:40 CT scan)"},
     ], page=_PAGE, tier="hourly")
-    xd, chg = _b.get("xdim"), _b.get("whchg")
+    # run_batch returns EVERY key (its contract), so neither result is ever None (the old None branches were dead).
+    xd, chg = _b["xdim"], _b["whchg"]
 
-    if xd is None:
-        empty_state("no_data_yet", "Allocation detail could not be read for this warehouse.")
-    elif guard(xd, f"Allocation detail isn't loaded for {wh} in this window yet "
-                   "(FACT_COST_ALLOC_XDIM_DAILY loads once a day)."):
+    if guard(xd, f"Allocation detail isn't loaded for {wh} in this window yet "
+                 "(FACT_COST_ALLOC_XDIM_DAILY loads once a day)."):
         if xd.truncated:
             # Bounded by construction (top-N x days, see alloc_xdim_day_drivers), so this should
             # never fire — but a capped frame would under-state every average, so never explain it.
@@ -1573,9 +1616,7 @@ def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> N
         result_caption(xd)
 
     st.markdown("**Setting changes near that day**")
-    if chg is None:   # defensive: run_batch returns every key
-        st.caption("Warehouse change tracking isn't readable here right now.")
-    elif not chg.ok and is_setup_absence(chg.error_kind):
+    if not chg.ok and is_setup_absence(chg.error_kind):
         empty_state("needs_setup", "Warehouse setting changes (WAREHOUSE_CHANGE_REGISTRY) aren't readable by "
                                    "this app here.")
     elif not chg.ok:
@@ -1877,7 +1918,10 @@ def _storage_tab(company: str, days: int, settings: dict, *, bounds: tuple | Non
             pri = run(cost_sql.storage_by_database_calendar_live(company, _db, prior=True), page=_PAGE,
                       key=f"storage_prior_live_{company}", tier="historical",
                       source="DATABASE_STORAGE_USAGE_HISTORY (prior full month daily-average, live)")
-        prior_tib = 0.0
+        # R2-076: None until the prior month is actually READ. A failed read (both the fact and the live
+        # fallback) used to keep a 0.0 initializer and render 'Prior full month = 0.00 TiB · no prior data':
+        # a fabricated zero and a no-data claim for a read that failed (house law 8).
+        prior_tib: float | None = None
         if pri.ok and not pri.empty:
             pdf = pri.df
             avg_bytes = pdf["DB_BYTES"].map(safe_float) + pdf["FAILSAFE_BYTES"].map(safe_float)
@@ -1899,7 +1943,14 @@ def _storage_tab(company: str, days: int, settings: dict, *, bounds: tuple | Non
                 loaded_days = (pri_watermark - first_prior).days + 1
                 if loaded_days > 0:
                     prior_tib *= period_days_prior / loaded_days
-        mom = ((mtd_tib - prior_tib) / prior_tib * 100.0) if prior_tib > 0 else None
+        mom = ((mtd_tib - prior_tib) / prior_tib * 100.0) if prior_tib is not None and prior_tib > 0 else None
+        if prior_tib is not None:
+            _prior_val = f"{prior_tib:,.2f} TiB"
+            _prior_delta = f"{mom:+.1f}% MoM" if mom is not None else "no prior data"
+        elif pri.ok:
+            _prior_val, _prior_delta = "—", "no prior data"           # read fine, no prior-month rows
+        else:
+            _prior_val, _prior_delta = "—", "prior month unavailable"  # the read failed: not a zero
         kpi_row([
             {"label": "Storage MTD (daily avg)", "value": f"{mtd_tib:,.2f} TiB",
              "delta": f"~{format_usd(mtd_tib * rate_tb)}/mo",
@@ -1914,10 +1965,12 @@ def _storage_tab(company: str, days: int, settings: dict, *, bounds: tuple | Non
                      "they are on the account-by-tier panel above, not here — a hybrid-heavy "
                      "database reads low in this view. rec #33: an estimate at the configured "
                      "$/TiB; the org rate-card panel on Contract & Forecast is billing truth."},
-            {"label": "Prior full month", "value": f"{prior_tib:,.2f} TiB",
-             "delta": (f"{mom:+.1f}% MoM" if mom is not None else "no prior data"),
+            {"label": "Prior full month", "value": _prior_val, "delta": _prior_delta,
              "delta_color": "off"},
         ])
+        if not pri.ok:
+            empty_state("unavailable", "The prior full month's storage could not be read, so there is no "
+                        "month-over-month comparison.", detail=pri.error)
         charts.bar_usd(df.sort_values("USD_MONTH", ascending=False),
                        "DATABASE_NAME", "USD_MONTH", title="$/month by database (MTD est.)")
         result_caption(res)

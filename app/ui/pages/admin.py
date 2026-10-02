@@ -19,7 +19,7 @@ from app.config import (
     THRESHOLDS,
     core_object,
 )
-from app.core.ai import CORTEX_TIMEOUT_SECONDS
+from app.core.ai import CORTEX_TIMEOUT_SECONDS, normalize_model
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run, run_batch
@@ -831,23 +831,57 @@ def _schema_ahead_banner() -> None:
 # Only the INPUT widget changes; the widget value is converted back to its stored
 # STRING form (dates -> ISO, numbers -> str) before the unchanged upsert SQL runs.
 _NUM = "number"
+
+# R2-106: SP_PURGE_FACTS (current definer V061) raises each retention setting to this floor with GREATEST(v, N), so
+# the editor never offers a value the monthly purge silently overrides (locked against V061's body).
+_PURGE_FLOORS: dict[str, int] = {
+    "FACT_RETENTION_DAYS_HOURLY": 90,
+    "FACT_RETENTION_DAYS_DAILY": 365,
+    "ERROR_LOG_RETENTION_DAYS": 30,
+    "APP_USAGE_RETENTION_DAYS": 90,
+}
+
+# R2-107: SETTINGS keys only the deploy gate reads (snowflake/validate.sql), never the app, so they are not in
+# DEFAULT_SETTINGS (no migration seeds them). Admin still edits them and never calls their row "no longer read
+# (safe to delete)": deleting CREDIT_PRICE_OVERRIDE='TRUE' brings back validate's -20013 for a contracted
+# non-3.68 rate. Default = the value validate assumes when the row is absent.
+_DEPLOY_GATE_SETTINGS: dict[str, str] = {
+    "CREDIT_PRICE_OVERRIDE": "FALSE",
+}
+_VALIDATE_RATE = 3.68                       # validate.sql's e_rate_368 check: ABS(rate - 3.68) > 0.0001
+_OVERRIDE_TRUE = ("TRUE", "Y", "YES", "1")  # validate.sql: UPPER(COALESCE(VALUE, '')) IN (...)
+
+
+def _override_on(value: object) -> bool:
+    """validate.sql's override test exactly: UPPER(COALESCE(VALUE, '')) IN _OVERRIDE_TRUE -- any case, no trim."""
+    return str(value or "").upper() in _OVERRIDE_TRUE
+
+
 _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FORECAST_ENGINE": ("enum", ["linear", "seasonal", "ml_forecast"]),
     "INCIDENT_AUTO_DECLARE_CRITICAL": ("enum", ["TRUE", "FALSE"]),
     "CONTRACT_START_DATE": ("date", None),
     "CONTRACT_END_DATE": ("date", None),
-    # Rates / prices ($ per unit).
-    "CREDIT_PRICE_USD": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    # R2-105: SP_DAILY_DIGEST (V165) and SP_ANOMALY_SWEEP (V150) read CORTEX_MODEL raw (defaulting only on NULL)
+    # while the app runs normalize_model(value): the editor writes the normalized name, the one both sides run.
+    "CORTEX_MODEL": ("model", None),
+    "CREDIT_PRICE_OVERRIDE": ("enum", ["FALSE", "TRUE"]),
+    # Rates / prices ($ per unit). R2-107: CREDIT_PRICE_USD > 0 -- validate.sql RAISEs e_rate_pos on 0.
+    "CREDIT_PRICE_USD": (_NUM, {"min_value": 0.01, "step": 0.01}),
     "AI_CREDIT_PRICE_USD": (_NUM, {"min_value": 0.0, "step": 0.01}),
     "STORAGE_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
     "STORAGE_STAGE_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
     "STORAGE_HYBRID_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
     "STORAGE_ARCHIVE_COOL_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
     "STORAGE_ARCHIVE_COLD_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    # R2-110: was the one $ rate on the free-text input ('-20' priced a negative egress estimate).
+    "DATA_TRANSFER_USD_PER_TB": (_NUM, {"min_value": 0.0, "step": 0.01}),
     # Budgets / contract credits (dollars / credits).
     "MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
     "AI_MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
-    "COCO_DAILY_CAP_CREDITS": (_NUM, {"min_value": 0.0, "step": 1.0}),
+    "COCO_DAILY_CAP_CREDITS": (_NUM, {"min_value": 0.0, "step": 1.0,
+                                      "help": "0 = not set: the quota panel and the COST_AI_USER_RUNAWAY rule "
+                                              "(V163) both use the default 15 credits."}),
     # V163 COST_AI_USER_RUNAWAY: the robust-z bar (the cap multiple is the rule's THRESHOLD_NUM) and the
     # AI Functions switch.
     "AI_RUNAWAY_ROBUST_Z": (_NUM, {"min_value": 1.0, "step": 0.5}),
@@ -869,11 +903,11 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "GOV_PTS_EXPIRING_CRED": (_NUM, {"min_value": 0.0, "step": 0.5}),
     "GOV_PTS_BREAKGLASS_GRANT": (_NUM, {"min_value": 0.0, "step": 0.5}),
     "GOV_PTS_NO_AUTOSUSPEND": (_NUM, {"min_value": 0.0, "step": 0.5}),
-    # Fact/log retention (whole days; STRING-typed in DEFAULT_SETTINGS).
-    "FACT_RETENTION_DAYS_HOURLY": (_NUM, {"min_value": 1.0, "step": 1.0}),
-    "FACT_RETENTION_DAYS_DAILY": (_NUM, {"min_value": 1.0, "step": 1.0}),
-    "ERROR_LOG_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
-    "APP_USAGE_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
+    # Fact/log retention (whole days; STRING-typed in DEFAULT_SETTINGS), floored at SP_PURGE_FACTS's minimum.
+    **{k: (_NUM, {"min_value": float(floor), "step": 1.0,
+                  "help": f"SP_PURGE_FACTS keeps at least {floor} days whatever is saved; a change applies at "
+                          "the next monthly purge (TASK_PURGE_FACTS, the 1st of the month)."})
+       for k, floor in _PURGE_FLOORS.items()},
     # V164 escalation: whole minutes, 0 = off. ESCALATE_EMAIL_INTEGRATION keeps the generic text input (an
     # integration NAME; blank = no email leg).
     "ESCALATE_AFTER_MIN": (_NUM, {"min_value": 0.0, "step": 15.0}),
@@ -893,6 +927,8 @@ def _setting_value_input(key: str, current: dict[str, str]) -> str:
     cur = current.get(key, "")
     if cur in ("", None) and key in DEFAULT_SETTINGS:
         cur = str(DEFAULT_SETTINGS[key])
+    elif cur in ("", None) and key in _DEPLOY_GATE_SETTINGS:
+        cur = _DEPLOY_GATE_SETTINGS[key]
     editor = _SETTING_EDITORS.get(key)
     wkey = f"adm_setting_value::{key}"  # per-key so switching widget type never collides
     if editor is None:
@@ -900,8 +936,26 @@ def _setting_value_input(key: str, current: dict[str, str]) -> str:
             "New value", key=wkey,
             help="Numeric settings take numbers; dates are YYYY-MM-DD; blank clears.")
     kind, spec = editor
+    if kind == "model":
+        raw = st.text_input(
+            "New value", value=cur, key=wkey,
+            help="A Cortex COMPLETE model name, e.g. llama3.1-8b or llama3.1-70b. Saved trimmed and lower-case, "
+                 "the name the app's AI panels and the scheduled digest / anomaly-sweep AI all run; blank or "
+                 "an invalid name saves the default.")
+        model = normalize_model(raw)
+        if model != raw:
+            st.caption(f"Saves as {model}: " + (
+                "blank is the default model." if not str(raw or "").strip()
+                else f"'{raw}' is not a valid model name, so the default is saved (the model the app would run)."
+                if str(raw).strip().lower() != model
+                else "model names are stored trimmed and lower-case."))
+        return model
     if kind == "enum":
         options = list(spec)  # type: ignore[arg-type]
+        if key == "CREDIT_PRICE_OVERRIDE":
+            # review fix: validate also takes 'yes' / 'Y' / '1' / 'true', so a stored truthy value opens at TRUE --
+            # opening at FALSE warned of a -20013 that validate does not raise, and saving as shown broke it
+            cur = "TRUE" if _override_on(cur) else "FALSE"
         idx = options.index(cur) if cur in options else 0
         return st.selectbox("New value", options, index=idx, key=wkey)
     if kind == "date":
@@ -929,6 +983,19 @@ def _setting_value_input(key: str, current: dict[str, str]) -> str:
     return _num_to_str(st.number_input("New value", value=value, key=wkey, **spec))
 
 
+def _validate_rate_note(key: str, new_value: str, current: dict[str, str]) -> None:
+    """R2-107: a compute rate other than 3.68 needs CREDIT_PRICE_OVERRIDE = TRUE, or validate.sql RAISEs -20013.
+    Say so before the save, against the override as it stands (or as this edit would set it)."""
+    if key not in ("CREDIT_PRICE_USD", "CREDIT_PRICE_OVERRIDE"):
+        return
+    rate = safe_float(new_value if key == "CREDIT_PRICE_USD" else current.get("CREDIT_PRICE_USD"), _VALIDATE_RATE)
+    override = new_value if key == "CREDIT_PRICE_OVERRIDE" else current.get("CREDIT_PRICE_OVERRIDE", "")
+    if abs(rate - _VALIDATE_RATE) > 0.0001 and not _override_on(override):
+        st.warning(md_dollars(
+            f"A compute rate of ${rate:g} (not {_VALIDATE_RATE}) needs CREDIT_PRICE_OVERRIDE = TRUE: without it "
+            "snowflake/validate.sql fails with -20013. Set CREDIT_PRICE_OVERRIDE here as well."))
+
+
 def _settings_tab(is_operator: bool) -> None:
     settings = load_settings(_PAGE)
     # $-escape: the two literal rates would pair into a LaTeX math span
@@ -944,13 +1011,16 @@ def _settings_tab(is_operator: bool) -> None:
     # perf T1.11 retier was declined here to keep that guarantee — see test_codex_r24.
     res = run(mart_sql.settings(), page=_PAGE, key="settings_table", tier="live",
               source="SETTINGS")
-    if guard(res, "SETTINGS is empty.", setup_hint="Run migration V001 to create and seed it."):
+    # R2-072 follow-up: guard() renders setup_hint on a FAILED read only; the re-seed guidance an empty
+    # SETTINGS needs lives in the empty message.
+    if guard(res, "SETTINGS is empty — migration V001 seeds it.",
+             setup_hint="Run migration V001 to create and seed it."):
         styled_table(with_user_names(res.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"))
         result_caption(res)
         # r27 H2: keys the app no longer reads (retired features leave rows
         # behind — SCORE_PTS_TASK_FAIL_PER_PCT after V043, for instance).
         try:
-            _known = {k for k in DEFAULT_SETTINGS if not k.startswith("_")}
+            _known = {k for k in DEFAULT_SETTINGS if not k.startswith("_")} | set(_DEPLOY_GATE_SETTINGS)
             _orphans = sorted(set(res.df["KEY"].astype(str)) - _known)
             if _orphans:
                 st.warning("Settings rows the app no longer reads (safe to delete): "
@@ -968,9 +1038,10 @@ def _settings_tab(is_operator: bool) -> None:
                                strict=False))
         except (KeyError, TypeError):
             current = {}
-    editable = [k for k in DEFAULT_SETTINGS if not k.startswith("_")]
+    editable = [k for k in DEFAULT_SETTINGS if not k.startswith("_")] + list(_DEPLOY_GATE_SETTINGS)
     key = st.selectbox("Setting", editable, key="adm_setting_key")
     new_value = _setting_value_input(key, current)
+    _validate_rate_note(key, new_value, current)
     # UPSERT, not UPDATE: 17 of the DEFAULT_SETTINGS keys (SCORE_PTS_*/GOV_PTS_*/
     # FORECAST_ENGINE/EXPECTED_SPIKE_CALENDAR/DATA_TRANSFER_USD_PER_TB) are never seeded
     # by any migration, so a bare UPDATE matched 0 rows and the edit was silently lost
@@ -994,7 +1065,10 @@ def _settings_tab(is_operator: bool) -> None:
             stamp_write("adm_setting", ok)  # C48
             notify(ok, msg if not ok else f"Setting {key} saved.")
             if ok:
-                st.caption("New value takes effect within one cache cycle (≤5 min) or after Refresh.")
+                st.caption(f"New value applies at the next monthly purge (SP_PURGE_FACTS keeps at least "
+                           f"{_PURGE_FLOORS[key]} days)." if key in _PURGE_FLOORS
+                           else "New value is read by the next validate.sql run." if key in _DEPLOY_GATE_SETTINGS
+                           else "New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
         st.caption("Saving in the app is limited to operators (config OPERATOR_USERS); "
                    "anyone can copy the SQL for review.")
@@ -1073,7 +1147,8 @@ def _migrations_tab() -> None:
         mart_source="SOURCE_FRESHNESS_STATE (stamped by each loader)",
         live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
         mart_tier="recent", live_tier="recent")   # state moves on every loader run (r14 #13)
-    if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
+    if guard(fresh, "Freshness view empty — have the loader tasks run yet? Switch on Task health below to "
+                    "see which are suspended or failing.",
              setup_hint="Tasks resume at the end of V004 — switch on Task health below to see which "
                         "are suspended or failing."):
         styled_table(fresh.df)
@@ -1668,7 +1743,8 @@ def _performance_tab() -> None:
     # one thing it cannot have is BYTES_SCANNED, so the scan stays one click away.
     res = run(mart_sql.app_statement_stats_telemetry(7), page=_PAGE, key="app_stmt_tel",
               tier="recent", source="APP_QUERY_TELEMETRY (the app's own fetch log)")
-    if guard(res, "No fetches persisted in the last 7 days.",
+    if guard(res, "No fetches persisted in the last 7 days. If the app has been in use, check the "
+                  "APP_QUERY_TELEMETRY INSERT grant (a roles.sql re-run restores it).",
              setup_hint="Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant)."):
         _stmt, _stmt_cfg = snowsight_profile_column(
             res.df, _PAGE, id_col="SLOWEST_QUERY_ID", label="Slowest profile")
@@ -1992,7 +2068,8 @@ def _canary_tab() -> None:
         gaps = frame[frame["STATUS"] == "GAP"]
         if not gaps.empty:
             st.caption(f"{len(gaps)} GAP: declared account-feature absences (Cortex "
-                       "subscription/region, SYSTEM$CLIENT_VERSION_INFO) — absence, not drift. "
+                       "subscription/region, SYSTEM$CLIENT_VERSION_INFO, the optional QUERY_INSIGHTS "
+                       "view, ORGANIZATION_USAGE without the org-viewer grant) — absence, not drift. "
                        "Anything absent WITHOUT a declaration fails instead.")
         if failed.empty:
             empty_state("clean", f"All {len(frame) - len(gaps)} applicable canary statements passed.")

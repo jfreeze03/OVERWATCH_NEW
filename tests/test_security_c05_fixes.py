@@ -746,7 +746,9 @@ def test_ddl_kpis_and_charts_cover_the_whole_window(monkeypatch):
          "STATEMENTS": 300},
         {"GRAIN": "USER", "DAY": None, "QUERY_TYPE": None, "USER_NAME": "OLDEST", "STATEMENTS": 40},
         {"GRAIN": "USER", "DAY": None, "QUERY_TYPE": None, "USER_NAME": "NEWEST", "STATEMENTS": 300}]))
+    # the fact serves only over a span it holds (CHANGE RISK COMPLETE is freshness only, R2-006 follow-up)
     seen = _drive_changes(monkeypatch, {"sec_change_coverage": covered, "ddl_fact_": _ok(_ddl_groups(300)),
+                                        "sec_change_fact_span_": _simulated_coverage(_dense_fact),
                                         "ddl_rollup_fact_": rollup})
     assert _kpi(seen, "High-risk change groups") == "57"                # was 0 (counted from the newest 300)
     assert _kpi(seen, "Unregistered groups") == "12"

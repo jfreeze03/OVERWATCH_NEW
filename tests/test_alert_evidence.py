@@ -93,11 +93,15 @@ def test_queued_minutes_scopes_to_the_warehouse() -> None:
     assert "QUEUED_OVERLOAD_TIME" in sql and "WH_ALFA_BI_PRD" in sql
 
 
-def test_unknown_family_falls_back_to_generic_but_only_for_cost_perf() -> None:
-    generic = plan_for_alert("COST_SOMETHING_NEW", "WH_X spend odd", "", "2026-08-17")
+def test_generic_pack_is_an_allow_list_and_an_unknown_rule_is_withheld() -> None:
+    # R2-046 / R2-090: the generic query-latency pack serves only the rules it explains; an unknown COST_/PERF_
+    # rule used to fall into it by prefix and is now withheld, like every non cost/perf family.
+    generic = plan_for_alert("COST_WH_DAILY_CREDITS", "WH_X used 80 credits on 2026-08-16", "", "2026-08-17")
     assert generic is not None and generic.kind == "generic"
+    assert generic.warehouse == "WH_X" and generic.day == "2026-08-16"
     assert "ELAPSED_H_PRIOR_AVG" in alert_evidence_sql.build(generic)
-    # Non cost/perf families get no AI-explain affordance at all.
+    assert plan_for_alert("COST_SOMETHING_NEW", "WH_X spend odd", "", "2026-08-17") is None
+    assert plan_for_alert("PERF_SOMETHING_NEW", "WH_X slow", "", "2026-08-17") is None
     assert plan_for_alert("SEC_NEW_EXPOSURE", "new admin grant", "", "2026-08-17") is None
 
 

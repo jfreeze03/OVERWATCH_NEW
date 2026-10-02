@@ -292,7 +292,9 @@ Admin → Settings, never in code.
   FACT_METERING_DAILY; live fallback METERING_DAILY_HISTORY (lags ≤24h).
 - **MTD credit spend vs last month** — account-wide month-to-date billed $
   (today included). The delta compares the same number of completed days
-  (today excluded) against the prior month; no configuration is needed
+  (today excluded, and before the 06:45 Central daily load also yesterday,
+  whose metering row is still a partial snapshot) against the prior month;
+  no configuration is needed
   (owner 2026-07-13: no monthly-budget KPI). When the prior month has no
   daily facts the card reads plain "MTD credit spend" with no delta. A set
   `MONTHLY_BUDGET_USD` adds a "% of budget" note to this card's help, and a
@@ -584,8 +586,9 @@ SOC. **Governance drift score** at top (§6). Sections:
 ### Alerts
 - **Open events** — click a row → drawer: full detail, rule config, that
   rule's recent history, first-response playbook, **Explain with AI** for
-  COST_/PERF_ events (§8), Investigate→ (jumps to the owning page/section
-  with filters applied), ack/resolve with note (audited). Bulk ack/resolve
+  the alerts that have a matching evidence pack (§8), Investigate→ (jumps to
+  the owning page/section with filters applied), ack/resolve with note
+  (audited). Bulk ack/resolve
   below. The tiles above the queue are Open critical / high / total.
 - **Rules** — ALERT_CONFIG: enable/disable, thresholds (SQL generated,
   operator executes). The generator opens on the picked rule's current
@@ -731,7 +734,10 @@ are not scored (retired 2026-07-13, owner decision).
 - Neither engine projects with fewer than 7 complete days of history (the
   basis reads "Needs at least 7 days of history"). A missing completed day
   this month (no fact row) is filled at the baseline mean when the
-  surrounding history is dense, never counted as $0.
+  surrounding history is dense, never counted as $0. Complete days end at
+  the metering fact's newest row: before the 06:45 Central daily load that
+  row (yesterday) is still a partial snapshot, so Overview projects it with
+  today instead of counting it, and the basis says so.
 - **ml_forecast**: reads `FORECAST_ML_DAILY` (materialized by the opt-in
   `ml_forecast_option.sql`: `SP_REFRESH_ML_FORECAST` retrains the
   SNOWFLAKE.ML.FORECAST model on every complete day, then writes the 45 days
@@ -773,10 +779,16 @@ required "inconclusive" escape, word limits.
 - **Pre-explained anomalies** — sweep v3 appends a grounded hypothesis to
   fresh COST_ANOMALY_SWEEP events server-side (capped 5/run) so webhook
   messages arrive explained.
-- **Anomaly explanation (on-demand)** — alert drawer, COST_/PERF_ events: assembles
-  the event day's evidence (top query families by elapsed-hours vs their
-  prior-7-day average, warehouse-scoped) and asks for the 1-2 most likely
-  drivers with numbers, or "inconclusive". Operators may append the
+- **Anomaly explanation (on-demand)** — alert drawer: assembles the evidence
+  pack that matches the alert's metric (cloud-services credits by query
+  shape, AI/Cortex spend, a service's daily credits, a query family's
+  latency, a warehouse's queueing) and asks for the 1-2 most likely drivers
+  with numbers, or "inconclusive". The generic pack (top query families by
+  elapsed-hours vs their prior-7-day average, warehouse-scoped) serves only
+  daily credits (account / warehouse), remote spill and a warehouse spike
+  from the anomaly sweep; any other alert (budget pace / forecast, contract,
+  storage, egress, org spend, query failure rate, security ...) shows no
+  Explain button rather than off-topic rows. Operators may append the
   hypothesis to the event (audited UPDATE).
 
 ## 9. The find→fix→prove loop
@@ -871,11 +883,11 @@ RESUME shows up only by re-running that proof.
 CREDIT_PRICE_USD 3.68 · AI_CREDIT_PRICE_USD 2.20 · STORAGE_USD_PER_TB_MONTH
 23.00 · MONTHLY_BUDGET_USD 0=off · AI_MONTHLY_BUDGET_USD 0=off ·
 CONTRACT_CREDITS / CONTRACT_START_DATE / CONTRACT_END_DATE (ISO dates) ·
-CORTEX_MODEL llama3.1-8b · FORECAST_ENGINE linear|seasonal|ml_forecast ·
+CORTEX_MODEL llama3.1-8b (saved trimmed and lower-case; blank = the default) · FORECAST_ENGINE linear|seasonal|ml_forecast ·
 SCORE_PTS_* (nine platform-score weights, §6) · FACT_RETENTION_DAYS_HOURLY
 400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 365, raised from 180
 in V054) · ERROR_LOG_RETENTION_DAYS 180 (floor 30) · APP_USAGE_RETENTION_DAYS
-365 (floor 90) (the floors are enforced in SP_PURGE_FACTS) ·
+365 (floor 90) (the floors are enforced in SP_PURGE_FACTS, and the Admin editors start at them) ·
 INCIDENT_AUTO_DECLARE_CRITICAL
 TRUE (hourly auto-declare switch; the two V162 identity rules never
 auto-declare either way) · AI_RUNAWAY_ROBUST_Z 3.5 and
@@ -886,9 +898,12 @@ OVERWATCH_EMAIL (blank = no email leg; recipients = that integration's
 DEFAULT_RECIPIENTS, set in Snowsight, never stored here) (V164, §19) ·
 DEPLOY_ACTORS '' (comma list of deploy service users whose warehouse changes
 read MANAGED; §21 Attribution — deleting a populated row flips them to
-MANUAL). Values
+MANUAL) · CREDIT_PRICE_OVERRIDE FALSE (read only by validate.sql: set TRUE to run a
+CREDIT_PRICE_USD other than 3.68 on purpose, else validate fails with -20013;
+not seeded, and Admin never lists it as safe to delete). Values
 are strings; bad numbers fall back to defaults. Changes take effect within
-one cache cycle (≤5 min) or after Refresh.
+one cache cycle (≤5 min) or after Refresh; a retention change applies at the next
+monthly purge (TASK_PURGE_FACTS).
 
 ## 12. Alert engine reference
 
@@ -1049,7 +1064,7 @@ The two ALERT_CONFIG rows can stay; disable them in Alerts > Rules if wanted.
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
 | DQ_BREACH | PIPELINE | a registered table's latest rows-added load is a robust-z outlier (spike or drop, z ≥ threshold 3.5) against its own loads over 28 days — the same series as the Operations data-quality panel; MEDIUM — SP_ANOMALY_SWEEP, V132 | per table per load day |
 | DQ_SCHEMA_DRIFT | PIPELINE | a table registered as an OBJECT entity has columns added, removed or retyped since its latest prior daily snapshot (a first snapshot is the baseline and never alerts); MEDIUM — SP_SCAN_SCHEMA_DRIFT from the sweep, V133 | per table per day |
-| PIPE_REF_GAP | PIPELINE | ≥ threshold (1) source codes in one check missing from the XLAT reference table (SP_SCAN_REF_GAPS; the nightly load would fail on them); HIGH — daily add-on [17], not counted in the scan tally, V129 | per check per day |
+| PIPE_REF_GAP | PIPELINE | ≥ threshold (1) source codes in one check missing from the XLAT reference table (SP_SCAN_REF_GAPS; the nightly load would fail on them; a check whose name has a character other than letters, digits, spaces and - _ . : / is skipped, which the Operations panel warns about); HIGH — daily add-on [17], not counted in the scan tally, V129 | per check per day |
 | DQ_RECON_ERROR | PIPELINE | RECON_MTRC_ERROR shows source-vs-target mismatches inside the rule's window (48h) on ≥ threshold (1) metrics; HIGH — daily add-on [18] (SP_SCAN_RECON_ERRORS), not counted, V137 | daily key |
 | OPS_CANARY_FAIL | PLATFORM | weekly source sentinel found failing dependency views | daily key |
 | OPS_SCAN_DEGRADED | PLATFORM | one or more rule blocks failed in the last scan (v7 isolation) | daily key |
@@ -1172,18 +1187,49 @@ and Admin → Setup progress marks the row Unknown with a re-apply-the-grants
 FIX. A missing column (schema drift), a timeout or any other
 failure shows "unavailable" with the error in its detail expander. A probe
 read does not write a missing column to APP_ERROR_LOG, so that expander is
-the only record: copy the error, then run Admin → Canary. That helps only
-when the panel's builder is registered in app/data/canary.py (it then FAILs
-there on drift). Several probe readers are not registered, by design (the
-SHOW-based reads, which EXPLAIN cannot compile, and the Enterprise-only
-ACCESS_HISTORY reads) or not yet (e.g. the org_*, operator_* and email_*
-reads, query_insights_feed, object_tag_probe); for those the expander error
-is the only record.
-A timeout usually clears on a retry; drift does not (apply the missing
-migrations, or redeploy). Admin → Setup progress marks a checklist row
-Unknown (not Pending) when its read fails this way: FIX says Retry for a
-timeout and names the schema drift for a missing column, and the
-"could not be checked" line's Error detail lists each failed read's error.
+the only record: copy the error, then run Admin → Canary. That helps when
+the panel's builder is registered in app/data/canary.py (it then FAILs
+there on drift), or when it is a twin: a registered canary compiles every
+column it reads, so drift FAILs the sibling. Every ACCESS_HISTORY column
+the app reads is covered there too, as a FAIL: this account is Enterprise.
+Since v4.608 the six ORGANIZATION_USAGE readers (cost.org_*) and the
+optional QUERY_INSIGHTS view are registered as declared gaps: absent, they
+read GAP; a renamed column FAILs. These probe readers are not registered
+(tests/test_canary_coverage.py derives this list from app/ and checks the
+twins). Twins, whose columns a registered canary compiles:
+mart_sql.open_alert_severity_counts, cortex_sql.cortex_code_user_daily,
+change_impact_sql.proc_redeploys and workbench_sql.product_mapping_totals.
+Partly covered: insights_sql.object_reads_confirm
+(graph.object_blast_consumers and workbench.product_consumer_reads compile
+every ACCESS_HISTORY column it reads, so drift there FAILs; its
+ACCOUNT_USAGE.TABLES name columns TABLE_CATALOG, TABLE_SCHEMA and TABLE_NAME
+and GRANTS_TO_ROLES.GRANTED_TO have no canary). SHOW-based, because EXPLAIN
+cannot compile SHOW: mart_sql.email_alert_objects,
+ops_sql.overwatch_task_states, ops_sql.warehouse_stmt_timeout_sql,
+ops_sql.account_stmt_timeout_sql, recheck_sql.warehouse_settings_sql and
+Admin's inline SHOW PARAMETERS IN WAREHOUSE read. Reads of the customer ETL
+tables named in SETTINGS, which a default-argument canary cannot name:
+etl_control_sql.reference_gap_scan, etl_control_sql.cycle_night_health_scan
+and etl_control_sql.cycle_finish_history_scan. Deliberately not registered:
+mart_sql.email_notification_history (unproven without the opt-in email
+integration), mart_sql.flyway_history (absent until Flyway is adopted),
+cost_sql.native_anomaly_insights (a SELECT * on an optional feed, so a
+canary sees only absence) and security_sql.object_tag_probe (the
+TAG_REFERENCES existence probe). The Snowsight-link context lookup
+(CURRENT_ORGANIZATION_NAME()) reads no object. For the SHOW-based reads and
+the deliberate exemptions, the expander error is the only record. Also
+logged to APP_ERROR_LOG, because Operations ▸ Pipeline runs the same SQL
+without probe: etl_control_sql.reference_gap_scan and
+etl_control_sql.cycle_finish_history_scan (the Brief and Control Room read
+both as fail-silent probes that show nothing on failure). The night
+roll-up, etl_control_sql.cycle_night_health_scan, is logged only when its
+ETA columns fail and the base roll-up still answers (once per process).
+A timeout usually clears on a retry;
+drift does not (apply the missing migrations, or redeploy). Admin → Setup
+progress marks a checklist row Unknown (not Pending) when its read fails
+this way: FIX says Retry for a timeout and names the schema drift for a
+missing column, and the "could not be checked" line's Error detail lists
+each failed read's error.
 An ACCESS_HISTORY read (Entity 360 blast radius, Proof consumer reach) names
 the edition or role only when the view is absent; this account is
 Enterprise, so a timeout there says it timed out.
@@ -1246,7 +1292,30 @@ the same day.
 4. **Schema gone:** UNDROP first (`UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;`); it
    brings back every table in it, manual clones included. Past retention the
    operator data is gone with the schema (the manual clones lived in it too):
-   1) Apply every migration in order, V001 onward. V158's tail starts a backup
+   1) Apply every migration in order, V001 onward. Before V006, run
+      `CREATE ROLE IF NOT EXISTS OVERWATCH_MONITOR;` and
+      `CREATE ROLE IF NOT EXISTS OVERWATCH_OPERATOR;`: V006-V008 grant to
+      these retired roles, roles.sql drops them again, and rebuild/02 runs
+      both lines first. If your role lacks CREATE ROLE, create them as a role
+      that has it and drop them with that role before roles.sql (whose own
+      DROPs would otherwise stop it before its first grant). V002 sets
+      WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS back to 300 and attaches
+      OVERWATCH_RM (30 credits a month, SUSPEND at 100%) in place of any
+      monitor until V045 sets RESOURCE_MONITOR to NULL and drops it. The
+      warehouse is account-level and survives the dropped schema, so this
+      hits its live settings. Record them first with
+      `SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ADMIN;`
+      and `SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';` (its resource_monitor), and
+      put the timeout back afterwards
+      (`ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = <value>;`,
+      or `UNSET` if it showed no warehouse-level value). Expect no monitor
+      (owner decision); the replay detaches any monitor, so if it named one
+      other than OVERWATCH_RM, ask the owner before re-attaching it
+      (`ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = <monitor>;`). If
+      the run stops between V002 and V045, detach the monitor before anything
+      else (`ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;` then
+      `DROP RESOURCE MONITOR IF EXISTS OVERWATCH_RM;`; docs/FULL_REBUILD.md
+      steps 0, 3 and 3b). V158's tail starts a backup
       run seconds before V161, which waits up to about 4 minutes for it. If V161
       still stops ("V161 stopped: a TASK_BACKUP_OPERATOR run was still in
       flight", or a statement timeout), re-run it once that run shows a final

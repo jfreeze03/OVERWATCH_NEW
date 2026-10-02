@@ -153,7 +153,9 @@ def object_dependency_edges(limit: int = 10000) -> str:
     and cycle-safe, and one cached fetch serves every object viewed in a session.
 
     UNVERIFIED view (no prior reader on this account) — callers run it probe=True and
-    degrade to 'dependency graph unavailable'. OBJECT_DEPENDENCIES records declared
+    degrade to 'dependency graph unavailable'. A probe read logs no drift, so the canary
+    graph.object_dependency_edges (v4.608, not a declared gap: a standard view) is its
+    alarm: an absent view or a renamed column FAILs there. OBJECT_DEPENDENCIES records declared
     view/matview/policy references but NOT stored-proc bodies or dynamic SQL, so the
     declared graph is PARTIAL — it is deliberately paired with observed ACCESS_HISTORY
     consumers, and the panel says so. Deterministic ORDER BY so that if the account-

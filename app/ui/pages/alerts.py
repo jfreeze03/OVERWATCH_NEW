@@ -564,8 +564,11 @@ def _delivery_status() -> None:
     # never exists, so the banner claimed "No webhook integration — alerts stay in-app
     # only" while Teams was delivering fine. Resolve the integrations the ENABLED ROUTES
     # actually name, and check for ANY of them.
+    # R2-098: the 5-minute tier too (was the shared 4 h metadata entry, which no app write invalidates) -- an
+    # integration dropped or recreated in a worksheet must not read as up / missing for hours under a verdict
+    # that answers "who gets paged right now". A cheap metadata SHOW in a lazy section.
     integ = run("SHOW NOTIFICATION INTEGRATIONS", page=_PAGE,
-                key="delivery_integ", tier="metadata", source="SHOW INTEGRATIONS", max_rows=0)
+                key="delivery_integ", tier="recent", source="SHOW INTEGRATIONS", max_rows=0)
     # Review R1-169: the 5-minute tier Admin's task-health read uses, not the 4 h metadata entry -- this banner
     # answers "who gets paged right now", so a task a DBA suspended in a worksheet must not read LIVE for hours.
     task = run("SHOW TASKS LIKE 'TASK_ALERT_NOTIFY' IN SCHEMA DBA_MAINT_DB.OVERWATCH",
@@ -1111,10 +1114,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     # snooze + investigate/fix) was the LAST thing rendered, below six
                     # evidence panels, so every triage required scrolling the whole drawer.
                     # The evidence panels follow, demoted into a supporting group.
-                    target = investigation_target(str(row["RULE_ID"]),
-                                                  f"{row['TITLE']} {detail_text}")
-                    fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
-                    wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
+                    # The TITLE and DETAIL go in apart: a warehouse-led rule reads its warehouse from the title
+                    # only, and neither read takes an entity from an appended AI narrative (navigate).
+                    target = investigation_target(str(row["RULE_ID"]), str(row["TITLE"]), detail_text)
+                    fix = fix_target(str(row["RULE_ID"]), str(row["TITLE"]), detail_text)
+                    wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), str(row["TITLE"]), detail_text)
                     # rec18: two rows — nav buttons + action radio share one row; the note
                     # gets a full-width row of its own instead of a cramped ~30% column.
                     c_inv, c_fix, c_act = st.columns([1.1, 1.1, 0.9])
@@ -1265,7 +1269,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     with st.expander("Playbook — what to do first", expanded=False):
                         st.markdown(playbook_for(str(row["RULE_ID"])))
                     _rid = str(row["RULE_ID"]).upper()
-                    _wh_guess = inline_fix_warehouse(_rid, f"{row['TITLE']} {detail_text}")
+                    _wh_guess = inline_fix_warehouse(_rid, str(row["TITLE"]), detail_text)
                     _rc_sql = recheck_sql.recheck_sql(_rid, _wh_guess, str(row.get("COMPANY", "")))
                     _rc_key = f"_ow_recheck_{event_id[:8]}"
                     if _rc_sql and st.button(
@@ -1378,6 +1382,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                          + (f"latest {_hn}" if _hn >= _RULE_HISTORY_CAP else f"{_hn}")
                                          + " events)"):
                             styled_table(hist.df, height=220)
+                    elif not hist.ok:
+                        # merge-notes lead (c03): a FAILED history read rendered nothing at all -- the same
+                        # blank as a rule with no recent events. It renders by its kind instead.
+                        _failed_read(hist, "This rule's recent events could not be read, so its history "
+                                           "is missing from this drawer.")
                     # rec26: how was this resolved last time? The kind + note from the account's
                     # own history is a playbook this exact alert has earned. styled_table (not
                     # markdown) so a note can't inject formatting.
@@ -1391,6 +1400,9 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                          height=180, slug="rule-resolutions")
                             st.caption("The last few times this rule was closed — kind and note from "
                                        "your own history, the playbook this alert has earned.")
+                    elif not _res.ok:
+                        _failed_read(_res, "How this rule was resolved before could not be read, so its "
+                                           "past resolutions are missing from this drawer.")
                     if wh_inline:
                         with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
                             st.caption("Playbook above says what; this generates the how. Execute is "

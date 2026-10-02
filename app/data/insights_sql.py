@@ -714,20 +714,30 @@ def pipeline_sla_forecast(days: int = 14) -> str:
     cadence' or 'deadline within one refresh cycle' — instead of only the ones
     that already missed. Tables never observed refreshing in the window carry a
     NULL cadence and fall back to a runway-proximity check downstream.
+
+    Perf (v4.608, PR-1 lead): the LAG runs only over the REGISTERED tables' DML. It used to window the
+    whole account's TABLE_DML_HISTORY for the window (every table's events) and drop all but the
+    registered ones at the final join, a scan that timed out on a busy account. The enabled
+    PIPELINE_SLA_CONFIG rows (exactly the tables the PIPELINE_SLA_STATUS view lists) are joined in
+    first; LAG partitions per table, so each registered table's gaps are unchanged.
     """
     days = max(3, min(int(days or 14), 90))
     return f"""
-WITH intervals AS (
-    SELECT UPPER(DATABASE_NAME) AS DB, UPPER(SCHEMA_NAME) AS SCH,
-           UPPER(TABLE_NAME) AS TBL,
+WITH reg AS (
+    SELECT DISTINCT UPPER(c.DATABASE_NAME) AS DB, UPPER(c.SCHEMA_NAME) AS SCH, UPPER(c.TABLE_NAME) AS TBL
+    FROM {core_object("PIPELINE_SLA_CONFIG")} c
+    WHERE c.ENABLED
+), intervals AS (
+    SELECT r.DB, r.SCH, r.TBL,
            DATEDIFF('minute',
-                    LAG(START_TIME) OVER (
-                        PARTITION BY UPPER(DATABASE_NAME), UPPER(SCHEMA_NAME),
-                                     UPPER(TABLE_NAME)
-                        ORDER BY START_TIME),
-                    START_TIME) AS GAP_MIN
-    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+                    LAG(h.START_TIME) OVER (
+                        PARTITION BY r.DB, r.SCH, r.TBL
+                        ORDER BY h.START_TIME),
+                    h.START_TIME) AS GAP_MIN
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY h
+    JOIN reg r
+      ON r.DB = UPPER(h.DATABASE_NAME) AND r.SCH = UPPER(h.SCHEMA_NAME) AND r.TBL = UPPER(h.TABLE_NAME)
+    WHERE h.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 ), cadence AS (
     SELECT DB, SCH, TBL,
            MEDIAN(GAP_MIN) AS MEDIAN_GAP_MIN,

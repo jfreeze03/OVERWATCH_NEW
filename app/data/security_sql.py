@@ -700,10 +700,15 @@ def _recent_ddl_ctes(days: int, company: str, database: str, schema_contains: st
     _uc = companies.user_clause(company, "g.USER_NAME")
     _dc = companies.database_company_scope(company, "g.DATABASE_NAME")
     _actor_or_object = f"({_uc} OR {_dc})" if _uc and _dc else (_uc or _dc)
+    # One clock with the fact twin (_recent_ddl_fact_ctes: f.EVENT_TS rolling from CURRENT_TIMESTAMP), so
+    # the live fallback serves exactly the fact's span under the same label: scope_window_where's
+    # CURRENT_DATE midnight anchor read up to a day more (N days plus today's hours). Bounds: identical.
+    _window = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
+               else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
-        scope_window_where("START_TIME", days, bounds=bounds),
+        _window,
         "EXECUTION_STATUS = 'SUCCESS'",
         ("(QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_VIEW', 'ALTER', 'ALTER_TABLE_MODIFY_COLUMN', "
          "'ALTER_SESSION', 'ALTER_USER', 'CREATE_USER', 'DROP_USER', 'CREATE_ROLE', 'ALTER_ROLE', "
@@ -1353,8 +1358,11 @@ LIMIT 500
 # the D4 audit lesson in insights_sql), and count a table "touched" if ANY query
 # read OR modified it in the window (object-level, so a grant exercised only
 # through role inheritance still counts as used — never a false "unused"). Needs
-# Enterprise-edition ACCESS_HISTORY; the page degrades via guard(). Deliberately
-# NOT canaried (Standard edition would be permanent alert noise).
+# Enterprise-edition ACCESS_HISTORY; the page degrades via guard(). Canaried as plain
+# FAILs (R2-069): this account is Enterprise, so an absent ACCESS_HISTORY means a lost
+# IMPORTED PRIVILEGES grant and a missing column is drift — both should be loud. The
+# canary only runs on demand, so a Standard account would see one red row per reader,
+# never a standing alert.
 # ---------------------------------------------------------------------------
 
 _TOUCHED_CTE = """touched AS (
@@ -1802,6 +1810,11 @@ LIMIT 200
 """
 
 
+#: Row cap of the per-(day, user, role) ``unload_activity`` feed. The page reads it to tell an exact
+#: fallback sum (fewer rows than the cap) from a lower bound (R2-082).
+UNLOAD_FEED_LIMIT = 300
+
+
 def unload_activity(days: int = 30, company: str = "ALL", database: str = "",
                     schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """r25 #7b (owner pick): who runs COPY INTO <location> (QUERY_TYPE
@@ -1846,7 +1859,7 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}
 GROUP BY 1, 2, 3
 ORDER BY DAY DESC, GB_OUT DESC
-LIMIT 300
+LIMIT {UNLOAD_FEED_LIMIT}
 """
 
 
@@ -2062,6 +2075,15 @@ LIMIT 200
 """
 
 
+#: SOURCE_FRESHNESS_STATE.STATUS values that mark the OW_QH_EXTRACT row as a committed extract.
+#: SP_LOAD_QH_EXTRACT (V152, and every definer before it) writes 'loader', and only inside its
+#: IF (ok) block; 'OK' is the other loaders' stamp, kept so a future re-derivation that
+#: standardizes on it still reads as fresh. tests/test_security_e1_fixes.py locks this set
+#: to the literal the latest definer writes.
+QHX_FRESH_STATUSES: tuple[str, ...] = ("loader", "OK")
+_QHX_STATUS_LIST = ", ".join(f"'{s}'" for s in QHX_FRESH_STATUSES)
+
+
 def security_domain_coverage() -> str:
     """Coverage/freshness contract for the five Security risk domains."""
     return f"""
@@ -2082,8 +2104,11 @@ WITH posture AS (
     -- changes (a false all-clear). Also require the EXTRACT to be fresh. Gating on the extract's
     -- recency (not the change fact's newest row) distinguishes a stalled feed (coverage unknown)
     -- from a legitimately QUIET account (fresh extract, simply no changes = coverage complete).
+    -- R2-006: the extract row's only writer, SP_LOAD_QH_EXTRACT, stamps it inside IF (ok) with
+    -- STATUS 'loader', never 'OK', so an 'OK'-only test never matched and CHANGE RISK read STALE
+    -- forever. Accept the loader's own literal (QHX_FRESH_STATUSES, locked to the latest definer).
     SELECT COUNT_IF(SOURCE_NAME = 'OW_QH_EXTRACT'
-                    AND COALESCE(STATUS, '') = 'OK'
+                    AND COALESCE(STATUS, '') IN ({_QHX_STATUS_LIST})
                     AND SNAPSHOT_TS >= DATEADD('hour', -3, CURRENT_TIMESTAMP())) > 0 AS QHX_FRESH
     FROM fresh
 )
@@ -2135,10 +2160,14 @@ def login_fact_coverage(days: int = 30) -> str:
     # a hole-ridden mart over the complete live LOGIN_HISTORY and undercount failed/new-network
     # logins in the gap window (a real attack there goes invisible). Mirrors access_evidence_days
     # (bug-hunt 2026-08-30).
+    # Complete days only (today excluded), as security_login_fact_coverage counts: the window spans
+    # days + 1 calendar days (today included) against a requirement of ``days``, and the daily load
+    # writes today's partial partition, so a loaded today stood in for one missing interior day
+    # (N of N+1) and the hole-ridden fact still proved the MFA / auth-readiness evidence complete.
     days = bounded_days(days, maximum=90)
     return f"""
 SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
-       COUNT(DISTINCT DAY) AS COVERAGE_DAYS,
+       COUNT(DISTINCT IFF(DAY < CURRENT_DATE(), DAY, NULL)) AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
 FROM {core_object('FACT_LOGIN_DAILY')}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
@@ -2167,6 +2196,14 @@ def security_login_fact_coverage(days: int = 30, *, bounds: tuple | None = None,
     # fact_coverage_complete keeps the page on the live path until the fact is genuinely dense.
     days = bounded_days(days, maximum=90)
     lookback = max(0, min(int(lookback or 0), NETWORK_BASELINE_DAYS))
+    return _fact_day_coverage("FACT_SECURITY_LOGIN_DAILY", days, bounds, lookback)
+
+
+def _fact_day_coverage(table: str, days: int, bounds: tuple | None, lookback: int = 0) -> str:
+    """Complete-day DENSITY of a DAY-keyed fact over a served span (see security_login_fact_coverage,
+    whose contract this is): COVERAGE_DAYS = distinct days before today (and before the range end)
+    from the span start back ``lookback`` days; LAST_DAY = the fact's newest day (freshness). Pair it
+    with ``logic.security.coverage_required_days(days, bounds, lookback=...)``."""
     if bounds is not None:
         _start, _end = bounds
         _first = (_start - timedelta(days=lookback)).isoformat()
@@ -2177,16 +2214,39 @@ SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
        COUNT(DISTINCT IFF(DAY < LEAST('{_end.isoformat()}'::DATE, {account_today_sql()}), DAY, NULL))
            AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
-FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
+FROM {core_object(table)}
 WHERE DAY >= '{_first}'
 """
     return f"""
 SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
        COUNT(DISTINCT IFF(DAY < CURRENT_DATE(), DAY, NULL)) AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
-FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
+FROM {core_object(table)}
 WHERE DAY >= DATEADD('day', -{days + lookback}, CURRENT_DATE())
 """
+
+
+def security_change_fact_coverage(days: int = 30, *, bounds: tuple | None = None) -> str:
+    """Span proof for the fact-served 'Who changed what' panel: FACT_SECURITY_CHANGE's complete-day
+    density over exactly the window ``recent_ddl_changes_fact`` serves (90-day cap, calendar bounds
+    capped too). Pair it with ``logic.security.coverage_required_days(days, bounds)`` over the same
+    ``capped_window(days, bounds, 90)``.
+
+    CHANGE RISK COMPLETE (``security_domain_coverage``) proves FRESHNESS only: the extract and the
+    fact were both stamped in the last 3 hours. The fact is refilled hourly from the 72-hour
+    OW_QH_EXTRACT alone (V105's d<=3 arm), and the extract's catch-up is clamped at that retention
+    (V152), so a loader or task-tree outage longer than 72 hours leaves a permanent hole (V100's
+    header records one such loss). An hour after the loader resumes the stamps read COMPLETE again,
+    and a 7-90 day panel served from the holed fact under its 'last N days' label, down to the green
+    'No DDL/DCL changes recorded' state and the High-risk / Unregistered KPIs. Every served day must
+    now hold fact rows, or the panel keeps the live QUERY_HISTORY read (the safe direction, and the
+    cost it paid before the fact could serve). The fact keeps every successful DDL/DCL statement
+    (ALTER_SESSION and the ETL's CREATE/DROP churn included), so a real day is rarely empty; a
+    genuinely quiet day only costs the live read. A loss shorter than a whole day is below this
+    day-grain check, as it is for the login facts."""
+    days = bounded_days(days, maximum=90)
+    bounds = capped_window(days, bounds, 90)[1]
+    return _fact_day_coverage("FACT_SECURITY_CHANGE", days, bounds)
 
 
 def failed_logins_fact(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
@@ -2447,7 +2507,11 @@ LIMIT 3000
 
 
 def egress_baseline(days: int = 30, *, bounds: tuple | None = None) -> str:
-    span = max(1, min(int(days or 30), 45))
+    # R2-054: 0 is a real offset (CalendarDayOffset(0) = the 1st under Current month / Jan 1 under
+    # Current year: today only), not a missing value. `days or 30` turned it into a 30-day span, so
+    # the 1st compared September against August under an October label; it is a 1-day span, as on
+    # the 2nd. Only a missing value (None) takes the 30-day default.
+    span = max(1, min(30 if days is None else int(days), 45))
     if bounds is not None:
         # vs-prior on the calendar window: CURRENT = the given month [start, end),
         # PRIOR = the whole month before it [prior_start, start). BASELINE_DAYS is the

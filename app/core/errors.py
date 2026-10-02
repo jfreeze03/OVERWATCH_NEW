@@ -118,7 +118,15 @@ def record_error(page: str, error: BaseException, context: str = "") -> str:
     be cut to the column, the caller context goes first; ref and tb always survive.
     app.logic.app_telemetry.parse_error_context reads it back for Admin.
     """
-    at = datetime.now()
+    # R2-051: account time, so the ref's date/time and Admin's 'at' column agree with APP_ERROR_LOG.LOGGED_AT
+    # (a Central CURRENT_TIMESTAMP() default) instead of running 5-6 hours (and every Central evening, a
+    # calendar day) ahead on the UTC process clock. Guarded: the boundary must never raise.
+    try:
+        from app.logic.formulas import account_now
+
+        at = account_now()
+    except Exception:
+        at = datetime.now()
     # The error boundary must be bulletproof: a hostile/buggy __str__ (e.g. a driver
     # exception that lazily formats a None attribute) must NOT raise out of record_error
     # and defeat safe_page. Render the message once, guarded.

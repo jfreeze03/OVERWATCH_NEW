@@ -324,6 +324,33 @@ def render() -> None:
             "delta_color": "inverse" if _best["days_left"] <= 90 else "off",
             "help": contract_planner.runway_basis_note(_best),
         })
+    elif _best is not None:
+        # lead (c07): an overrun (days_left < 0, severity 'bad') or an uncomputable burn (the -1 sentinel) used
+        # to drop the tile, so the Executive export (built from these cards) said nothing about the contract
+        # at the moment it mattered most. Only the configured-credits basis goes negative.
+        _exhausted = str(_best.get("severity") or "") == "bad"
+        secondary.append({
+            "label": "Credit commitment exhausted" if _exhausted else "Credit commitment exhausts",
+            "value": "Exhausted" if _exhausted else "—",
+            "severity": "bad" if _exhausted else "warn",
+            "delta": ("consumption is past the configured credits" if _exhausted
+                      else "burn not computable (no trailing-30-day burn)"),
+            "delta_color": "off",
+            "help": contract_planner.runway_basis_note(_best),
+        })
+    elif not exh.usable():
+        # R2-085 (Brief twin): no runway on either basis because the configured-credits read failed and no
+        # fresh billing balance was readable -- a dash, never a silently missing tile (the verdict line says
+        # 'contract runway unavailable' from the same exh.usable() test). No contract configured (a successful
+        # read, TOTAL <= 0) still shows no tile.
+        secondary.append({
+            "label": "Contract runway", "value": "—", "severity": "warn",
+            "delta": ("contract settings not installed" if is_setup_absence(exh.error_kind)
+                      else "runway read unavailable"),
+            "delta_color": "off",
+            "help": "The contract runway could not be read: the configured-credits read failed and no fresh "
+                    "billing balance was readable. A dash means unavailable, not zero.",
+        })
     roi = _b_rec.get("roi") or run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
               tier="recent", source="SAVINGS_LEDGER")
     cost_q = _b_rec.get("appq") or run(mart_sql.app_cost_last_30d(), page=_PAGE, key="brief_app_cost",
@@ -365,6 +392,17 @@ def render() -> None:
                 "help": "Open ESTIMATED items awaiting the monthly verifier. "
                         "Shown separately from verified savings.",
             })
+    elif not roi.ok:
+        # R2-083: a failed SAVINGS_LEDGER read keeps its tile as a dash (the page's own rule: a dash means
+        # unreachable, not zero) instead of vanishing; it reaches the Executive export through `kpis` too.
+        secondary.append({
+            "label": "Verified savings run-rate", "value": "—", "severity": "warn",
+            "delta": ("savings ledger not installed" if is_setup_absence(roi.error_kind)
+                      else "savings ledger unavailable"),
+            "delta_color": "off",
+            "help": "The savings ledger could not be read, so neither the verified run-rate nor the estimated "
+                    "pipeline is shown. A dash means unavailable, not zero.",
+        })
     _inc_company = company
     _inc = _b_live.get("inc") or run(mart_sql.open_incidents(5, _inc_company), page=_PAGE,
                key=f"brief_incidents_{_inc_company}", tier="live",
@@ -467,6 +505,13 @@ def render() -> None:
         else:
             brief_spend_series = [safe_float(value) * rate
                                   for value in spark_df["CREDITS_BILLED"].tolist()]
+    elif not spend.ok:
+        # R2-083: the spark no longer vanishes silently on a failed read (the export notes it below).
+        if is_setup_absence(spend.error_kind):
+            empty_state("needs_setup", "The 14-day spend trend appears once FACT_METERING_DAILY is installed.")
+        else:
+            empty_state("unavailable", "Spend, 14 days unavailable — the daily metering read failed.",
+                        detail=spend.error)
 
     # N2: a critical that paged nobody hides behind a green board — call it out
     # on the one surface a half-awake on-call actually reads.
@@ -624,6 +669,11 @@ def render() -> None:
                 with st.popover("Show the withheld AI draft"):
                     st.caption("Not sent: at least one figure did not match the exec-board facts.")
                     st.markdown(md_dollars(str(drow.get("AI_BODY") or "")))
+    elif not digest.ok and not is_setup_absence(digest.error_kind):
+        # R2-083: a failed digest read says so; a successful empty read (no digest yet) and a not-installed
+        # digest table stay quiet -- the narrative is optional context below the numbers.
+        empty_state("unavailable", "AI morning narrative unavailable — the digest read failed.",
+                    detail=digest.error)
 
     _brief_view = ExecutiveSummaryView(
         company=company,
@@ -641,7 +691,8 @@ def render() -> None:
             "MTD spend, contract, savings, and freshness are account-wide unless the card says otherwise.",
             f"Alerts, incidents, and the action queue honor {company} plus account-level items.",
             "Metering can lag up to 24 hours. A dash means telemetry was unavailable, not zero.",
-        ),
+        ) + (("The 14-day spend trend could not be read, so it is not included.",)    # R2-083
+             if not spend.ok else ()),
         title="Morning brief",
     )
     with st.expander("Executive export", expanded=False):

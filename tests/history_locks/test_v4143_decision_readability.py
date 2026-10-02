@@ -27,7 +27,8 @@ def test_read_model_contracts_are_complete_unique_and_truthful() -> None:
         "control_pulse",
     }
     assert get_contract(" ENTITY_360 ").summary_reads == 4
-    assert get_contract("action_center").summary_reads == 2
+    # v4.608: 3 = the queue + Held? + the 'Assigned to me' one-row read of an open item someone else owns
+    assert get_contract("action_center").summary_reads == 3
     assert get_contract("workload_portfolio").evidence_reads == 4
     assert get_contract("control_pulse").trigger == "the pulse opens"
     assert get_contract("task_run").trigger == "explicit run-evidence toggle"

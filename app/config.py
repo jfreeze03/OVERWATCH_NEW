@@ -7,7 +7,7 @@ page, not in code.
 
 from __future__ import annotations
 
-APP_VERSION = "4.607.0"
+APP_VERSION = "4.608.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -88,8 +88,9 @@ DEFAULT_SETTINGS = {
     "SCORE_PTS_SPILL_PER_GB": "0.5",
     "SCORE_PTS_PER_STALE_SOURCE": "4",
     "SCORE_PTS_PER_OPEN_ACTION": "1.5",
-    # Fact retention (SP_PURGE_FACTS, monthly). Floors in the proc: 90/365/30
-    # (daily floor raised 180->365 in V054 so long windows always have history).
+    # Fact retention (SP_PURGE_FACTS, monthly). Floors in the proc (hourly/daily/error log/app usage):
+    # 90/365/30/90 (daily floor raised 180->365 in V054 so long windows always have history); the Admin
+    # editors use the same floors (admin._PURGE_FLOORS).
     "FACT_RETENTION_DAYS_HOURLY": "400",
     "FACT_RETENTION_DAYS_DAILY": "800",
     "ERROR_LOG_RETENTION_DAYS": "180",

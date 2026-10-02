@@ -68,7 +68,8 @@ class MonthEndForecast:
     basis: str = ""
 
 
-def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear") -> MonthEndForecast:
+def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear",
+                         complete_before: date | None = None) -> MonthEndForecast:
     """Project month-end spend from a ``DAY``/``USD`` daily frame.
 
     Linear engine: complete-day MTD + a robust (Theil-Sen) daily trend over the
@@ -76,6 +77,12 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     engine: complete-day MTD + per-weekday means over >= 4 weeks. Band: residual
     std (ddof=1) against the fitted line, scaled by sqrt(remaining days) and
     inflated for parameter uncertainty and within-week autocorrelation (rec#15).
+
+    ``complete_before`` (R2-050): the first day that is not complete (default ``today``). A
+    FACT_METERING_DAILY frame passes formulas.metering_complete_before: before the 06:45 Central load its
+    newest row (yesterday) is still the partial in-progress UTC day, so it is projected with today and the
+    rest of the month instead of being counted as a whole day (on Sep 15 at 03:00 a flat $1,000/day month
+    projected $29,450, not $30,000). ``mtd`` (spend so far) still counts every row up to today.
     """
     if daily is None or daily.empty or not {"DAY", "USD"}.issubset(daily.columns):
         return MonthEndForecast(ok=False, basis="No daily spend history loaded.")
@@ -86,17 +93,21 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     frame = frame.dropna(subset=["DAY"]).sort_values("DAY")
 
     month_start = today.replace(day=1)
+    cut = today if complete_before is None else min(complete_before, today)   # first incomplete day
+    # The projected window starts at the first incomplete day of THIS month: a still-loading last day of the
+    # prior month (the 1st, before the load) is left out of the complete baseline but is no October spend.
+    start = max(cut, month_start)
     mtd = float(frame[(frame["DAY"] >= month_start) & (frame["DAY"] <= today)]["USD"].sum())
     # codex#16: project from COMPLETE-day actuals and count TODAY as a projected (still
     # incomplete) day. `mtd` already includes today's PARTIAL actual, but the projection
     # only added days AFTER today — so today's remaining hours were never estimated and the
     # month-end number ran low all day. `mtd` stays the displayed spend-so-far.
-    mtd_complete = float(frame[(frame["DAY"] >= month_start) & (frame["DAY"] < today)]["USD"].sum())
+    mtd_complete = float(frame[(frame["DAY"] >= month_start) & (frame["DAY"] < start)]["USD"].sum())
 
     # N1: today is a PARTIAL day — averaging it into the daily rate biases every
     # projection low (same class as the pace/anomaly partial-day fixes). MTD above
     # keeps today's actual; the forward rate is built only from completed days.
-    complete = frame[frame["DAY"] < today]
+    complete = frame[frame["DAY"] < cut]
     baseline = complete.tail(_BASELINE_DAYS)
     if len(baseline) < _MIN_POINTS:
         return MonthEndForecast(
@@ -106,7 +117,8 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
         )
 
     _, _, remaining = month_days(today)
-    project_days = remaining + 1   # codex#16: today (incomplete) + every day after it
+    # codex#16: today (incomplete) + every day after it; R2-050: plus any still-loading day before today
+    project_days = remaining + 1 + (today - start).days
 
     # r33: a completed day MISSING from the frame is counted in NEITHER mtd_complete NOR
     # `add` (which starts at today), so the month-end number reads low by that day's spend.
@@ -119,16 +131,16 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     # to a DENSE window (majority of covered days present) so a genuinely sparse/idle account
     # is not handed a fabricated month.
     cover_start = max(month_start, frame["DAY"].min())
-    covered_days = max(0, (today - cover_start).days)
-    present_days = int(((frame["DAY"] >= cover_start) & (frame["DAY"] < today)).sum())
+    covered_days = max(0, (start - cover_start).days)
+    present_days = int(((frame["DAY"] >= cover_start) & (frame["DAY"] < start)).sum())
     missing_days = max(0, covered_days - present_days)
     # Judge density over at least the trailing baseline window, not month-to-date alone: on the
     # 2nd with the 1st lagging, MTD is 0 of 1 days present and the guard refused to fill the one
     # lagged day, so month-end read a day low on the first days of every month. Only the MTD
     # missing days are filled; the wider window only decides whether the account is dense.
-    dens_start = max(frame["DAY"].min(), today - timedelta(days=max(covered_days, _BASELINE_DAYS)))
-    dens_days = max(1, (today - dens_start).days)
-    dens_present = int(((frame["DAY"] >= dens_start) & (frame["DAY"] < today)).sum())
+    dens_start = max(frame["DAY"].min(), start - timedelta(days=max(covered_days, _BASELINE_DAYS)))
+    dens_days = max(1, (start - dens_start).days)
+    dens_present = int(((frame["DAY"] >= dens_start) & (frame["DAY"] < start)).sum())
     gap_fill = (missing_days * float(baseline["USD"].mean())
                 if missing_days and dens_present >= dens_days / 2 else 0.0)
 
@@ -144,7 +156,7 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
         resid = frame_b["USD"] - frame_b["DOW"].map(dow_mean)
         resid_std = float(resid.std(ddof=1)) if len(frame_b) > 1 else 0.0
         fallback_rate = float(seasonal_baseline["USD"].mean())
-        future = [today + timedelta(days=i) for i in range(remaining + 1)]  # codex#16: incl TODAY
+        future = [start + timedelta(days=i) for i in range(project_days)]  # codex#16: incl TODAY
         add = sum(float(dow_mean.get(d.weekday(), fallback_rate)) for d in future)
         # month-end is monotonic: it can never fall below spend-to-date (mtd, which
         # already includes today's partial). Flooring here keeps the point estimate
@@ -160,7 +172,8 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
             daily_rate_usd=round(add / project_days, 2) if project_days else 0.0,
             days_remaining=remaining,
             basis=f"Seasonal engine: day-of-week means over {len(frame_b)}d "
-                  f"(>= 4 samples/weekday), today + {remaining} remaining days per weekday.",
+                  f"(>= 4 samples/weekday), {_projected_span(start, today, remaining, project_days)} per weekday."
+                  + _loading_note(cut, start, today),
         )
 
     # Linear engine (rec#15): a robust Theil-Sen daily trend, not a flat mean —
@@ -173,18 +186,19 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     if len(baseline):
         _origin = baseline["DAY"].iloc[0]
         xs = [float((_d - _origin).days) for _d in baseline["DAY"]]
-        today_x = float((today - _origin).days)
+        start_x = float((start - _origin).days)
     else:
         xs = []
-        today_x = 0.0
+        start_x = 0.0
     ys = [safe_float(value) for value in baseline["USD"]]
     slope, intercept = _robust_slope(xs, ys)
     # Anchor the forward window on TODAY (k=0 is today, the incomplete day), NOT the last PRESENT
     # complete day: metering lags ~1-2d so the last present day is routinely today-2, and a last_x
     # anchor would project days that gap_fill ALREADY estimates (double-count) and drop the month
     # tail — gap_fill's own r33 comment says `add` "starts at today" (bug-hunt wdmz68vd4). Matches
-    # the seasonal engine's today-anchored future window; with no trailing gap today_x == last_x+1.
-    fitted_future = [max(0.0, intercept + slope * (today_x + k)) for k in range(project_days)]
+    # the seasonal engine's today-anchored future window; with no trailing gap start_x == last_x+1.
+    # R2-050: k=0 is the first incomplete day (today, or the still-loading day before it).
+    fitted_future = [max(0.0, intercept + slope * (start_x + k)) for k in range(project_days)]
     add = sum(fitted_future)
     # rec#15 guard: a steep downward trend can extrapolate below spend-to-date (and
     # every clamped-to-0 future day drives `add` toward 0). Month-end is monotonic —
@@ -204,8 +218,35 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
         daily_rate_usd=round(add / project_days, 2) if project_days else 0.0,
         days_remaining=remaining,
         basis=f"Linear engine: complete-day MTD + robust {_BASELINE_DAYS}d trend x "
-              f"(today + {remaining} remaining) days.",
+              f"{_projected_span(start, today, remaining, project_days)}." + _loading_note(cut, start, today),
     )
+
+
+def _projected_span(start: date, today: date, remaining: int, project_days: int) -> str:
+    """The projected days in the basis: 'today + N remaining days', or -- when not-yet-loaded days before today
+    are projected too (R2-050) -- every projected day from the first one, so the count matches the projection."""
+    if start >= today:
+        return f"today + {remaining} remaining days"
+    return f"{project_days} days ({start.isoformat()} through month end)"
+
+
+def _loading_note(cut: date, start: date, today: date) -> str:
+    """R2-050: name the newest loaded metering day and the days the projection estimated instead of counting.
+
+    ``cut`` is the first incomplete day: for a FACT_METERING_DAILY frame (formulas.metering_complete_before) the
+    newest loaded DAY, which was still in progress at its 06:45 Central load. ``start`` is the first projected day
+    of this month. After a failed or late load the newest row can be days old, or in the prior month, so the note
+    names it and the whole projected span rather than calling ``start`` the newest metering day."""
+    if start >= today:
+        return ""
+    last = today - timedelta(days=1)
+    span = (f"{start.isoformat()} is" if start == last
+            else f"{start.isoformat()} to {last.isoformat()} are")
+    if cut < start:
+        return (f" No day of this month has loaded yet (metering is loaded through {cut.isoformat()}, still in "
+                f"progress at its 06:45 Central load), so {span} projected with today.")
+    return (f" Metering is loaded through {cut.isoformat()}, which was still in progress at its 06:45 Central "
+            f"load, so {span} projected with today rather than counted as complete.")
 
 
 def contract_pace(

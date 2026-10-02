@@ -17,7 +17,7 @@ import streamlit as st
 
 from app.core.errors import safe_page
 from app.core.query import cache_scope, run, run_batch
-from app.core.result import is_setup_absence
+from app.core.result import is_schema_drift, is_setup_absence
 from app.core.state import filters, request_navigation
 from app.data import cortex_sql, insights_sql, mart27_sql, security_sql
 from app.logic.date_windows import is_prior_month_window
@@ -265,17 +265,31 @@ def _render_admin_network_policy(company: str) -> None:
     result_caption(npc)
 
 
-def _service_user_names() -> set[str] | None:
-    """rank 9: service-typed user names for the dormant/reawakening bands. None = TYPE unreadable."""
+def _service_user_names() -> tuple[set[str] | None, str]:
+    """rank 9: service-typed user names for the dormant/reawakening bands, plus the read's error
+    kind. Names are None when the read failed: the kind says WHY (R2-081), so the split note can
+    tell an unreadable USERS.TYPE (an absence, or a missing column) from a failed read."""
     svc = run(security_sql.service_users(), page=_PAGE, key="service_users", tier="hourly",
               probe=True, source="USERS.TYPE (service accounts)")
     if not svc.ok:
-        return None
-    return set() if svc.empty else {str(n) for n in svc.df["USER_NAME"]}
+        return None, str(svc.error_kind or "")
+    return (set() if svc.empty else {str(n) for n in svc.df["USER_NAME"]}), ""
+
+
+def _service_split_note(error_kind: str) -> str:
+    """R2-081: why the service-account split is missing, worded by the failure KIND. 'USERS.TYPE
+    isn't readable here' is an absence claim, true only for a setup absence or a missing column (a
+    probe read leaves the latter unlogged, so this note is its only record); a timeout or any other
+    failure is a failed read, never an edition or grant claim."""
+    if is_setup_absence(error_kind) or is_schema_drift(error_kind):
+        return ("Service-account split unavailable (USERS.TYPE isn't readable here), so every "
+                "account is listed together.")
+    return ("Service-account split unavailable (the service-account read failed; retry with Refresh "
+            "data), so every account is listed together.")
 
 
 def _banded_user_tables(ranked: pd.DataFrame, cols: list[str], *, key: str,
-                        service_names: set[str] | None) -> None:
+                        service_names: set[str] | None, service_error_kind: str = "") -> None:
     """rank 9: person accounts first, then service accounts in their own band; both keep the
     ranked worst-first order. Index-reset so the positional row drill maps back."""
     people = ranked[ranked["ACCOUNT_BAND"] == "Person"].reset_index(drop=True)
@@ -292,8 +306,7 @@ def _banded_user_tables(ranked: pd.DataFrame, cols: list[str], *, key: str,
         st.caption("Integrations sign in on their own schedule — confirm with the owning application "
                    "before disabling.")
     if service_names is None:
-        st.caption("Service-account split unavailable (USERS.TYPE isn't readable here), so every "
-                   "account is listed together.")
+        st.caption(_service_split_note(service_error_kind))
 
 
 def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
@@ -722,7 +735,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             if res.ok and res.empty:
                 empty_state("clean", "No enabled users dormant 90+ days in this scope.")
             elif guard(res, ""):
-                _svc = _service_user_names()
+                _svc, _svc_kind = _service_user_names()
                 ranked = with_account_band(dormant_severity(res.df), _svc)
                 high = ranked[ranked["SEVERITY"] == "High"]
                 n_svc = int((ranked["ACCOUNT_BAND"] == "Service").sum())
@@ -737,7 +750,8 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                 ])
                 _banded_user_tables(ranked, ["SEVERITY", "USER", "USER_NAME", "EMAIL", "DAYS_DORMANT",
                                              "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"],
-                                    key=f"sec_dormant_{company}", service_names=_svc)
+                                    key=f"sec_dormant_{company}", service_names=_svc,
+                                    service_error_kind=_svc_kind)
                 st.caption("Review with the owner before disabling.")
                 result_caption(res)
 
@@ -758,7 +772,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             if wres.ok and wres.empty:
                 empty_state("clean", "No dormant account woke up in the last 7 days in this scope.")
             elif guard(wres, ""):
-                _svc = _service_user_names()
+                _svc, _svc_kind = _service_user_names()
                 wranked = with_account_band(reawakening_severity(wres.df), _svc)
                 whigh = wranked[wranked["SEVERITY"] == "High"]
                 n_wsvc = int((wranked["ACCOUNT_BAND"] == "Service").sum())
@@ -775,7 +789,8 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                 _banded_user_tables(wranked, ["SEVERITY", "USER", "USER_NAME", "EMAIL", "GAP_DAYS",
                                               "LAST_ACTIVE_BEFORE", "WAKE_LOGIN", "CLIENT_IP", "AUTH_FACTOR",
                                               "ROLE_COUNT", "ROLES"],
-                                    key=f"sec_reawakening_{company}", service_names=_svc)
+                                    key=f"sec_reawakening_{company}", service_names=_svc,
+                                    service_error_kind=_svc_kind)
                 st.caption("Review with the owner; a >365-day silence shows a single login here "
                            "(gap measured from account creation).")
                 result_caption(wres)
@@ -844,6 +859,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
         _utot = run(security_sql.unload_activity_totals(days, company, database, schema_contains, bounds=bounds),
                     page=_PAGE, key=f"unload_tot_{company}_{days}_{database}_{schema_contains}{_lm}",
                     tier="recent", source="QUERY_HISTORY (unload window totals, uncapped)")
+        _u_floor, _u_help = "", ""
         if _utot.usable():
             _ur = _utot.df.iloc[0]
             _u_runs, _u_gb = int(safe_float(_ur.get("UNLOADS"))), float(safe_float(_ur.get("GB_OUT")))
@@ -851,13 +867,24 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
         else:
             _u_runs, _u_gb = int(udf["UNLOADS"].sum()), float(udf["GB_OUT"].sum())
             _u_users = int(udf["USER_NAME"].nunique())
+            # R2-082: below the feed's row cap these sums ARE the window totals; at the cap they are
+            # sums over the newest UNLOAD_FEED_LIMIT (day, user, role) groups only, so say so instead
+            # of presenting an understated total as the window's.
+            if len(udf) >= security_sql.UNLOAD_FEED_LIMIT:
+                _u_floor = "≥ "
+                _u_help = (f"Lower bound: the uncapped window-totals read failed, so this sums only the newest "
+                           f"{security_sql.UNLOAD_FEED_LIMIT} day/user/role groups in the table below.")
         kpi_row([
-            {"label": "Unload runs", "value": f"{_u_runs}"},
+            {"label": "Unload runs", "value": f"{_u_floor}{_u_runs}", "help": _u_help},
             # humanize_gb so this MB/GB/TB scale matches the Egress KPI + the table's
             # auto-humanized GB_OUT column (was a raw 1-dp GB float).
-            {"label": "GB written out", "value": humanize_gb(_u_gb)},
-            {"label": "Users unloading", "value": f"{_u_users}"},
+            {"label": "GB written out", "value": f"{_u_floor}{humanize_gb(_u_gb)}", "help": _u_help},
+            {"label": "Users unloading", "value": f"{_u_floor}{_u_users}", "help": _u_help},
         ])
+        if _u_floor:
+            _u_err = (str(_utot.error or "").strip().splitlines() or ["the totals read failed"])[0]
+            st.caption(f"Window totals unavailable ({_u_err}); the tiles are lower bounds from the newest "
+                       f"{security_sql.UNLOAD_FEED_LIMIT} groups shown below.")
         styled_table(with_user_names(udf, _PAGE), height=320, column_config=profile_config,
                      sort_label="day then GB written")
         st.caption("Every name here should have a business reason to move data out. New names are the finding.")
@@ -914,8 +941,12 @@ def _exposure_tab() -> None:
     alert on new or broadened outbound-share exposure is still the deferred
     owner-migration half of this finding."""
     st.caption("Outbound shares are the surface where this account's data leaves it. Every consumer here should be a known partner.")
+    # R2-102: SHOW SHARES is real time and this inventory names "a new consumer account or a newly
+    # published listing" as the finding, so it must not sit in the 4h metadata cache: a share that
+    # gained a consumer at 10:00 read unchanged until 13:00 in a session loaded at 09:00. 'recent'
+    # (5 min) refetches it without re-issuing SHOW on every tab switch.
     shares = run(security_sql.show_shares_sql(), page=_PAGE, key="sec_shares",
-                 tier="metadata", source="SHOW SHARES", max_rows=0)
+                 tier="recent", source="SHOW SHARES", max_rows=0)
     if shares.ok and shares.empty:
         empty_state(
             "needs_setup",
@@ -972,7 +1003,7 @@ def _exposure_tab() -> None:
             # Metadata SHOW (not a usage-view scan), interaction-gated. No LIMIT
             # is legal on SHOW, so max_rows=0 — mirrors show_shares_sql's run pattern.
             g = run(security_sql.show_grants_to_share_sql(share), page=_PAGE,
-                    key=f"sec_share_grants_{share}", tier="metadata",
+                    key=f"sec_share_grants_{share}", tier="recent",   # R2-102: real-time SHOW, as above
                     source=f"SHOW GRANTS TO SHARE {share}", max_rows=0)
             if g.ok and g.empty:
                 empty_state("needs_setup",
@@ -1319,9 +1350,14 @@ def _trust_center_tab() -> None:
         fdf = delta.df.copy()
         sev = fdf["SEVERITY"].astype(str).str.upper()
         active = pd.to_numeric(fdf["CURRENT_COUNT"], errors="coerce").fillna(0).gt(0)
-        worsening = int(
-            pd.to_numeric(fdf["COUNT_DELTA"], errors="coerce").fillna(0).gt(0).sum()
-        )
+        # R2-032: only a scanner that HAD a prior snapshot can worsen. V_SECURITY_TRUST_DELTA sets
+        # COUNT_DELTA = CURRENT - COALESCE(PRIOR, 0), so a brand-new scanner (CHANGE_STATE 'NEW', no
+        # prior day: the first snapshot, or a newly enabled package) read as "worsening" by its whole
+        # at-risk count. Count REGRESSED only (the [29] SEC_TRUST_REGRESSION definition: a first
+        # snapshot never raises) and name new at-risk scanners separately.
+        _state = fdf["CHANGE_STATE"].astype(str).str.upper()
+        worsening = int(_state.eq("REGRESSED").sum())
+        _new_at_risk = int((_state.eq("NEW") & active).sum())
         kpi_row([
             {"label": "Scanners tracked", "value": f"{len(fdf)}"},
             {"label": "Critical", "value": f"{int(((sev == 'CRITICAL') & active).sum())}",
@@ -1329,7 +1365,11 @@ def _trust_center_tab() -> None:
             {"label": "High", "value": f"{int(((sev == 'HIGH') & active).sum())}",
              "delta_color": "inverse" if ((sev == "HIGH") & active).any() else "off"},
             {"label": "Worsening scanners", "value": f"{worsening}",
-             "delta_color": "inverse" if worsening else "off"},
+             "delta_color": "inverse" if worsening else "off",
+             "help": "Scanners whose at-risk count rose since their prior snapshot (REGRESSED). A scanner "
+                     "with no prior snapshot is new, not worsening.",
+             "sub": (f"+{_new_at_risk} new scanner{'s' if _new_at_risk != 1 else ''} with entities at risk"
+                     if _new_at_risk else "")},
         ])
         styled_table(fdf, height=320, sort_label="severity then absolute finding change")
         result_caption(delta)
@@ -1393,6 +1433,10 @@ def _governance_score_panel():
     # panel below (r14 #18) — the 3d + 90d double-read collapsed.
     post = run(mart27_sql.security_posture(90), page=_PAGE, key="gov_posture", tier="recent",
                source="MART_SECURITY_POSTURE_DAILY (daily post-06:45 snapshot, 90d shared)")
+    # R2-080: the reads that actually SERVED the score's inputs, in order. run() keeps the caller's
+    # source on a FAILED result, so naming post.source after a posture failure credited the read that
+    # failed, and a complete score named no source at all (house law 8: say which path served).
+    served: list[str] = []
     if post.usable():
         pdf_ = post.df.copy()
         snap = pdf_[pdf_["DAY"] == pdf_["DAY"].max()].set_index("METRIC")["VALUE"]
@@ -1412,6 +1456,7 @@ def _governance_score_panel():
                 # V041 R11 posture row; the WH_NO_MONITOR twin is ignored
                 # since v4.45 (owner runs no resource monitors).
                 inputs["warehouses_no_autosuspend"] = int(float(snap.get("WH_NO_AUTOSUSPEND") or 0))
+            served.append(str(post.source or "posture snapshot"))
     whs = None
     if "warehouses_no_autosuspend" not in inputs:
         whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="gov_show_wh",
@@ -1431,12 +1476,15 @@ def _governance_score_panel():
                 "expiring_credentials": row.get("EXPIRING_CREDENTIALS"),
                 "breakglass_grants_30d": row.get("BREAKGLASS_GRANTS_30D"),
             }.items() if v is not None and not (isinstance(v, float) and pd.isna(v))}
+            if inputs:
+                served.append(str(counts.source or "live fallback"))
     if whs is not None and whs.ok and not whs.empty:
         wdf = whs.df.copy()
         wdf.columns = [str(c).lower() for c in wdf.columns]
         if "auto_suspend" in wdf.columns:
             asus = pd.to_numeric(wdf["auto_suspend"], errors="coerce").fillna(0)
             inputs["warehouses_no_autosuspend"] = int((asus <= 0).sum())
+            served.append(str(whs.source or "SHOW WAREHOUSES"))
     # C8: fail the governance score OPEN-EYED, the way platform_score fails closed.
     # An input that did not resolve — posture mart absent AND the live fallback timed
     # out, or the SHOW WAREHOUSES read refused — contributes NO penalty, which is
@@ -1462,11 +1510,14 @@ def _governance_score_panel():
                     if unresolved else "")},
         {"label": "Deductions", "value": f"{len(drift.drivers)}"},
     ])
+    _served_txt = "Source: " + " + ".join(served) + "."
     if unresolved:
         st.caption("Incomplete: " + ", ".join(unresolved)
                    + " did not resolve, and an unresolved signal deducts nothing. Treat "
                      f"{drift.score}/100 as a CEILING — the real drift can only be worse. "
-                     "Source: " + (post.source or "posture snapshot") + ".")
+                   + _served_txt)
+    else:
+        st.caption(_served_txt)
     if drift.drivers:
         with st.expander(f"Governance deductions ({drift.score}/100 · {drift.state})"):
             for d in drift.drivers:
@@ -1748,9 +1799,22 @@ def _domain_covered(result, domain: str) -> bool:
 
 def _posture_trend_panel(trend) -> None:
     """Posture as direction, not just today (Codex r6 #15) — shares the
-    header's single 90-day posture read (r14 #18); renders nothing until
-    the daily loader has 2+ days of history."""
-    if trend is None or not trend.usable():
+    header's single 90-day posture read (r14 #18). A failed read says so
+    (R2-079: it used to return silently, so the panel and its toggle just
+    vanished); an empty mart or a single day of history says the trend
+    unlocks after the daily loader has 2+ days."""
+    if trend is None:
+        return
+    if not trend.ok:
+        if is_setup_absence(trend.error_kind):
+            empty_state("needs_setup", "The 90-day posture trend needs MART_SECURITY_POSTURE_DAILY, which "
+                        "isn't readable here yet.")
+        else:
+            empty_state("unavailable", "The 90-day posture trend could not be read.", detail=trend.error)
+        return
+    if trend.empty:
+        empty_state("no_data_yet", "Posture trend unlocks after the daily posture loader has run "
+                    "(MART_SECURITY_POSTURE_DAILY is empty).")
         return
     pdf = trend.df.copy()
     if pdf["DAY"].nunique() < 2:
@@ -2109,7 +2173,21 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         page=_PAGE, key=f"ddl_fact_{company}_{days}_{database}_{schema_contains}{_lm}",
         tier="hourly", source="FACT_SECURITY_CHANGE (hourly)", probe=True,
     )
+    # Both paths serve the same capped window (90 days; calendar bounds capped too) — the live
+    # fallback used to cap at 30 under the same label, so days 31-90 vanished on a stale extract.
+    _cd, _cb = capped_window(days, bounds, 90)
     _from_fact = fact.ok and _domain_covered(coverage, "CHANGE RISK")
+    if _from_fact:
+        # CHANGE RISK COMPLETE proves the extract and the fact were stamped in the last 3h, not that
+        # the fact covers this window: it refills only from the 72h extract, so an outage past 72h
+        # leaves a permanent hole that a fresh stamp cannot see. Require every served day, as the
+        # login facts do; a hole serves the live read (no lying 'No DDL/DCL changes' or zero KPIs).
+        span = run(
+            security_sql.security_change_fact_coverage(_cd, bounds=_cb), page=_PAGE,
+            key=f"sec_change_fact_span_{_cd}{_lm}", tier="hourly",
+            source="FACT_SECURITY_CHANGE coverage (served window)", probe=True,
+        )
+        _from_fact = fact_coverage_complete(span, coverage_required_days(_cd, _cb))
     if _from_fact:
         res = fact
     else:
@@ -2118,9 +2196,6 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             page=_PAGE, key=f"ddl_{company}_{days}_{database}_{schema_contains}{_lm}",
             tier="recent", source="ACCOUNT_USAGE.QUERY_HISTORY (coverage fallback)",
         )
-    # Both paths serve the same capped window (90 days; calendar bounds capped too) — the live
-    # fallback used to cap at 30 under the same label, so days 31-90 vanished on a stale extract.
-    _cd, _cb = capped_window(days, bounds, 90)
     _ddl_txt = served_window_text(_cd, _cb)
     _ddl_cap = (" (window capped at the last 90 days)" if window_was_capped(days, bounds, _cb, 90) else "")
     # No early return on an empty window (v4.49): the bare `return` here used

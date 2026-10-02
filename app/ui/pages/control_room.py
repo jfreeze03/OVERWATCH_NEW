@@ -91,15 +91,18 @@ _PAGE = "Control Room"
 
 
 
-def _incident_open_family_inner(company: str, fam: str, guard_entity_filter: str) -> str:
+def _incident_open_family_inner(company: str, fam: str, guard_entity_filter: str,
+                                select: str = "1") -> str:
     """The 'an OPEN/MITIGATED incident already holds a member alert of this (family,
     company, entity)' predicate. SHARED by the declare INSERT's dedup guard (as
-    WHERE NOT EXISTS (...)) and the pre-declare check (as SELECT EXISTS (...)), so the
-    two can never drift. `fam` and `guard_entity_filter` are already sql_literal-safe."""
+    WHERE NOT EXISTS (...)) and the pre-declare check (as SELECT EXISTS (...), plus the
+    blocking incident's id through ``select``), so the two can never drift. `fam` and
+    `guard_entity_filter` are already sql_literal-safe; ``select`` is a fixed expression
+    from this module, never user input."""
     from app.config import core_object
     from app.core.sqlsafe import sql_literal
     return (
-        f"SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
+        f"SELECT {select} FROM {core_object('INCIDENT_MEMBERS')} m "
         f"JOIN {core_object('INCIDENTS')} i ON i.INCIDENT_ID = m.INCIDENT_ID "
         f"JOIN {core_object('ALERT_EVENTS')} a ON a.EVENT_ID = m.REF_ID "
         "WHERE m.MEMBER_KIND = 'ALERT' AND i.STATUS IN ('OPEN', 'MITIGATED') "
@@ -110,10 +113,13 @@ def _incident_open_family_inner(company: str, fam: str, guard_entity_filter: str
 
 
 def _incident_family_open_check_sql(company: str, proposal_key: str) -> str:
-    """SELECT ALREADY_OPEN — whether declaring this proposal would be a silent no-op
-    because an OPEN/MITIGATED incident already covers its (family, company, entity). The
-    declare runs this FIRST so a duplicate reports an honest "already open" instead of a
-    false "declared" (the guarded INSERT no-ops and execute_statement cannot see 0 rows)."""
+    """SELECT ALREADY_OPEN, OPEN_INCIDENT_ID — whether declaring this proposal would be a silent
+    no-op because an OPEN/MITIGATED incident already covers its (family, company, entity), and
+    which incident that is (the newest by DETECTED_AT among the matches). The declare runs this
+    FIRST so a duplicate reports an honest "already open" instead of a false "declared" (the
+    guarded INSERT no-ops and execute_statement cannot see 0 rows). R2-029: the proposal's alerts
+    are unlinked by construction (INCIDENT_PROPOSALS keeps only alerts no incident holds) and the
+    no-op links none of them, so the message names the blocking incident and says so."""
     from app.core.sqlsafe import sql_literal
     proposal_parts = str(proposal_key).split("|", 3)
     fam = sql_literal(proposal_parts[0])
@@ -123,7 +129,29 @@ def _incident_family_open_check_sql(company: str, proposal_key: str) -> str:
             "AND UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2)) = "
             f"UPPER({sql_literal(proposal_parts[3])}) "
         )
-    return f"SELECT EXISTS ({_incident_open_family_inner(company, fam, guard_entity_filter)}) AS ALREADY_OPEN"
+    exists = _incident_open_family_inner(company, fam, guard_entity_filter)
+    blocker = _incident_open_family_inner(company, fam, guard_entity_filter,
+                                          select="MAX_BY(i.INCIDENT_ID, i.DETECTED_AT)")
+    return f"SELECT EXISTS ({exists}) AS ALREADY_OPEN, ({blocker}) AS OPEN_INCIDENT_ID"
+
+
+def _family_open_message(open_incident_id: object, alerts: object) -> str:
+    """R2-029: the declare no-op's message. The old text claimed the proposal's alerts were linked there,
+    but a proposal holds only alerts NO incident holds (V072 raw_alerts) and the no-op links none of them
+    -- nothing attaches them later either (only a CRITICAL of the same company can auto-attach). So name
+    the blocking incident, say these alerts are NOT linked, and give the forward-only way out: close that
+    incident if it is done, then declare again for the recurrence."""
+    _raw = open_incident_id
+    _iid = "" if _raw is None or (isinstance(_raw, float) and _raw != _raw) else str(_raw).strip()
+    _n = int(safe_float(alerts)) if alerts is not None else 0
+    _which = f" ({_iid})" if _iid else ""
+    _these = ("the 1 alert in this proposal is" if _n == 1
+              else f"the {_n} alerts in this proposal are" if _n > 1
+              else "this proposal's alerts are")
+    return ("No new incident — this family already has an open incident" + _which
+            + f"; {_these} NOT linked to it (a declare never attaches alerts to an existing incident). If "
+            "that incident is done, close it, then declare again to open one for this recurrence; otherwise "
+            "work these alerts on Alerts.")
 
 
 def _incident_declare_sql(title: str, severity: str, company: str, proposal_key: str) -> list[str]:
@@ -986,14 +1014,19 @@ def render() -> None:
         # sparkline are two FACT_QUERY_HOURLY reads at tier='hourly' — co-schedule them in
         # ONE round trip (mirrors the Operations Queries _mart_pf batch). Each keeps its run()
         # fallback below, so a None/failed prefetch member just re-reads serially.
+        # v4.608 holistic #10 review: read_clock=True although the Pulse reads only the sums -- with
+        # no Database filter this is then the SAME SQL as Overview's score read (days=1, the
+        # company, tier='hourly'), so the two pages share one member-cache entry instead of each
+        # running its own FACT_QUERY_HOURLY read every hour. The three clock columns are inert here.
+        _pulse_sql = mart_sql.fact_query_window_summary(1, company, "", "", f["database"], read_clock=True)
         _pulse_pf = run_batch([
-            {"key": "pulse", "sql": mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
+            {"key": "pulse", "sql": _pulse_sql,
              "source": "FACT_QUERY_HOURLY (mart, loaded hourly)"},
             {"key": "act", "sql": mart_sql.fact_daily_activity(14, company, f["database"]),
              "source": "FACT_QUERY_HOURLY (daily)"},
         ], page=_PAGE, tier="hourly") if not f["schema_contains"] else {}
         if not f["schema_contains"]:
-            m_pulse = _pulse_pf.get("pulse") or run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
+            m_pulse = _pulse_pf.get("pulse") or run(_pulse_sql,
                           page=_PAGE, key=f"pulse_fact_{company}", tier="hourly",
                           source="FACT_QUERY_HOURLY (mart, loaded hourly)")
             if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
@@ -1270,7 +1303,9 @@ def render() -> None:
                 _iid = str(oi.df.iloc[int(sel_i)]["INCIDENT_ID"])
                 mem = run(mart_sql.incident_members_detail(_iid), page=_PAGE,
                           key=f"inc_mem_{_iid[:8]}", tier="live", source="INCIDENT_MEMBERS")
-                if guard(mem, "No members linked yet — link from the timeline drill or proposals."):
+                # R2-029: neither the timeline drill nor the proposals can link to an EXISTING incident, so
+                # the empty state no longer points there.
+                if guard(mem, "No members linked to this incident yet."):
                     def _open_member(_mi: int) -> None:
                         # A linked ALERT member's REF_ID is the ALERT_EVENTS EVENT_ID —
                         # carry it so the click lands on that event's drawer (the Alerts
@@ -1388,8 +1423,8 @@ def render() -> None:
                         # family already open -> the guarded INSERT would no-op; report
                         # honestly, no phantom "declared" toast + no incident_declare event.
                         _ok_all = True   # the action resolved (a no-op); latch closes cleanly
-                        notify(False, "No new incident — this family already has an open "
-                                      "incident; its alerts stay linked there.")
+                        notify(False, _family_open_message(_open_chk.df.iloc[0].get("OPEN_INCIDENT_ID"),
+                                                           _prow.get("ALERTS")))
                     else:
                         # R34: one ATOMIC CALL (SP_INCIDENT_DECLARE, V131) instead of two separate
                         # INSERTs — the incident and its member links commit together or not at all,
@@ -1599,12 +1634,14 @@ def render() -> None:
                        + (" Task failures follow the database filter; alerts and "
                           "spend anomalies don't have database grain." if f["database"] else ""))
             _triage_track_panel(queue, company, can_write=_is_op, tracked_ok=_tracked_ok)
-        # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's
+        # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's warehouse-series
         # COST_ANOMALY_SWEEP events are dropped from THIS feed (they stay on Alerts) —
         # otherwise every spend break arrived twice, once from each scorer, at two
-        # different severities. E5: name the baseline, the scoring minimum and the money
-        # floor OUTSIDE the empty/non-empty branch, because "nothing to triage" is
-        # exactly where the reader most needs to know what was never in scope.
+        # different severities. R2-087: its SERVICE-series events (AUTO_CLUSTERING, the
+        # WAREHOUSE_METERING aggregate) have no in-app twin and stay in the queue. E5: name
+        # the baseline, the scoring minimum and the money floor OUTSIDE the empty/non-empty
+        # branch, because "nothing to triage" is exactly where the reader most needs to know
+        # what was never in scope.
         if wh_daily.usable():
             st.caption(md_dollars(
                 "Spend anomalies: robust median/MAD z-score per warehouse over the last 30 "
@@ -1613,8 +1650,9 @@ def render() -> None:
                 f"{format_usd(ANOMALY_HIGH_EXCESS_USD)}/day over baseline — fixed in-app defaults. "
                 "The server sweep SP_ANOMALY_SWEEP escalates on the configurable "
                 "ALERT_CONFIG.THRESHOLD_NUM, so where that threshold has been tuned the two can "
-                "differ; its COST_ANOMALY_SWEEP events (excluded here, shown on Alerts) stay "
-                f"authoritative. A warehouse needs {ANOMALY_MIN_ACTIVE_DAYS}+ active (non-zero-spend) "
+                "differ; its warehouse-series COST_ANOMALY_SWEEP events (excluded here, shown on "
+                "Alerts) stay authoritative; its service-series events have no in-app twin and stay "
+                f"in the queue. A warehouse needs {ANOMALY_MIN_ACTIVE_DAYS}+ active (non-zero-spend) "
                 "complete days in the 30-day window to be flagged at all"
                 + (f" — {_thin_warehouses} with a material-spend day currently do not and are "
                    "unscored (new or mostly idle)."

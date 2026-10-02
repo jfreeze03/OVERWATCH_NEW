@@ -1211,15 +1211,23 @@ SLA_FORECAST_MIN_SLOPE_SEC = 120.0  # < 2 min/night margin drift is noise, not a
 SLA_FORECAST_FIT_NIGHTS = 14
 
 
+_HHMM_RE = re.compile(r"[0-9]{1,2}:[0-9]{1,2}")
+
+
 def _parse_hhmm(raw: object, fallback: tuple[int, int]) -> tuple[int, int]:
-    """'HH:MM' (24h) -> (hour, minute); fail-closed to ``fallback`` on anything malformed."""
-    try:
-        h_s, m_s = str(raw).strip().split(":", 1)
-        h, m = int(h_s), int(m_s)
-        if 0 <= h <= 23 and 0 <= m <= 59:
-            return h, m
-    except (ValueError, AttributeError, TypeError):
-        pass
+    """'HH:MM' (24h) -> (hour, minute); fail-closed to ``fallback`` on anything malformed.
+
+    R2-108: the grammar is EXACTLY SP_SCAN_ETL_CYCLE's (V156): TRIM (blank spaces only, Snowflake's default),
+    then RLIKE '^[0-9]{1,2}:[0-9]{1,2}$', then the <= 23 / <= 59 bounds. int() alone also took '7: 30', '+7:30',
+    '007:30', '7:3_0' or Unicode digits, so the SLA panel judged 07:30 while the push scan fell back to 07:00
+    and could raise LATE for a night the panel called on time. ``[0-9]``, not ``\\d`` (Unicode digits)."""
+    text = str(raw).strip(" ")
+    if not _HHMM_RE.fullmatch(text):
+        return fallback
+    h_s, m_s = text.split(":", 1)
+    h, m = int(h_s), int(m_s)
+    if h <= 23 and m <= 59:
+        return h, m
     return fallback
 
 

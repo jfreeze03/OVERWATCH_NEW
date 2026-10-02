@@ -242,11 +242,26 @@ _CS_INTENT = "cloud_services_spike_by_query"
 _CS_NO_HASH = "N/A"
 
 
+def _cs_covered_days(shapes: pd.DataFrame, days: int) -> int | None:
+    """R2-012 at the Ask call site: the days MART_CLOUD_SVC_DAILY holds in the asked window when that is
+    FEWER than the window, else None. The statement mart is loaded hourly and never backfilled, so a
+    'this quarter' / 'this year' question sums only the days since its first load. COVERED_DAYS
+    (cloud_svc_top_shapes(coverage=True)) is a window-level, account-wide scalar on every row."""
+    if "COVERED_DAYS" not in shapes.columns or shapes.empty:
+        return None
+    cov = pd.to_numeric(shapes["COVERED_DAYS"].iloc[0], errors="coerce")
+    if pd.isna(cov) or int(cov) >= int(days):
+        return None
+    return int(cov)
+
+
 def _needs_cs_by_query(params: AskParams) -> list[QuerySpec]:
     return [
         QuerySpec(
             key="shapes",
-            sql=mart_sql.cloud_svc_top_shapes(params.days, params.company, params.warehouse),
+            # R2-012: coverage=True adds COVERED_DAYS so the answer can say how many of the asked days the
+            # never-backfilled statement mart actually holds (by-user reads the same mart and window).
+            sql=mart_sql.cloud_svc_top_shapes(params.days, params.company, params.warehouse, coverage=True),
             tier="recent",
         ),
         QuerySpec(
@@ -293,6 +308,14 @@ def _analyze_cs_by_query(
             params=meta,
         )
 
+    # R2-012: never label a sum over the mart's few days with the full asked window. The ratio bullet
+    # (FACT_WAREHOUSE_DAILY) keeps the asked window, so meta["days"] (the page caption) stays params.days.
+    cov_days = _cs_covered_days(s, params.days)
+    win = (f"the {cov_days} days the statement mart holds of the last {params.days}d"
+           if cov_days is not None else f"{params.days}d")
+    if cov_days is not None:
+        meta["covered_days"] = cov_days
+
     # R1-114: MART_CLOUD_SVC_DAILY folds every statement with no parameterized hash into ONE 'n/a' row
     # (COALESCE(hash, 'n/a')), and cloud_svc_top_shapes groups only by hash with ANY_VALUE type/sample,
     # so that row is unrelated statements under one arbitrary sample -- never a single pattern
@@ -314,7 +337,7 @@ def _analyze_cs_by_query(
     n_shapes = len(s)
     if hashed.empty:
         headline = (
-            f"Cloud-services credits over {params.days}d could not be attributed to a query family: "
+            f"Cloud-services credits over {win} could not be attributed to a query family: "
             f"{mixed_label}."
         )
     else:
@@ -332,17 +355,22 @@ def _analyze_cs_by_query(
             share_clause = f"{share * 100:.0f}% of the top {n_shapes} query shapes' CS credits"
         if bool(mixed.iloc[0]):
             headline = (
-                f"The largest cloud-services bucket over {params.days}d is {mixed_label}; the top "
+                f"The largest cloud-services bucket over {win} is {mixed_label}; the top "
                 f"identifiable driver is a {qtype} pattern: {_fmt(cs)} CS credits across {runs:,} runs "
                 f"({share_clause})."
             )
         else:
             headline = (
-                f"The biggest cloud-services driver over {params.days}d is a {qtype} "
+                f"The biggest cloud-services driver over {win} is a {qtype} "
                 f"pattern: {_fmt(cs)} CS credits across {runs:,} runs ({share_clause})."
             )
 
     bullets: list[str] = []
+    if cov_days is not None:
+        bullets.append(
+            f"The statement mart holds {cov_days} of this window's {params.days} days (it is loaded hourly "
+            "and never backfilled), so the shape and user CS-credit figures cover those days only."
+        )
     for i in range(min(3, len(s))):
         r = s.iloc[i]
         _what = ("Mixed statements (no family hash)" if bool(mixed.iloc[i])

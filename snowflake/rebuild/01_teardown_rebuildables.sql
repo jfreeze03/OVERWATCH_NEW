@@ -28,8 +28,19 @@
 --     warehouse, resource monitor (already dropped by V045), retired roles.
 --
 -- RESTORE
+--   0. Before this file: clone the operator tables (B0 below, or
+--      rebuild/00) and record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS
+--      and resource monitor (docs/FULL_REBUILD.md steps 0-1).
 --   1. Re-run every migration in snowflake/migrations/ in order (V001 through
---      the repo tip), then roles.sql.
+--      the repo tip), then roles.sql. V006-V008 grant to the retired
+--      OVERWATCH_MONITOR / OVERWATCH_OPERATOR roles: create them first
+--      (rebuild/02's replay shim does; roles.sql drops them again).
+--   1b. The replay is not a no-op on the operator data this file keeps: its
+--      one-time statements rewrite route company filters, rule flags and
+--      thresholds and the savings ledger and re-seed deleted rows, and V002
+--      sets WH_ALFA_ADMIN's timeout back to 300 (attaching OVERWATCH_RM until
+--      V045 detaches any resource monitor). Restore the config tables and the
+--      ledger from the clones, and the timeout: docs/FULL_REBUILD.md step 3b.
 --   2. Run snowflake/validate.sql — every row should be OK.
 --   3. Re-create the opt-in objects (email alerts, Teams delivery and its
 --      grants, the drill, the ML forecast): docs/FULL_REBUILD.md step 7b. The

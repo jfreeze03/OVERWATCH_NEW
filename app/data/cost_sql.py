@@ -597,7 +597,14 @@ def object_cost_by_arm(days: int = 30, company: str = "ALL", database: str = "",
     DATABASE_NAME column — the object's database is the FIRST label of
     OBJECT_FQN (``db.schema.object``), which is exactly what the V048 loader
     feeds COMPANY_FOR_DATABASE — so we scope on ``SPLIT_PART(OBJECT_FQN, '.', 1)``
-    rather than a column that does not exist."""
+    rather than a column that does not exist.
+
+    R2-013: LEDGER_START_DAY is the ledger's first loaded day, LEDGER-WIDE (no window, company or
+    Database filter: the loader writes a residual row every day, so the unscoped MIN is loader
+    coverage, while a scoped MIN would read a quiet database as a short ledger -- the R1-016 trap).
+    FACT_OBJECT_COST_DAILY is never backfilled (V048..V139 first-fill 14 days; backfill_365 does not
+    call SP_LOAD_OBJECT_COST), so a 180/365-day or Current-year window can start before it; the
+    panel says how many of the window's days the ledger covers."""
     days = bounded_days(days, 400)
     comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
     _db = str(database or "").strip()
@@ -607,7 +614,8 @@ def object_cost_by_arm(days: int = 30, company: str = "ALL", database: str = "",
     return f"""
 SELECT COST_ARM,
        COUNT(DISTINCT OBJECT_FQN) AS OBJECTS,
-       ROUND(SUM(COALESCE(CREDITS, 0)), 4) AS CREDITS
+       ROUND(SUM(COALESCE(CREDITS, 0)), 4) AS CREDITS,
+       (SELECT MIN(l0.DAY) FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY l0) AS LEDGER_START_DAY
 FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
 WHERE {where}
 GROUP BY COST_ARM

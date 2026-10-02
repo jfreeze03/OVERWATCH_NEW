@@ -227,6 +227,6 @@ def test_easy_wins_wired():
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     # PACE-MTD (round-16): the pace numerator is the COMPLETE-days MTD (today excluded),
     # not the today-inclusive mtd_spend, to match budget_pace_variance's completed denominator
-    assert "budget_pace_variance(_mtd_complete, budget, account_today())" in ov
+    assert "budget_pace_variance(_mtd_complete, budget, account_today(),\n" in ov   # R2-050: + complete_before
     assert "Pace vs budget calendar" in ov
     assert "budget_burndown(" in ov and "Budget burndown" in ov   # #57

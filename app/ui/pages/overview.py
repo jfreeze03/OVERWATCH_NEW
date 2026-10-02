@@ -11,7 +11,9 @@ Contract (the old app broke all four of these):
 from __future__ import annotations
 
 import dataclasses
-from datetime import timedelta
+import math
+import numbers
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -42,6 +44,7 @@ from app.logic.formulas import (
     format_credits,
     format_usd,
     md_dollars,
+    metering_complete_before,
     month_days,
     pct_delta,
     safe_float,
@@ -97,6 +100,88 @@ _SCORE_DRIVER_NAV = {
 # the score, the spike-sized thresholds see spike-sized inputs, and the headline
 # shares the per-day basis of the retro sparkline. 1 = midnight-aligned 24-48h.
 _SCORE_HEALTH_WINDOW_DAYS = 1
+
+
+def _score_window_elapsed_days(now: object, window_days: int = _SCORE_HEALTH_WINDOW_DAYS,
+                               win_start: object = None) -> float:
+    """C8 de-cumulation divisor: the days the score's midnight-aligned window has covered at ``now``.
+
+    The window SQL (mart_sql.fact_query_window_summary -> scope_window_where) is
+    ``HOUR_TS >= DATEADD('day', -window_days, CURRENT_DATE())``. Both ends run on the ACCOUNT clock:
+    CURRENT_DATE() resolves in the account's default TIMEZONE (America/Chicago, the TIMEZONE STANDARD
+    in app/data/common.py) and HOUR_TS is Central wall-clock NTZ (the loader truncates the LTZ
+    START_TIME in a Central session). So ``now`` is an account-clock moment: the window opens
+    ``window_days`` before that day's Central midnight (or at ``win_start`` when the read reported it)
+    and the divisor is (24h + Central hours since midnight) / 24 for the 1-day window. A UTC-anchored
+    divisor (R2-016 / R2-049) read the same steady workload ~1.7x high every Central evening and ~0.85x
+    the rest of the day. This is a WALL-CLOCK span, so on the two DST change days it is an hour off the
+    real time the sums cover; the score prefers the read's READ_ELAPSED_SEC (_score_read_elapsed_days)
+    and lands here only for a row without it. Clamped to [1.0, window_days + 1]: at any read moment the
+    window has covered at least the floor and less than window_days + 1 wall-clock days by construction;
+    the clamp only defends a skewed or garbage clock."""
+    ts = pd.Timestamp(now)
+    start = pd.Timestamp(win_start) if win_start is not None else ts.normalize() - timedelta(days=int(window_days))
+    return min(max((ts - start).total_seconds() / 86400.0, 1.0), float(window_days) + 1.0)
+
+
+def _wall_clock_ts(value: object) -> pd.Timestamp | None:
+    """A datetime-like cell as a naive wall-clock Timestamp; None for a missing, unparseable or NUMERIC cell
+    (a number is not a clock, though pandas would read it as epoch nanoseconds)."""
+    if value is None or isinstance(value, (bool, numbers.Number)):
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(ts):
+        return None
+    return ts.tz_localize(None) if ts.tzinfo is not None else ts
+
+
+# A DST change inside the window moves its REAL span one hour off the wall-clock span, so the real-seconds
+# divisor's defensive clamp is the wall-clock one widened by that hour.
+_DST_HOUR_DAYS = 1.0 / 24.0
+
+
+def _elapsed_seconds(value: object) -> float | None:
+    """A READ_ELAPSED_SEC cell as finite seconds; None for a missing, non-numeric, NaN or boolean cell
+    (a Python or numpy bool -- a one-element boolean Series hands back numpy's)."""
+    if value is None or pd.api.types.is_bool(value):
+        return None
+    try:
+        sec = float(value)
+    except (TypeError, ValueError):
+        return None
+    return sec if math.isfinite(sec) else None
+
+
+def _score_read_elapsed_days(row: object, window_days: int = _SCORE_HEALTH_WINDOW_DAYS) -> float:
+    """v4.608 holistic #10: the score divisor on the window read's OWN clock.
+
+    The throughput read is cached for an hour (tier='hourly', keyed on SQL text whose CURRENT_DATE() never
+    changes), so a frame summed at 23:50 Central can be served at 00:20. Divided by the render clock's
+    post-midnight divisor (~1.01) its ~47.8h of queueing read ~2x per day and fired the queue / spill
+    drivers until the entry expired. So the read reports its own clock (fact_query_window_summary
+    read_clock=True) and the divisor is taken from it.
+
+    The divisor is READ_ELAPSED_SEC, the REAL seconds the window had covered when it was read, measured in
+    SQL between instants. That is the span the sums cover even on the two DST change days: the hourly fact
+    keeps both 01:00 hours of the fall-back night (25 real hours that day) and has no 02:00 hour in spring
+    (23), and the wall-clock READ_AT - WIN_START_AT misses that hour -- ~4% high the morning after the
+    fall-back (a steady 9.7 min/day of queueing read 10.1, over the 10-minute bar), ~4% low after spring
+    forward. Clamped to the wall-clock bounds widened by that one hour. A row without the column (a stub, a
+    read from before it) falls back to the WALL-CLOCK span of its WIN_START_AT / READ_AT -- an hour off on
+    a DST change day -- and a row without those either to account_now(), the R2-049 behaviour."""
+    get = getattr(row, "get", None)
+    if not callable(get):
+        return _score_window_elapsed_days(account_now(), window_days)
+    elapsed = _elapsed_seconds(get("READ_ELAPSED_SEC"))
+    if elapsed is not None:
+        return min(max(elapsed / 86400.0, 1.0 - _DST_HOUR_DAYS), float(window_days) + 1.0 + _DST_HOUR_DAYS)
+    read_at = _wall_clock_ts(get("READ_AT"))
+    if read_at is None:
+        return _score_window_elapsed_days(account_now(), window_days)
+    return _score_window_elapsed_days(read_at, window_days, win_start=_wall_clock_ts(get("WIN_START_AT")))
 
 
 def _board_panel(board: pd.DataFrame, panel: str) -> pd.DataFrame:
@@ -205,7 +290,10 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
     frame = res.df.copy()
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
     month_start = account_today().replace(day=1)
-    mtd = (frame[(frame["DAY"] >= month_start) & (frame["DAY"] < account_today())]
+    # R2-050: 'complete' ends at the fact's own newest (still-loading) day, not at account today -- before the
+    # 06:45 Central load yesterday's row is a partial snapshot (formulas.metering_complete_before).
+    mtd = (frame[(frame["DAY"] >= month_start)
+                 & (frame["DAY"] < metering_complete_before(frame, account_today()))]
            if exclude_today else frame[frame["DAY"] >= month_start])
     if _billed_split_available(mtd):
         spend = blended_billed_usd(mtd["CREDITS_BILLED_OTHER"].map(safe_float).sum(),
@@ -232,6 +320,23 @@ def _open_alert_counts(company: str = "ALL",
         return res, 0, 0
     _row = res.df.iloc[0]
     return res, int(safe_float(_row.get("CRIT"))), int(safe_float(_row.get("HIGH")))
+
+
+def _no_pace_reason(frame: pd.DataFrame, complete_before: date) -> str:
+    """Why the MTD card has no pace vs last month (mtd_pace_vs_prior_month returned pct None).
+
+    No complete metering day this month yet (the 1st, and the 2nd until its 06:45 Central load -- R2-050) is not
+    missing history: the backfill instruction is only right when the prior month has no daily rows at all."""
+    month_start = account_today().replace(day=1)
+    if complete_before <= month_start:
+        return ("Pace vs last month appears after this month's first complete metering day "
+                "(loaded 06:45 Central).")
+    days = pd.to_datetime(frame["DAY"], errors="coerce").dropna().dt.date
+    prior_start = (month_start - timedelta(days=1)).replace(day=1)
+    if not ((days >= prior_start) & (days < month_start)).any():
+        return ("Pace vs last month appears once the prior month has "
+                "daily facts (backfill_365.sql loads the year).")
+    return "No pace vs last month: last month's same days show no billed spend to compare against."
 
 
 def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
@@ -262,7 +367,10 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
                    " Note: the AI/compute rate split is unavailable on this refresh, so every "
                    "credit is priced at the compute rate — AI/Cortex-heavy spend may read high.")
     frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
-    mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today())
+    # R2-050: compare the days the metering fact has COMPLETED (its newest row is still loading until 06:45)
+    _complete_before = metering_complete_before(frame, account_today())
+    mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today(),
+                                              complete_before=_complete_before)
     # Credit sub-line: when the AI/OTHER split is present, sum billed CREDITS directly over
     # the SAME MTD window (run a credits series through mtd_pace) rather than back-solving
     # mtd_usd/rate — the USD blends AI credits at ai_rate, so mtd/rate would undercount
@@ -271,7 +379,7 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
         _cr_frame = frame[["DAY"]].assign(
             USD=frame["CREDITS_BILLED_OTHER"].map(safe_float)
             + frame["CREDITS_BILLED_AI"].map(safe_float))
-        _mtd_cr, _, _ = mtd_pace_vs_prior_month(_cr_frame, account_today())
+        _mtd_cr, _, _ = mtd_pace_vs_prior_month(_cr_frame, account_today(), complete_before=_complete_before)
         _mtd_credits = safe_float(_mtd_cr)
     else:
         _mtd_credits = safe_float(mtd) / rate if rate > 0 else None
@@ -281,8 +389,7 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
         return {"label": "MTD credit spend", "value": format_usd(mtd),
                 "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
                 "method": _method, "scope": "account-wide",
-                "help": "Pace vs last month appears once the prior month has "
-                        "daily facts (backfill_365.sql loads the year)." + budget_note + _split_note}
+                "help": _no_pace_reason(frame, _complete_before) + budget_note + _split_note}
     return {"label": "MTD credit spend vs last month",
             "value": format_usd(mtd),
             "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
@@ -372,10 +479,12 @@ def render() -> None:
     # the month and mismatches the account-wide "Projected month-end" KPI (which
     # sits beside the account-wide MTD KPI). Project from the account-wide 150d
     # frame already loaded above; fall back to the board frame only if it failed.
+    _proj_cut = None    # R2-050: the first incomplete metering day (only for the FACT_METERING_DAILY frame)
     if _bt_hist.usable():
         _proj = _bt_hist.df.copy()
         _proj["USD"] = _billed_usd_series(_proj, rate, ai_rate)
         proj_daily = _proj[["DAY", "USD"]]
+        _proj_cut = metering_complete_before(_proj, account_today())
     else:
         proj_daily = daily
     # N4: Overview never adopted the first-paint run_batch that Brief/Control Room
@@ -466,7 +575,8 @@ def render() -> None:
         if forecast is None:
             engine = "seasonal"  # honest fallback when the ML view isn't installed
     if forecast is None:
-        forecast = (month_end_projection(proj_daily, account_today(), engine=engine)
+        # R2-050: the metering fact's newest row is still loading until 06:45 Central -- project it, never count it
+        forecast = (month_end_projection(proj_daily, account_today(), engine=engine, complete_before=_proj_cut)
                     if not proj_daily.empty else month_end_projection(pd.DataFrame(), account_today(), engine=engine))
         if _ml_stale_note:
             forecast = dataclasses.replace(forecast, basis=f"{forecast.basis} {_ml_stale_note}".strip())
@@ -485,7 +595,10 @@ def render() -> None:
     # company-scoped — batch them into one round trip (finishing N4 for the score path).
     # board/150d stay unbatched (filter-scoped + fixed cold-start each other, Codex #4);
     # health_strip stays on the shared shell cache; the live alert/action reads batch above.
-    _thr_sql = mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company)
+    # holistic #10: read_clock -> the row also carries WIN_START_AT / READ_AT and READ_ELAPSED_SEC (the real
+    # seconds between them, DST-proof) for the per-day divisor below
+    # (Control Room's Pulse asks for the clock too, so with no Database filter both pages share this entry)
+    _thr_sql = mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company, read_clock=True)
     _tk_sql = mart_sql.fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS, company)
     _score_pf = run_batch([
         {"key": f"score_throughput_{company}", "sql": _thr_sql,
@@ -514,18 +627,14 @@ def render() -> None:
     # actually covered to get a per-DAY rate: stable across the day, and the same
     # basis the retro score sparkline uses (score_history feeds one day per row).
     # The failure percentages are ratios and were already time-invariant.
-    # The SQL window anchors on CURRENT_DATE(), which under SiS is the UTC server
-    # date (ALTER SESSION TIMEZONE is a no-op) — NOT account time. The de-cumulation
-    # divisor must share that clock: in the Chicago evening UTC has already rolled to
-    # the next date, so an account-time anchor sits ~a day off and the per-day rate is
-    # diluted (or inflated). Derive both anchor and elapsed from the same UTC midnight
-    # the SQL used.
-    _now_utc = pd.Timestamp.utcnow().tz_localize(None)
-    _win_start = _now_utc.normalize() - timedelta(days=_SCORE_HEALTH_WINDOW_DAYS)
-    # Floor at 1.0: the window opens a full day before UTC midnight of today, so
-    # elapsed is >= 1 by construction — the clamp only defends against a skewed clock,
-    # and it errs toward the smaller divisor (never dilutes a real penalty away).
-    _elapsed_days = max((_now_utc - _win_start).total_seconds() / 86400.0, 1.0)
+    # R2-016 / R2-049: the divisor shares the SQL's clock, which is the ACCOUNT clock
+    # (CURRENT_DATE() resolves in the account's America/Chicago default and HOUR_TS is
+    # Central wall-clock NTZ -- the TIMEZONE STANDARD in app/data/common.py), never the UTC
+    # process clock. holistic #10: and it is the clock the sums were READ at (the row's
+    # READ_ELAPSED_SEC, the real seconds since WIN_START_AT, so a DST change day keeps its 25th / 23rd
+    # hour), not the render's -- a frame cached before Central midnight and
+    # served after it was divided by the new day's ~1.0 divisor (~2x per day for up to an hour).
+    _elapsed_days = _score_read_elapsed_days(_tr)
     queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0 / _elapsed_days) if _tr is not None else 0.0
     spill_gb = (safe_float(_tr.get("SPILL_REMOTE_GB")) / _elapsed_days) if _tr is not None else 0.0
     # A-score-3: FACT_TASK_DAILY is DAY-grain, so this covers the previous + current
@@ -810,15 +919,19 @@ def render() -> None:
         # mtd_spend biased an on-budget account "burning fast" by today's partial spend
         # (and the displayed "MTD credit spend" KPI stays on the full today-inclusive value).
         _mtd_complete = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist, exclude_today=True)[0]
-        _pace_var, _expected_td = budget_pace_variance(_mtd_complete, budget, account_today())
+        # R2-050: the same complete-day cut _mtd_spend_usd summed over, so both sides count the same days
+        _pace_cut = metering_complete_before(_bt_hist.df if _bt_hist.usable() else None, account_today())
+        _pace_var, _expected_td = budget_pace_variance(_mtd_complete, budget, account_today(),
+                                                       complete_before=_pace_cut)
         _dim, _elapsed, _rem = month_days(account_today())
+        _pace_days = max((_pace_cut - account_today().replace(day=1)).days, 0)   # the days `expected` covers
         _pace_word = "ahead of" if _pace_var > 0 else "behind" if _pace_var < 0 else "on"
         _pace_sign = "+" if _pace_var > 0 else "-" if _pace_var < 0 else ""
         account_kpis.insert(1, {
             "label": "Pace vs budget calendar",
             "value": f"{_pace_sign}{format_usd(abs(_pace_var))}",
             "delta": (f"{_pace_word} straight-line "
-                      f"({format_usd(_expected_td)} expected by day {_elapsed}/{_dim})"),
+                      f"({format_usd(_expected_td)} expected after {_pace_days} complete day(s) of {_dim})"),
             # neutral delta (flat dash) — the severity stripe carries good/bad; the prose
             # delta has no leading sign, so a colored arrow would always point the same way.
             "delta_color": "off",
@@ -832,7 +945,8 @@ def render() -> None:
             "as_of": _ov_asof_meter,
             "help": "Signed variance of MTD billed spend vs the budget's own straight-line "
                     "expected-to-date (MONTHLY_BUDGET_USD / days_in_month x completed days — "
-                    "today excluded, since metering lags). "
+                    "today excluded, since metering lags, and before the 06:45 Central load also "
+                    "yesterday, whose metering row is still a partial snapshot). "
                     "Positive = ahead of the flat daily budget target (burning fast); negative = "
                     "behind. Isolates calendar PACE from the structural 'will we end over' the "
                     "projected month-end KPI. Account-wide billed credits (AI at the AI rate).",
@@ -867,6 +981,16 @@ def render() -> None:
         _rw_bal.df if (_rw_bal is not None and _rw_bal.usable()) else None,
         contract_runway(_rw.df.iloc[0]) if _rw.usable() else None)
     contract_runway_bar(_rw_best)
+    if _rw_best is None and not _rw.ok:
+        # R2-085: no runway on either basis because the credits read FAILED (the billing balance was not
+        # usable either) -- say so; a configured account must not look unconfigured. A successful read
+        # with no contract configured (TOTAL <= 0) still renders nothing, as before.
+        if is_setup_absence(_rw.error_kind):
+            empty_state("needs_setup", "The contract runway needs OVERWATCH's SETTINGS and metering marts "
+                                       "installed.")
+        else:
+            empty_state("unavailable", "Contract runway unavailable — the contract read failed.",
+                        detail=_rw.error)
     st.caption("Whole-account contract commitment — not narrowed by the company filter."
                + (" " + contract_planner.runway_basis_note(_rw_best) if _rw_best else ""))
 
@@ -924,8 +1048,13 @@ def render() -> None:
         # "under pace" gap past ~the 8th. Use the same account-wide full-month frame
         # the Projected month-end KPI uses (proj_daily), today's partial excluded to
         # match the caption and budget_burndown's complete-days convention.
+        # v4.608 holistic #9: cut with the SAME metering cut as the pace card above (R2-050) -- before
+        # the 06:45 Central load the fact's newest row is yesterday's partial snapshot, and counting it
+        # as a whole day put the burndown 'under pace' while the card read on straight-line.
+        # _proj_cut is None for the exec-board fallback frame, which keeps the account-today cut.
+        _burn_cut = _proj_cut or account_today()
         _burn_src = (
-            proj_daily[pd.to_datetime(proj_daily["DAY"], errors="coerce").dt.date < account_today()]
+            proj_daily[pd.to_datetime(proj_daily["DAY"], errors="coerce").dt.date < _burn_cut]
             if not proj_daily.empty else proj_daily
         )
         _burn = budget_burndown(_burn_src, budget, account_today())
@@ -934,11 +1063,17 @@ def render() -> None:
             charts.budget_burndown_chart(_burn)   # Wave 1 #31: house Altair grammar, not raw st.line_chart
             _last = _burn.iloc[-1]
             _gap = float(_last["CUM_ACTUAL_USD"]) - float(_last["BUDGET_LINE_USD"])
+            # recheck of #9: the yesterday clause describes the metering cut, so it is said only when that cut
+            # was applied (_proj_cut set: the FACT_METERING_DAILY frame). The fallback frame is cut at today.
+            _burn_cut_note = (
+                "today's partial is excluded, and until the 06:45 Central load lands so is yesterday's "
+                "(its metering row is still a partial snapshot)" if _proj_cut is not None
+                else "today's partial is excluded")
             st.caption(md_dollars(
                 f"Cumulative {format_usd(_last['CUM_ACTUAL_USD'])} vs "
                 f"{format_usd(_last['BUDGET_LINE_USD'])} on the flat budget line — "
                 f"{format_usd(abs(_gap))} {'over' if _gap >= 0 else 'under'} pace. Complete days "
-                "only (today's partial excluded); MONTHLY_BUDGET_USD straight-lined across the month."))
+                f"only: {_burn_cut_note}; MONTHLY_BUDGET_USD straight-lined across the month."))
     # CoCo Overview #10: the open-crit/high KPI is a dead-end count — give it a path
     # to the actual events, but only when there's something open to work.
     if (alerts_res.ok and (critical_alerts or high_alerts)
@@ -1082,8 +1217,27 @@ def render() -> None:
                 st.caption(f"Top driver: **{_d0['DIMENSION']}** — {format_usd(safe_float(_d0['VALUE_USD']))} "
                            f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of warehouse compute "
                            f"spend, {_drv_thru} — serverless & AI shown separately below).")
+        # R2-075: branch on what was actually read. A FAILED exec-board read (a timeout, any non-absence
+        # failure) is 'unavailable' -- never "appears once the mart is installed" while the trend below is
+        # served by an installed mart. On a calendar window the drivers come from the bounded warehouse
+        # frame (above), so a failed read of THAT is unavailable too. "Installed" wording only for a true
+        # absence of the board (or a board read that answered nothing); "no rows" only after a successful read.
+        elif board_res is not None and not board_res.ok and not is_setup_absence(board_res.error_kind):
+            empty_state("unavailable", "The cost-driver ranking couldn't be read (the exec board read failed).",
+                        detail=board_res.error)
+        elif not using_mart and not trend_source.ok:
+            # The board did not serve (absent, empty, or not read for a calendar window) AND the warehouse-spend
+            # read failed, so no read produced an answer and "No cost-driver rows" would be a guess. An ABSENT
+            # board is still what a trailing-window ranking waits on (it comes only from the board), so that
+            # keeps the installed wording; otherwise (an empty board, or a calendar window whose bounded frame
+            # IS the ranking) the panel says the spend read failed.
+            if board_res is not None and is_setup_absence(board_res.error_kind):
+                empty_state("needs_setup", "Driver ranking appears once the exec board mart is installed.")
+            else:
+                empty_state("unavailable", "The cost-driver ranking couldn't be read (the warehouse spend read "
+                                           "failed).", detail=trend_source.error)
         elif not using_mart and not daily.empty:
-            st.caption("Driver ranking appears once the exec board mart is installed.")
+            empty_state("needs_setup", "Driver ranking appears once the exec board mart is installed.")
         else:
             empty_state("no_data_yet", "No cost-driver rows for this scope/window.")
 
@@ -1169,7 +1323,18 @@ def render() -> None:
                     "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%+.0f"),
                     "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%+.1f%%"),
                 })
-        result_caption(_mres)
+    elif not _mres.ok:
+        # R2-085: a failed read (both the mart and the FACT_WAREHOUSE_DAILY rollup) says so instead of
+        # leaving the section header over nothing; an ok-but-empty read says the fact has no rows yet.
+        if is_setup_absence(_mres.error_kind):
+            empty_state("needs_setup", "Monthly spend by warehouse appears once FACT_WAREHOUSE_DAILY is "
+                                       "installed.")
+        else:
+            empty_state("unavailable", "Monthly spend by warehouse unavailable.", detail=_mres.error)
+    else:
+        empty_state("no_data_yet", "No monthly warehouse spend for this scope yet — FACT_WAREHOUSE_DAILY "
+                                   "fills it in.")
+    result_caption(_mres)
 
     # ---- Spend trend ---------------------------------------------------------
     section_header("Spend trend")

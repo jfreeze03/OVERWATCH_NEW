@@ -627,7 +627,25 @@ def executive_summary_csv(view: ExecutiveSummaryView) -> str:
     return output.getvalue()
 
 
-def mtd_pace_vs_prior_month(daily, today):
+def metering_complete_before(daily, today: date, day_col: str = "DAY") -> date:
+    """The first day that is NOT yet complete in a FACT_METERING_DAILY frame: min(today, newest loaded DAY).
+
+    R2-050: FACT_METERING_DAILY.DAY is METERING_DAILY_HISTORY's UTC USAGE_DATE, loaded once a day at 06:45
+    Central (TASK_LOAD_DAILY, then the nightly reconcile), so its newest row is always the UTC day that was still
+    in progress at that load -- the rule the newer builders already use (mart_sql's billed-CS ``bill`` CTE keeps
+    DAY < MAX(DAY)). Between 00:00 and 06:45 Central, account_today() is already D+1 while day D is still that
+    partial snapshot, so a 'DAY < account_today()' cut counted it as a complete day (about -55% MTD pace on the
+    2nd, a budget card $550 'behind' on a flat $1,000/day). The same holds all day after a failed or late load.
+    An empty / unreadable frame returns ``today`` (the old cut). Pure; never raises."""
+    if daily is None or getattr(daily, "empty", True) or day_col not in getattr(daily, "columns", ()):
+        return today
+    newest = pd.to_datetime(daily[day_col], errors="coerce").max()
+    if pd.isna(newest):
+        return today
+    return min(today, newest.date())
+
+
+def mtd_pace_vs_prior_month(daily, today, complete_before: date | None = None):
     """MTD spend paced against the SAME first-N-days of the prior month —
     the budget-free pace signal (owner 2026-07-13: the Monthly-budget KPI
     read 'Not configured' forever; a pace needs no configuration).
@@ -635,6 +653,9 @@ def mtd_pace_vs_prior_month(daily, today):
     ``daily``: frame with DAY (date-like) and USD columns covering both
     months. Returns (mtd_usd, prior_usd, pct_delta); pct_delta is None when
     the prior month has no rows in the span — never a fabricated 0%.
+
+    ``complete_before`` (R2-050): the first day that is not complete -- for a FACT_METERING_DAILY frame,
+    metering_complete_before(daily, today); default ``today``.
     """
     from datetime import timedelta
 
@@ -650,9 +671,12 @@ def mtd_pace_vs_prior_month(daily, today):
     prior_start = prior_end.replace(day=1)
     # R3-7: compare only COMPLETED days on both sides — today is still growing, so
     # counting it on the current side (while the prior side has full days) biases the
-    # pace low all day. eff_day = today.day - 1 drops today; still capped at the prior
-    # month's length. The displayed full-month `mtd` below keeps today (unchanged).
-    n_days = min(max(today.day - 1, 0), prior_end.day)   # equal-length window of completed days
+    # pace low all day. The completed days run up to complete_before (today by default, so
+    # n = today.day - 1); still capped at the prior month's length. R2-050: a metering frame's
+    # newest row is still in progress before the 06:45 Central load, so the caller passes the
+    # fact's own cut. The displayed full-month `mtd` below keeps today (unchanged).
+    cut = today if complete_before is None else min(complete_before, today)
+    n_days = min(max((cut - month_start).days, 0), prior_end.day)   # equal-length window of completed days
     prior_cut = prior_start + timedelta(days=n_days)
     mtd_cut = month_start + timedelta(days=n_days)
     # Displayed MTD stays the TRUE full month-to-date (never understated at
@@ -669,7 +693,8 @@ def mtd_pace_vs_prior_month(daily, today):
     return mtd, prior, (mtd_same - prior) / prior * 100.0
 
 
-def budget_pace_variance(mtd_actual, budget_usd, today) -> tuple[float, float]:
+def budget_pace_variance(mtd_actual, budget_usd, today,
+                         complete_before: date | None = None) -> tuple[float, float]:
     """Signed variance of MTD spend vs the budget's OWN straight-line expected-to-date
     (repo wave-2 #11): ``mtd_actual - budget * day_of_month / days_in_month``.
 
@@ -677,15 +702,21 @@ def budget_pace_variance(mtd_actual, budget_usd, today) -> tuple[float, float]:
     structural 'will we end over' (projection). Positive = ahead of the flat daily
     budget target (burning fast); negative = behind. Returns
     (variance, expected_to_date); (0.0, 0.0) when no budget is configured (the KPI
-    must not invent a denominator)."""
+    must not invent a denominator).
+
+    ``complete_before`` (R2-050): the first day the MTD actual does NOT include (default today) -- the
+    caller passes the same cut it summed ``mtd_actual`` over, so numerator and denominator count the
+    same complete days."""
     budget = safe_float(budget_usd)
     if budget <= 0:
         return 0.0, 0.0
-    days_in_month, elapsed, _remaining = month_days(today)
+    days_in_month, _elapsed, _remaining = month_days(today)
     # The MTD actual excludes today (daily metering lags ~24h), so measure the target
     # over COMPLETED days too — else an on-pace account reads ~one day's budget "behind"
     # every day. Matches the today-excluded convention (mtd_pace_vs_prior_month uses day-1).
-    completed = max(elapsed - 1, 0)
+    # R2-050: before the 06:45 Central load the newest metering day is excluded too.
+    cut = today if complete_before is None else min(complete_before, today)
+    completed = max((cut - today.replace(day=1)).days, 0)
     expected = budget * completed / days_in_month if days_in_month else 0.0
     return safe_float(mtd_actual) - expected, expected
 

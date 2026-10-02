@@ -119,7 +119,9 @@ def test_mart_builder_and_proof_are_canaries_and_confirm_is_not():
     for name in ("cost.maintenance_on_unread", "cost.unread_maintenance_proof"):
         sqlglot.parse_one(names[name](), read="snowflake")
     assert not [n for n in names if "object_reads" in n]
-    assert not [n for n, fn in canary.CANARIES if "ACCESS_HISTORY" in fn()]   # the storage_reclaim precedent
+    # R2-069: the confirm is not registered itself, but ACCESS_HISTORY drift FAILs through the security / graph /
+    # workbench ACCESS_HISTORY canaries (this account is Enterprise; the old Standard-edition exemption is gone)
+    assert [n for n, fn in canary.CANARIES if "ACCESS_HISTORY" in fn()]
 
 
 def test_proof_builder_is_central_pinned_and_runnable():

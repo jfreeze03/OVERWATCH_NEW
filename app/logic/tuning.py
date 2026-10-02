@@ -27,12 +27,60 @@ KEEP_ACTIONED_SHARE = 0.90  # a suggestion must keep >= 90% of actioned alerts
 #                        written only for a lead-window WARN, so projection / CRIT / EXH never skew it)
 LOWER_IS_WORSE = frozenset({"SEC_CRED_EXPIRY", "COST_CONTRACT_BREACH", "PIPE_ETL_CYCLE_LATE"})
 
-# Rules raised once per occurrence whose arm ignores THRESHOLD_NUM and writes a CONSTANT METRIC_VALUE, so a
-# threshold suggested from their metric values would be meaningless (and the operator would paste it into an
-# ALTER that changes nothing):
-#   SEC_ADMIN_GRANT  one event per direct admin-role grant to a user (V162 arm [27], METRIC_VALUE 1)
-NO_THRESHOLD_RULES = frozenset({"SEC_ADMIN_GRANT"})
-NO_THRESHOLD_BASIS = "Raised once per grant; this rule has no threshold."
+# Rules whose raiser never reads THRESHOLD_NUM, so a threshold suggested from their metric values is meaningless:
+# the operator would paste it into an UPDATE that changes nothing, under a basis ("clears 95% of them") that is
+# false. R2-038 / R2-086 widened the V162 set (which held only SEC_ADMIN_GRANT) to every such rule; the
+# criterion is "the arm ignores THRESHOLD_NUM", whatever its METRIC_VALUE.
+# tests/test_r2_alerts_logic.py re-reads the current raiser bodies so this set cannot go stale.
+#   SEC_ADMIN_GRANT        one event per direct admin-role grant to a user (V162 arm [27], METRIC_VALUE 1)
+#   OPS_PIPELINE_DEGRADED  arm [22]: fixed 3h / 30h / 180-min limits; METRIC_VALUE mixes hours and error counts
+#   OPS_SCAN_DEGRADED      the scans' self-alert: raised whenever a rule block fails (fails > 0)
+#   OPS_CANARY_FAIL        SP_CANARY_SENTINEL: raised whenever a canary check fails (fails > 0)
+#   PERF_SLO_BREACH        SP_SLO_BREACH_SCAN judges each objective against SLO_OBJECTIVES.TARGET_VALUE
+#   DQ_SCHEMA_DRIFT        SP_SCAN_SCHEMA_DRIFT: one event per drifted table, no threshold predicate
+NO_THRESHOLD_BASES: dict[str, str] = {
+    "SEC_ADMIN_GRANT": "Raised once per grant; this rule has no threshold.",
+    "OPS_PIPELINE_DEGRADED": ("Raised per stale source, swallowed loader failure or idle notifier; the 3h / 30h "
+                              "/ 180-min limits are fixed in the scan, so this rule has no threshold."),
+    "OPS_SCAN_DEGRADED": "Raised whenever a scan rule block fails; this rule has no threshold.",
+    "OPS_CANARY_FAIL": "Raised whenever a canary check fails; this rule has no threshold.",
+    "PERF_SLO_BREACH": ("Each objective is judged against its own target in SLO_OBJECTIVES; this rule's "
+                        "threshold is never read."),
+    "DQ_SCHEMA_DRIFT": "Raised once per table whose columns changed; this rule has no threshold.",
+}
+NO_THRESHOLD_RULES = frozenset(NO_THRESHOLD_BASES)
+NO_THRESHOLD_BASIS = NO_THRESHOLD_BASES["SEC_ADMIN_GRANT"]
+
+# R2-045 / R2-086: rules whose METRIC_VALUE is NOT in THRESHOLD_NUM's units, so the quantiles of their metric
+# values are no threshold at all (six NOISE budget-pace closes at $21k-$36k suggested 38,995 -- a pace multiple
+# that would never fire again). METRIC_VALUE alone cannot be converted (the budget and the elapsed share are not
+# on the event), so the suggestion is withheld, with the units named.
+#   COST_BUDGET_PACE      daily [08]: METRIC_VALUE = MTD dollars; fires on MTD > budget pace x THRESHOLD_NUM
+#   COST_FORECAST_BREACH  daily [09]: METRIC_VALUE = projected dollars; fires on projected > budget x THRESHOLD_NUM
+#   DQ_RECON_ERROR        daily [18]: METRIC_VALUE = the error count; fires on (metrics in error) >= THRESHOLD_NUM
+METRIC_NOT_THRESHOLD_UNITS: dict[str, str] = {
+    "COST_BUDGET_PACE": ("Its metric value is month-to-date dollars, but the threshold is a multiple of the "
+                         "budget pace, so no threshold can be suggested from it."),
+    "COST_FORECAST_BREACH": ("Its metric value is the projected month-end dollars, but the threshold is a "
+                             "multiple of the monthly budget, so no threshold can be suggested from it."),
+    "DQ_RECON_ERROR": ("Its metric value is the reconciliation error count, but the threshold counts the "
+                       "metrics in error, so no threshold can be suggested from it."),
+}
+
+# R2-086: rules whose METRIC_VALUE is SIGNED while the condition tests its magnitude, so the suggestion is built
+# from |METRIC_VALUE|. DQ_BREACH (V150 SP_ANOMALY_SWEEP) writes the signed clamped z and fires on
+# ABS(z) >= THRESHOLD_NUM: on the signed values a drop at z -9 read as far below any threshold, and a
+# "keeps 100%, cuts 100%" 0.97 would have paged on every one of them.
+ABS_METRIC_RULES = frozenset({"DQ_BREACH"})
+
+
+def _withheld(basis: str, metric_values: pd.DataFrame | None) -> dict:
+    """ok=False with ``basis`` and the resolution counts, never a threshold."""
+    n_noise = n_actioned = 0
+    if metric_values is not None and "RESOLUTION_KIND" in getattr(metric_values, "columns", ()):
+        kinds = metric_values["RESOLUTION_KIND"].astype(str).str.upper()
+        n_noise, n_actioned = int((kinds == "NOISE").sum()), int((kinds == "ACTIONED").sum())
+    return {"ok": False, "basis": basis, "noise_n": n_noise, "actioned_n": n_actioned}
 
 
 def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
@@ -44,7 +92,8 @@ def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
 
     ``rule_id`` selects the comparison direction (see LOWER_IS_WORSE). Omitting it
     keeps the higher-is-worse default, which is right for every other seeded rule.
-    A NO_THRESHOLD_RULES rule always returns ok=False (it has no threshold to tune).
+    A NO_THRESHOLD_RULES or METRIC_NOT_THRESHOLD_UNITS rule always returns ok=False with its own
+    basis (nothing tunable from its metric values); an ABS_METRIC_RULES rule is tuned on |METRIC_VALUE|.
     """
     import math
 
@@ -52,18 +101,18 @@ def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
     rid = str(rule_id or "").strip().upper()
     inverse = rid in LOWER_IS_WORSE
     required = {"METRIC_VALUE", "RESOLUTION_KIND"}
-    if rid in NO_THRESHOLD_RULES:
-        # V162: nothing to tune -- report the resolution counts, never a threshold.
-        n_noise = n_actioned = 0
-        if metric_values is not None and "RESOLUTION_KIND" in getattr(metric_values, "columns", ()):
-            kinds = metric_values["RESOLUTION_KIND"].astype(str).str.upper()
-            n_noise, n_actioned = int((kinds == "NOISE").sum()), int((kinds == "ACTIONED").sum())
-        return {"ok": False, "basis": NO_THRESHOLD_BASIS, "noise_n": n_noise, "actioned_n": n_actioned}
+    if rid in NO_THRESHOLD_BASES:
+        # V162 / R2-086: nothing to tune -- report the resolution counts, never a threshold.
+        return _withheld(NO_THRESHOLD_BASES[rid], metric_values)
+    if rid in METRIC_NOT_THRESHOLD_UNITS:
+        return _withheld(METRIC_NOT_THRESHOLD_UNITS[rid], metric_values)
     if metric_values is None or metric_values.empty or not required.issubset(metric_values.columns):
         return {"ok": False, "basis": "No resolved events with metric values yet.",
                 "noise_n": 0, "actioned_n": 0}
     frame = metric_values.copy()
     numeric = pd.to_numeric(frame["METRIC_VALUE"], errors="coerce")
+    if rid in ABS_METRIC_RULES:
+        numeric = numeric.abs()     # R2-086: the condition tests the magnitude
     # A1: filter NON-FINITE only. The old `> 0` dropped 0 and negatives — which on an
     # inverse rule are the MOST actionable evidence there is (expires today / already
     # expired, contract already exhausted).

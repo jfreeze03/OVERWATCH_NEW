@@ -1213,9 +1213,18 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
         "haircuts. Verified savings never enter the projection."
     )
     if pipeline.empty:
-        empty_state("no_data_yet",
-                    "Nothing to project yet — no addressable savings from the levers counted in this scope "
-                    "and no open actions. Create actions on Action Center, or widen the Window, to size a plan.")
+        # R2-084: claim "no open actions" / "no addressable savings" only from reads that succeeded. When the
+        # action-queue read failed, the red unavailable line above already explains the empty pipeline, so no
+        # quiet sentence asserts what the page could not read (nor sends the reader to create actions).
+        if actions.ok and idle.ok:
+            empty_state("no_data_yet",
+                        "Nothing to project yet — no addressable savings from the levers counted in this scope "
+                        "and no open actions. Create actions on Action Center, or widen the Window, to size a "
+                        "plan.")
+        elif actions.ok:
+            empty_state("no_data_yet",
+                        "Nothing to project from what could be read — no open actions in this scope, and the "
+                        "idle timer is not sized (see above). Create actions on Action Center to size a plan.")
         if idle.ok:
             result_caption(idle)
         return

@@ -643,3 +643,62 @@ def test_ask_page_telemetry_wiring():
     after = body.split("ans.analyze(", 1)[1]
     assert "_log_ask(\"ask_answered\", question, ans.intent)" in after
     assert "ask_answered" not in body.split("ans.analyze(", 1)[0]
+
+
+# ============================ R2-012 at the Ask call site (v4.608 review) ===
+# MART_CLOUD_SVC_DAILY is never backfilled (it starts at its first load), so 'this year' (365d) or
+# 'this quarter' (90d) summed ~67 days of statement history under a 365d / 90d label. The answer now
+# reads COVERED_DAYS (cloud_svc_top_shapes(coverage=True)) and names the covered days.
+
+def _cs_cov_shapes(covered: object, *, mixed_first: bool = False) -> pd.DataFrame:
+    return pd.DataFrame({
+        "QUERY_PARAMETERIZED_HASH": ["n/a" if mixed_first else "h1", "h2"],
+        "QUERY_TYPE": ["SHOW", "SELECT"],
+        "SAMPLE_TEXT": ["show tables", "select 1"],
+        "RUNS": [1000, 200],
+        "CS_CREDITS": [50.0, 10.0],
+        "CS_CREDITS_PER_1K": [50.0, 50.0],
+        "COVERED_DAYS": [covered, covered],
+    })
+
+
+def test_cs_ask_reads_the_statement_mart_coverage():
+    rr = route("which query is causing cloud services to spike this year", default_days=30, company="ALL")
+    assert rr.answerer is not None and rr.answerer.intent == "cloud_services_spike_by_query"
+    assert rr.params.days == 365
+    specs = {s.key: s.sql for s in rr.answerer.needs(rr.params)}
+    assert "AS COVERED_DAYS" in specs["shapes"]                   # the shapes read carries the mart's span
+    assert "COUNT(DISTINCT c0.DAY)" in specs["shapes"]
+    assert "COVERED_DAYS" not in specs["byuser"]                  # by-user reads the same mart + window
+
+
+def test_cs_ask_headline_names_the_covered_days_not_the_asked_window():
+    res = _analyze_cs_by_query(AskParams(365, "ALL"), {"shapes": _cs_cov_shapes(67)})
+    assert res.confidence == "grounded"
+    assert "over 365d" not in res.headline                        # never the full window over 67 days
+    assert "the 67 days the statement mart holds of the last 365d" in res.headline
+    assert "50.0 CS credits" in res.headline                      # the figure itself is unchanged
+    caveat = [b for b in res.bullets if "never backfilled" in b]
+    assert len(caveat) == 1 and "holds 67 of this window's 365 days" in caveat[0]
+    assert res.params["covered_days"] == 67
+    assert res.params["days"] == 365                              # the ratio bullet keeps the asked window
+    assert res.evidence is not None and "COVERED_DAYS" not in res.evidence.columns
+
+
+def test_cs_ask_mixed_bucket_headline_also_names_the_covered_days():
+    res = _analyze_cs_by_query(AskParams(90, "ALL"), {"shapes": _cs_cov_shapes(68, mixed_first=True)})
+    assert "over 90d" not in res.headline
+    assert "The largest cloud-services bucket over the 68 days the statement mart holds of the last 90d" \
+        in res.headline
+    only_mixed = _cs_cov_shapes(68, mixed_first=True).iloc[[0]]
+    res2 = _analyze_cs_by_query(AskParams(90, "ALL"), {"shapes": only_mixed})
+    assert "could not be attributed" in res2.headline
+    assert "over the 68 days the statement mart holds of the last 90d" in res2.headline
+
+
+def test_cs_ask_full_coverage_keeps_the_plain_window():
+    for covered in (30, 31, None):                                # full (incl. today's partial day) or unknown
+        res = _analyze_cs_by_query(AskParams(30, "ALL"), {"shapes": _cs_cov_shapes(covered)})
+        assert "over 30d" in res.headline and "statement mart holds" not in res.headline
+        assert not any("never backfilled" in b for b in res.bullets)
+        assert "covered_days" not in res.params
