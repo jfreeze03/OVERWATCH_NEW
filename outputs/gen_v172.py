@@ -27,10 +27,11 @@ Repairs (after the CREATEs, before the version row; each idempotent and bounded)
       not incident-linked) PERF_CHANGE_REGRESSION events follow -- from the re-stamped registry row, else
       COMPANY_FOR_DATABASE of the database split out of the object FQN in DEDUPE_KEY part 2.
   R2  R2-024 live DQ_SCHEMA_DRIFT / PIPE_DT_FAILURES / PIPE_VOLUME_DROP / DQ_BREACH events re-stamped the same way.
-  R3  R2-021 the six BASELINE_* columns nulled for tracking PROCEDURE rows whose short name is a strict suffix of
-      another ACCOUNT_USAGE.PROCEDURES name (first apply only); the next scan re-freezes them.
   R4  R2-025 tracking TASK baselines re-frozen on the collapsed (terminal-attempt) basis over their own
       [CHANGE_SEEN_AT - 14d, CHANGE_SEEN_AT) window; credits/call rescaled by OLD_CALLS / NEW_CALLS (x1 on re-run).
+  R3  R2-021 the six BASELINE_* columns nulled for tracking PROCEDURE rows whose short name is a strict suffix of
+      another ACCOUNT_USAGE.PROCEDURES name (first apply only); the next scan re-freezes them. R3 runs LAST,
+      directly before the version row its gate reads (holistic #15): nothing that can stop the file sits between.
 
 Reads V109, V133, V140 and V150 ONLY; never imports app/ (the literals the tests lock against the app are copies).
 No CALL, task or DROP statement at apply time. With PREFLIGHT_OUT set, also writes the read-only PREFLIGHT
@@ -449,7 +450,10 @@ REPAIR_R3 = f"""\
 -- R3 (R2-021) the suffix match froze baselines that blended a RUN_<name> / X_<name> wrapper's calls into <name>.
 -- Frozen baselines never recompute, so null them -- only for still-tracking PROCEDURE rows whose short name is a
 -- strict suffix of another procedure's name (deleted procedures included: their old calls are still in the
--- window), and only on the FIRST apply (a re-run must not undo the next scan's re-freeze). The next
+-- window), and only once: a re-run must not undo a scan's re-freeze (each re-null re-freezes over a shorter
+-- window). R3 runs LAST, directly before the version row, so a missing 172 row means R3 has not committed: every
+-- statement that can stop the file (the five CREATEs, R1-R2, R4's 30-day TASK_HISTORY read) runs before it, and a
+-- retry after any of them nulls these rows for the first time, even if a scan ran in between. The next
 -- TASK_CHANGE_IMPACT_SCAN re-freezes them with the anchored match (over the scan's own 20-day reach: a change
 -- older than 6 days gets a shorter baseline, at least 6 days).
 UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
@@ -488,7 +492,7 @@ UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
   ) s
  WHERE t.CHANGE_ID = s.CHANGE_ID;
 """
-REPAIRS = (REPAIR_R1A, REPAIR_R1B, REPAIR_R2, REPAIR_R3, REPAIR_R4)
+REPAIRS = (REPAIR_R1A, REPAIR_R1B, REPAIR_R2, REPAIR_R4, REPAIR_R3)     # R3 LAST: its gate is the next statement
 for _r in REPAIRS:
     _code = "\n".join(ln for ln in _r.splitlines() if not ln.lstrip().startswith("--"))
     assert "\\" not in _r and "$$" not in _r and _code.count(";") == 1 and _code.rstrip().endswith(";")
@@ -543,9 +547,32 @@ HEADER = f"""-- {NAME}
 -- TASK_CHANGE_IMPACT_SCAN (06:50) rewrite tracking rows' VERDICT_DETAIL and re-freeze the nulled PROCEDURE
 -- baselines; the next TASK_ANOMALY_SWEEP books with the new company. Verdicts on collision- or retry-affected
 -- objects change on that run (intended). Already-raised alerts are not re-raised (dedupe keys unchanged).
--- ROLLBACK: re-run the base CREATEs (V140 SP_CHANGE_IMPACT_SCAN, V109 SP_WAREHOUSE_CHANGE_SCAN, V133
--- SP_SCAN_SCHEMA_DRIFT, V150 SP_SCAN_CLOUD_SVC_ANOMALY + SP_ANOMALY_SWEEP). The re-stamped COMPANY values and
--- the re-frozen baselines stay (they are the corrected values).
+-- DELIVERY: re-raising is not delivery. SP_NOTIFY_WEBHOOK (V164) sends an OPEN event to a route only when the
+-- route's COMPANY_FILTER is ALL or the event's COMPANY, once per (EVENT_ID, ROUTE_ID) in ALERT_DELIVERIES, and
+-- V034 set every existing route to 'ALFA'. (a) On a database with no COMPANY_SCOPE row that is not TRXS_ / ALFA% /
+-- ADMIN, PERF_CHANGE_REGRESSION, PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT alerts are
+-- now UNKNOWN and stop posting to an ALFA-only route (the first three seed HIGH, PIPE_DT_FAILURES is CRITICAL at
+-- 5+ failures), with no undelivered_expired row either (the watchdog reads the same filter). To keep them
+-- posting, map the database (Cost Intelligence > Spend & Attribution > Unmapped entities) or add an ALL or
+-- UNKNOWN route. (b) An OPEN event the R1b / R2 re-stamps move to a company another enabled route carries becomes
+-- eligible there: the next TASK_ALERT_NOTIFY run sends it once if it is still inside the send window (24h; 7d
+-- for CRITICAL); an older one raised within 7 days gets one undelivered_expired row for that route instead.
+-- ROLLBACK (order matters): 1. Re-run the base CREATEs (V140 SP_CHANGE_IMPACT_SCAN, V109
+-- SP_WAREHOUSE_CHANGE_SCAN, V133 SP_SCAN_SCHEMA_DRIFT, V150 SP_SCAN_CLOUD_SVC_ANOMALY + SP_ANOMALY_SWEEP). The
+-- re-stamped COMPANY values stay (they are the corrected values). 2. Right after V140's CREATE, before the next
+-- change-impact scan (06:50 Central, or Operations' Run change-impact scan now), null the still-tracking
+-- TASK and PROCEDURE baselines:
+--     UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+--        SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,
+--            BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL
+--      WHERE OBJECT_TYPE IN ('TASK', 'PROCEDURE') AND CURRENT_DATE() <= TRACKING_UNTIL AND NOT ALERTED;
+-- Why: R4 and the V172 scan froze them per scheduled run (terminal attempt) and by the anchored CALL match, but
+-- V140's AFTER legs count every attempt and the bare suffix match, and V140 re-freezes only a NULL baseline.
+-- Kept, a task with 7 of 14 runs retried once on both sides reads 14 runs / 0 failed before vs 21 / 7 after:
+-- REGRESSED, a false PERF_CHANGE_REGRESSION page; a rescaled credits/call reads a false IMPROVED. Nulled, V140's
+-- next scan re-freezes them on its own basis (over its 20-day reach: a change older than 6 days gets a shorter
+-- baseline). An ALERTED row keeps the baseline its alert was raised on (V140 alerts a row once). Check any
+-- PERF_CHANGE_REGRESSION raised between steps 1 and 2 before acting on it.
 -- Apply AFTER V171. Idempotent; safe to re-run.
 
 EXECUTE IMMEDIATE
@@ -597,10 +624,10 @@ DESCRIPTION = (
     "(CORTEX-NULLIF); RETURN stays v3. SP_SCAN_CLOUD_SVC_ANOMALY re-derived from V150: the disabled-rule guard "
     "counts ENABLED rows (R1-227). One-time repairs: OBJECT_CHANGE_REGISTRY.COMPANY re-stamped, and live "
     "(OPEN, ACK, SNOOZED, not incident-linked) PERF_CHANGE_REGRESSION, DQ_SCHEMA_DRIFT, PIPE_DT_FAILURES, "
-    "PIPE_VOLUME_DROP and DQ_BREACH events re-stamped from the database in their object FQN; first-apply null of "
-    "suffix-collided tracking PROCEDURE baselines (re-frozen by the next scan); tracking TASK baselines re-frozen on "
-    "the terminal-attempt basis with credits/call rescaled. No new object, no task change, no procedure run at "
-    "apply time.")
+    "PIPE_VOLUME_DROP and DQ_BREACH events re-stamped from the database in their object FQN; tracking TASK "
+    "baselines re-frozen on the terminal-attempt basis with credits/call rescaled; last, right before this row, a "
+    "first-apply null of suffix-collided tracking PROCEDURE baselines (re-frozen by the next scan). No new object, "
+    "no task change, no procedure run at apply time.")
 assert len(DESCRIPTION) <= 4000 and "'" not in DESCRIPTION and "$" not in DESCRIPTION
 
 VERSION_ROW = f"""

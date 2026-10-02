@@ -25,12 +25,17 @@ SP_INCIDENT_DECLARE deltas (BOTH overloads; each asserted by count, everything e
   A4  INCIDENTS insert writes DECLARED_BY = :v_actor
   A5  INCIDENT_MEMBERS insert writes LINKED_BY = :v_actor
 The 4-arg overload is KEPT (no DROP): an app not yet redeployed still CALLs it, and the deployed app selects the
-5-arg CALL only once has_migration(170). A later migration drops the 4-arg once the gated app is live.
+5-arg CALL only once SCHEMA_VERSION holds 170 -- schema_gate.has_migration_fresh, which re-reads it on the 30 s live
+tier while the 4 h metadata stash lacks 170 (holistic #16), so the first declare after the apply credits the DBA.
+A later migration drops the 4-arg once the gated app is live.
 
 INCIDENT_PROPOSALS deltas (each asserted by count, everything else byte-identical to V072):
   P1  R2-093 WAREHOUSE += COST_IDLE_OPPORTUNITY, COST_SLEEP_POLLING (warehouse in key part 2)
   P2  R2-093 OBJECT += PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH, DQ_SCHEMA_DRIFT (object FQN in part 2)
   P3  R2-093 USER += SEC_FAILED_LOGINS, SEC_LOGIN_TAKEOVER, SEC_ADMIN_GRANT, COST_AI_USER_RUNAWAY (user in part 2)
+      (P1-P3 cover only keys whose part 2 is a bare name. A series-prefixed part 2 stays SCOPE: COST_CLOUD_SVC_ANOMALY
+      'CLOUD SVC <WH>' and COST_ANOMALY_SWEEP 'WAREHOUSE <WH>'. The declare filters on the raw part 2, so their
+      ENTITY_NAME must keep the prefix, and the warehouse-change evidence never matches them; holistic #11.)
   P4  R2-093 ACCOUNT band tokens += 'EXH', 'ALL' (an EXH band no longer reads as an entity and opens a second
       incident for the same family; 'ALL' is COST_DAILY_CREDITS / COST_BUDGET_PACE / COST_FORECAST_BREACH)
   P5  R2-031 CONFIDENCE: a PIPE_TASK_FAILURES proposal's own FACT_TASK_DAILY failures are its alert source, not
@@ -182,21 +187,28 @@ HEADER = f"""-- {NAME}
 --   R2-093  INCIDENT_PROPOSALS (V072) knew only V072-era rules and band tokens. An EXH band (COST_CONTRACT_BREACH,
 --           PIPE_ETL_CYCLE_LATE) read as an entity called EXH, so the declare guard looked only for an incident
 --           holding an EXH member and opened a SECOND incident for the same late night; 'ALL' read as an entity
---           too. The user / warehouse / object rules added since V072 get their entity kind.
+--           too. Ten more rules whose key part 2 is a bare name get their entity kind: WAREHOUSE COST_IDLE_OPPORTUNITY,
+--           COST_SLEEP_POLLING; OBJECT PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH, DQ_SCHEMA_DRIFT; USER
+--           SEC_FAILED_LOGINS, SEC_LOGIN_TAKEOVER, SEC_ADMIN_GRANT, COST_AI_USER_RUNAWAY. Series-prefixed keys stay
+--           SCOPE, as in V072: COST_CLOUD_SVC_ANOMALY ('CLOUD SVC <WH>') and COST_ANOMALY_SWEEP ('WAREHOUSE <WH>').
+--           The declare matches the raw part 2, so ENTITY_NAME keeps the prefix and those proposals never match
+--           warehouse-change evidence (they cannot reach CONFIDENCE HIGH).
 --   R2-031  A PIPE_TASK_FAILURES proposal counted its OWN FACT_TASK_DAILY failures as corroboration, so every one
 --           read CONFIDENCE HIGH. They now reach HIGH only with a matching task change (MEDIUM on repeat days).
 --
 --   ~ SP_INCIDENT_DECLARE(VARCHAR x4) re-derived from V131 (its only definer): the 0-member rollback + OK verdict.
 --   + SP_INCIDENT_DECLARE(VARCHAR x5) derived from V131: the same body plus P_ACTOR -> DECLARED_BY / LINKED_BY.
 --     The 4-arg is KEPT so an app that is not redeployed yet still declares (it keeps crediting the owner). The
---     app CALLs the 5-arg only once has_migration(170); a later migration drops the 4-arg after that deploy.
+--     app CALLs the 5-arg once SCHEMA_VERSION holds 170: while its 4 h schema cache lacks 170 it re-reads the
+--     table on a 30 s tier, so the first declare after the apply already does. A later migration drops the 4-arg.
 --   ~ INCIDENT_PROPOSALS re-derived from V072 (its current definer): rule kinds, EXH/ALL band tokens, and the
 --     PIPE_TASK_FAILURES confidence + evidence label. Same columns, same order (the app reads SELECT *).
 --
 -- COST: none at apply (two proc swaps and one view swap). The view is computed at read time on the same tables;
 -- the declare proc gains one IF.
--- FIRST RUN: the next proposal read re-classifies every open proposal; the next manual declare from a 4.609.0
--- app writes the declaring DBA. Nothing runs at apply time. History is not rewritten: earlier manual declares
+-- FIRST RUN: the next proposal read re-classifies every open proposal; a manual declare from a 4.609.0 app made
+-- 30 s or more after the apply writes the declaring DBA (Control Room's SQL preview then ends with the viewer as a
+-- 5th argument). Nothing runs at apply time. History is not rewritten: earlier manual declares
 -- keep the app owner as Declared by (an optional, owner-run heuristic repair is staged separately).
 -- ROLLBACK: re-run V131's CREATE PROCEDURE and V072's CREATE VIEW. Remove the 5-arg overload (its teardown.sql
 -- line names the signature) only once no deployed app calls it: a 4.609.0 app on a V170 schema CALLs the 5-arg.
@@ -231,8 +243,9 @@ DESCRIPTION = (
     "owner-rights app is the owner). Both overloads roll back a declare whose members INSERT linked 0 rows and "
     "return NOOP: no open alerts left to link, and the success verdict is OK: declared <id> with <n> member(s) "
     "linked. INCIDENT_PROPOSALS re-derived from V072: EXH and ALL band tokens classify ACCOUNT (an EXH band no "
-    "longer opens a second incident for the same family), the user, warehouse and object rules added since V072 "
-    "get their entity kind, and a PIPE_TASK_FAILURES proposal no longer counts its own task failures as "
+    "longer opens a second incident for the same family), ten more user, warehouse and object rules whose key carries "
+    "a bare name get their entity kind (series-prefixed keys such as CLOUD SVC <WH> stay SCOPE), and a "
+    "PIPE_TASK_FAILURES proposal no longer counts its own task failures as "
     "corroboration (HIGH only with a matching task change; its evidence labels the count as the alert source). "
     "Same view columns. No data change, nothing runs at apply."
 )
@@ -337,8 +350,12 @@ WHERE SPLIT_PART(a.DEDUPE_KEY, '|', 2) = 'EXH'
   AND i.STATUS IN ('OPEN', 'MITIGATED')
 ORDER BY i.DETECTED_AT;
 
--- V170.6  after the first manual declare from the 4.609.0 app: the newest manual incidents and their members name
--- the declaring DBA (not the app owner). Auto-declared rows keep SP_INCIDENT_AUTODECLARE.
+-- V170.6  after the first manual declare from the 4.609.0 app made 30 s or more after the apply: the newest manual
+-- incidents and their members name the declaring DBA (not the app owner). Auto-declared rows keep
+-- SP_INCIDENT_AUTODECLARE. The app re-reads SCHEMA_VERSION on a 30 s tier while its 4 h schema cache lacks 170;
+-- before you declare, Control Room's SQL preview must end with the viewer as a 5th argument (4 arguments = the
+-- app does not see V170 yet: press Refresh data and look again). An incident declared before the apply, or
+-- through the 4-arg CALL, keeps the app owner (history is not rewritten).
 SELECT i.INCIDENT_ID, i.DETECTED_AT, i.DECLARED_BY,
        LISTAGG(DISTINCT m.LINKED_BY, ', ') AS LINKED_BY, COUNT(m.REF_ID) AS MEMBERS
 FROM DBA_MAINT_DB.OVERWATCH.INCIDENTS i

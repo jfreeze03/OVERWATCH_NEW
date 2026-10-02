@@ -85,7 +85,7 @@ from app.ui.components import (
     with_user_names,
     write_gate_open,
 )
-from app.ui.schema_gate import has_migration
+from app.ui.schema_gate import has_migration, has_migration_fresh
 from app.ui.workbench import render_action_center, render_entity_360, render_watchlist
 
 _PAGE = "Control Room"
@@ -250,8 +250,10 @@ def _incident_declare_call_sql(title: str, severity: str, company: str, proposal
     test-covered reference the proc mirrors. Params are bound (injection-safe).
 
     V170 (R2-028): ``actor_sql=identity_sql()`` selects the 5-arg overload, which stamps
-    DECLARED_BY / LINKED_BY with the viewer. The caller passes it only once has_migration(170):
-    before the apply that overload does not exist, and the kept 4-arg one credits the app owner."""
+    DECLARED_BY / LINKED_BY with the viewer. The caller passes it only once has_migration_fresh(170)
+    (holistic #16: a live re-read when the 4 h stash lacks V170, so the first declare after the apply
+    already credits the DBA): before the apply that overload does not exist, and the kept 4-arg one
+    credits the app owner."""
     from app.config import core_object
     from app.core.sqlsafe import sql_literal
     return (
@@ -1335,6 +1337,10 @@ def render() -> None:
         oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company, lifecycle=True), page=_PAGE,
                  key=f"open_incidents_{company}", tier="live",
                  source=f"INCIDENTS (open + mitigated, {company} + account-level)")
+        # Holistic #16: V170 changes the declare CALL's shape (the 5-arg overload credits the DBA, for good), so the
+        # CALL, its preview and the two V170 captions below share ONE fresh answer: the 4 h metadata stash, or a
+        # live-tier SCHEMA_VERSION re-read when that stash lacks 170 (none once it has turned over).
+        _v170 = has_migration_fresh(170, _PAGE)
         _incident_reset_panel(company, _open_now, _is_op)
         # Next-Fifty #12a: the ready-to-close count comes from the UNCAPPED incident_metrics row
         # (READY_TO_CLOSE_N), never len() of the LIMIT-50 open list below.
@@ -1353,7 +1359,7 @@ def render() -> None:
                 key="cr_inc_sel", height=190)
             # R2-028: before V170 manual declares credit the app owner (claimed fixed only once applied); after
             # it, earlier manual declares still do (no history rewrite), so the disclosure stays while one is listed.
-            _decl_cap = _declared_by_caption(has_migration(170, _PAGE),
+            _decl_cap = _declared_by_caption(_v170,
                                              oi.df["DECLARED_BY"] if "DECLARED_BY" in oi.df.columns else None)
             if _decl_cap:
                 st.caption(_decl_cap)
@@ -1470,7 +1476,7 @@ def render() -> None:
                 # R2-031 (V170): a task-failure proposal's own failures are its alert source, not corroboration.
                 # Claimed only once applied -- before that the V072 view still scores every one HIGH.
                 _task_txt = ""
-                if has_migration(170, _PAGE):
+                if _v170:
                     _task_txt = (" Task-failure proposals reach HIGH only with a matching task change; repeat "
                                  "failing days rate MEDIUM.")
                 st.caption(
@@ -1478,10 +1484,11 @@ def render() -> None:
                     f"Evidence: {_evidence} Human confirmation is still required." + _task_txt
                 )
                 # V170 (R2-028): the 5-arg overload stamps the viewer as DECLARED_BY / LINKED_BY. Gated: before
-                # the apply only the V131 4-arg overload exists, and a 5-arg CALL would fail.
+                # the apply only the V131 4-arg overload exists, and a 5-arg CALL would fail. The click is a fresh
+                # run, so the CALL it executes is this run's preview, decided from this run's _v170 (holistic #16).
                 _call = _incident_declare_call_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
                                                    str(_prow["COMPANY"]), _pick,
-                                                   actor_sql=identity_sql() if has_migration(170, _PAGE) else None)
+                                                   actor_sql=identity_sql() if _v170 else None)
                 st.code(_call + ";", language="sql")
                 # Scope the confirm/latch keys by the selected proposal so a typed DECLARE
                 # authorizes only THAT proposal — a fixed key let a confirmation typed for

@@ -43,9 +43,32 @@
 -- TASK_CHANGE_IMPACT_SCAN (06:50) rewrite tracking rows' VERDICT_DETAIL and re-freeze the nulled PROCEDURE
 -- baselines; the next TASK_ANOMALY_SWEEP books with the new company. Verdicts on collision- or retry-affected
 -- objects change on that run (intended). Already-raised alerts are not re-raised (dedupe keys unchanged).
--- ROLLBACK: re-run the base CREATEs (V140 SP_CHANGE_IMPACT_SCAN, V109 SP_WAREHOUSE_CHANGE_SCAN, V133
--- SP_SCAN_SCHEMA_DRIFT, V150 SP_SCAN_CLOUD_SVC_ANOMALY + SP_ANOMALY_SWEEP). The re-stamped COMPANY values and
--- the re-frozen baselines stay (they are the corrected values).
+-- DELIVERY: re-raising is not delivery. SP_NOTIFY_WEBHOOK (V164) sends an OPEN event to a route only when the
+-- route's COMPANY_FILTER is ALL or the event's COMPANY, once per (EVENT_ID, ROUTE_ID) in ALERT_DELIVERIES, and
+-- V034 set every existing route to 'ALFA'. (a) On a database with no COMPANY_SCOPE row that is not TRXS_ / ALFA% /
+-- ADMIN, PERF_CHANGE_REGRESSION, PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT alerts are
+-- now UNKNOWN and stop posting to an ALFA-only route (the first three seed HIGH, PIPE_DT_FAILURES is CRITICAL at
+-- 5+ failures), with no undelivered_expired row either (the watchdog reads the same filter). To keep them
+-- posting, map the database (Cost Intelligence > Spend & Attribution > Unmapped entities) or add an ALL or
+-- UNKNOWN route. (b) An OPEN event the R1b / R2 re-stamps move to a company another enabled route carries becomes
+-- eligible there: the next TASK_ALERT_NOTIFY run sends it once if it is still inside the send window (24h; 7d
+-- for CRITICAL); an older one raised within 7 days gets one undelivered_expired row for that route instead.
+-- ROLLBACK (order matters): 1. Re-run the base CREATEs (V140 SP_CHANGE_IMPACT_SCAN, V109
+-- SP_WAREHOUSE_CHANGE_SCAN, V133 SP_SCAN_SCHEMA_DRIFT, V150 SP_SCAN_CLOUD_SVC_ANOMALY + SP_ANOMALY_SWEEP). The
+-- re-stamped COMPANY values stay (they are the corrected values). 2. Right after V140's CREATE, before the next
+-- change-impact scan (06:50 Central, or Operations' Run change-impact scan now), null the still-tracking
+-- TASK and PROCEDURE baselines:
+--     UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+--        SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,
+--            BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL
+--      WHERE OBJECT_TYPE IN ('TASK', 'PROCEDURE') AND CURRENT_DATE() <= TRACKING_UNTIL AND NOT ALERTED;
+-- Why: R4 and the V172 scan froze them per scheduled run (terminal attempt) and by the anchored CALL match, but
+-- V140's AFTER legs count every attempt and the bare suffix match, and V140 re-freezes only a NULL baseline.
+-- Kept, a task with 7 of 14 runs retried once on both sides reads 14 runs / 0 failed before vs 21 / 7 after:
+-- REGRESSED, a false PERF_CHANGE_REGRESSION page; a rescaled credits/call reads a false IMPROVED. Nulled, V140's
+-- next scan re-freezes them on its own basis (over its 20-day reach: a change older than 6 days gets a shorter
+-- baseline). An ALERTED row keeps the baseline its alert was raised on (V140 alerts a row once). Check any
+-- PERF_CHANGE_REGRESSION raised between steps 1 and 2 before acting on it.
 -- Apply AFTER V171. Idempotent; safe to re-run.
 
 EXECUTE IMMEDIATE
@@ -1529,27 +1552,6 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS t
  WHERE t.EVENT_ID = s.EVENT_ID
    AND t.COMPANY IS DISTINCT FROM s.NEW_COMPANY;
 
--- R3 (R2-021) the suffix match froze baselines that blended a RUN_<name> / X_<name> wrapper's calls into <name>.
--- Frozen baselines never recompute, so null them -- only for still-tracking PROCEDURE rows whose short name is a
--- strict suffix of another procedure's name (deleted procedures included: their old calls are still in the
--- window), and only on the FIRST apply (a re-run must not undo the next scan's re-freeze). The next
--- TASK_CHANGE_IMPACT_SCAN re-freezes them with the anchored match (over the scan's own 20-day reach: a change
--- older than 6 days gets a shorter baseline, at least 6 days).
-UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
-   SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,
-       BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL
-  FROM (
-      SELECT DISTINCT r.CHANGE_ID
-      FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
-      JOIN SNOWFLAKE.ACCOUNT_USAGE.PROCEDURES p
-        ON ENDSWITH(UPPER(p.PROCEDURE_NAME), UPPER(SPLIT_PART(r.OBJECT_NAME, '.', 3)))
-       AND UPPER(p.PROCEDURE_NAME) <> UPPER(SPLIT_PART(r.OBJECT_NAME, '.', 3))
-      WHERE r.OBJECT_TYPE = 'PROCEDURE'
-        AND CURRENT_DATE() <= r.TRACKING_UNTIL
-        AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 172)
-  ) s
- WHERE t.CHANGE_ID = s.CHANGE_ID;
-
 -- R4 (R2-025) still-tracking TASK baselines were frozen on raw attempts. Re-freeze them on the terminal attempt per
 -- scheduled run over their own [CHANGE_SEEN_AT - 14d, CHANGE_SEEN_AT) window (30 days of TASK_HISTORY covers every
 -- tracking row; no now-20d clip). The frozen credits numerator summed every attempt and still does, so credits/call
@@ -1580,7 +1582,31 @@ UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
   ) s
  WHERE t.CHANGE_ID = s.CHANGE_ID;
 
+-- R3 (R2-021) the suffix match froze baselines that blended a RUN_<name> / X_<name> wrapper's calls into <name>.
+-- Frozen baselines never recompute, so null them -- only for still-tracking PROCEDURE rows whose short name is a
+-- strict suffix of another procedure's name (deleted procedures included: their old calls are still in the
+-- window), and only once: a re-run must not undo a scan's re-freeze (each re-null re-freezes over a shorter
+-- window). R3 runs LAST, directly before the version row, so a missing 172 row means R3 has not committed: every
+-- statement that can stop the file (the five CREATEs, R1-R2, R4's 30-day TASK_HISTORY read) runs before it, and a
+-- retry after any of them nulls these rows for the first time, even if a scan ran in between. The next
+-- TASK_CHANGE_IMPACT_SCAN re-freezes them with the anchored match (over the scan's own 20-day reach: a change
+-- older than 6 days gets a shorter baseline, at least 6 days).
+UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+   SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,
+       BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL
+  FROM (
+      SELECT DISTINCT r.CHANGE_ID
+      FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+      JOIN SNOWFLAKE.ACCOUNT_USAGE.PROCEDURES p
+        ON ENDSWITH(UPPER(p.PROCEDURE_NAME), UPPER(SPLIT_PART(r.OBJECT_NAME, '.', 3)))
+       AND UPPER(p.PROCEDURE_NAME) <> UPPER(SPLIT_PART(r.OBJECT_NAME, '.', 3))
+      WHERE r.OBJECT_TYPE = 'PROCEDURE'
+        AND CURRENT_DATE() <= r.TRACKING_UNTIL
+        AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 172)
+  ) s
+ WHERE t.CHANGE_ID = s.CHANGE_ID;
+
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 172 AS VERSION,
-       'Detection scans (V166-V172 wave, detection cluster). SP_CHANGE_IMPACT_SCAN re-derived from V140: COMPANY via COMPANY_FOR_DATABASE in both registration arms (R2-023; arm 1a through a grouped derived table, the V030 shape); procedure calls matched by CALL<name>( or .<name>( over a whitespace-class strip, the drill rule, so RUN_<name> no longer blends into <name> (R2-021); TASK runs, fails and p95 count the terminal attempt per scheduled run (R2-025); the AFTER credits/call counts settled runs (started more than 8h ago) only, LEFT JOIN plus HAVING, divided by distinct scheduled runs (R2-022); VERDICT_DETAIL p95 in Hr/Min/Sec (R1-124). SP_WAREHOUSE_CHANGE_SCAN re-derived from V109: VERDICT_DETAIL p95 and queue in Hr/Min/Sec (R1-124). SP_SCAN_SCHEMA_DRIFT re-derived from V133 and SP_ANOMALY_SWEEP from V150: PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT COMPANY via COMPANY_FOR_DATABASE in a b wrapper (R2-024); the sweep also points COST_ORG_ACCOUNT_CREEP at Cost Intelligence > Contract & Forecast (R2-095), books COST_ANOMALY_SWEEP only while the rule is enabled (R1-227 rider, no early return) and reads CORTEX_MODEL normalized like the app (CORTEX-NULLIF); RETURN stays v3. SP_SCAN_CLOUD_SVC_ANOMALY re-derived from V150: the disabled-rule guard counts ENABLED rows (R1-227). One-time repairs: OBJECT_CHANGE_REGISTRY.COMPANY re-stamped, and live (OPEN, ACK, SNOOZED, not incident-linked) PERF_CHANGE_REGRESSION, DQ_SCHEMA_DRIFT, PIPE_DT_FAILURES, PIPE_VOLUME_DROP and DQ_BREACH events re-stamped from the database in their object FQN; first-apply null of suffix-collided tracking PROCEDURE baselines (re-frozen by the next scan); tracking TASK baselines re-frozen on the terminal-attempt basis with credits/call rescaled. No new object, no task change, no procedure run at apply time.' AS DESCRIPTION
+       'Detection scans (V166-V172 wave, detection cluster). SP_CHANGE_IMPACT_SCAN re-derived from V140: COMPANY via COMPANY_FOR_DATABASE in both registration arms (R2-023; arm 1a through a grouped derived table, the V030 shape); procedure calls matched by CALL<name>( or .<name>( over a whitespace-class strip, the drill rule, so RUN_<name> no longer blends into <name> (R2-021); TASK runs, fails and p95 count the terminal attempt per scheduled run (R2-025); the AFTER credits/call counts settled runs (started more than 8h ago) only, LEFT JOIN plus HAVING, divided by distinct scheduled runs (R2-022); VERDICT_DETAIL p95 in Hr/Min/Sec (R1-124). SP_WAREHOUSE_CHANGE_SCAN re-derived from V109: VERDICT_DETAIL p95 and queue in Hr/Min/Sec (R1-124). SP_SCAN_SCHEMA_DRIFT re-derived from V133 and SP_ANOMALY_SWEEP from V150: PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT COMPANY via COMPANY_FOR_DATABASE in a b wrapper (R2-024); the sweep also points COST_ORG_ACCOUNT_CREEP at Cost Intelligence > Contract & Forecast (R2-095), books COST_ANOMALY_SWEEP only while the rule is enabled (R1-227 rider, no early return) and reads CORTEX_MODEL normalized like the app (CORTEX-NULLIF); RETURN stays v3. SP_SCAN_CLOUD_SVC_ANOMALY re-derived from V150: the disabled-rule guard counts ENABLED rows (R1-227). One-time repairs: OBJECT_CHANGE_REGISTRY.COMPANY re-stamped, and live (OPEN, ACK, SNOOZED, not incident-linked) PERF_CHANGE_REGRESSION, DQ_SCHEMA_DRIFT, PIPE_DT_FAILURES, PIPE_VOLUME_DROP and DQ_BREACH events re-stamped from the database in their object FQN; tracking TASK baselines re-frozen on the terminal-attempt basis with credits/call rescaled; last, right before this row, a first-apply null of suffix-collided tracking PROCEDURE baselines (re-frozen by the next scan). No new object, no task change, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 172);

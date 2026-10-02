@@ -150,6 +150,82 @@ def test_the_startup_gate_hands_off_before_it_can_return():
     assert "from app.ui import schema_gate" in read("app/main.py")
 
 
+# --- a write whose SQL shape changes at the apply asks has_migration_fresh -------------------------------
+# Holistic #16 (v4.609.0): Control Room picked SP_INCIDENT_DECLARE's overload from the 4 h metadata stash, so the
+# first manual declare after the V170 apply could still CALL the 4-arg proc and credit the app owner for good.
+def test_fresh_answers_from_the_stash_when_it_already_holds_the_version(monkeypatch):
+    """The steady state after the apply (or after the metadata tier turns over) costs nothing."""
+    _state(monkeypatch, {"_ow_run_seq": 4, schema_gate.STASH_KEY: (4, frozenset(range(1, 171)))})
+    gate = _recorder(monkeypatch, schema_gate, _versions(1))
+    assert schema_gate.has_migration_fresh(170, "Control Room") is True
+    assert gate == []
+
+
+def test_fresh_rereads_on_the_live_tier_when_the_stash_lacks_the_version_prefix_169(monkeypatch):
+    """Before the apply: the stash and the fresh read both stop at 169 -> not applied, one read per full run."""
+    state = _state(monkeypatch, {"_ow_run_seq": 4, schema_gate.STASH_KEY: (4, frozenset(range(1, 170)))})
+    gate = _recorder(monkeypatch, schema_gate, _versions(*range(1, 170)))
+    assert schema_gate.has_migration_fresh(170, "Control Room") is False
+    assert schema_gate.has_migration_fresh(170, "Control Room") is False
+    assert len(gate) == 1
+    assert gate[0]["sql"] == mart_sql.schema_version()
+    assert gate[0]["tier"] == schema_gate.FRESH_TIER == "live"                # 30 s, not the 4 h metadata tier
+    assert gate[0]["probe"] is True and gate[0]["page"] == "Control Room"
+    assert gate[0]["key"] != "schema_gate"                                    # its own telemetry key
+    assert state[schema_gate.STASH_KEY] == (4, frozenset(range(1, 170)))      # the startup answer is untouched
+    state["_ow_run_seq"] = 5
+    state[schema_gate.STASH_KEY] = (5, frozenset(range(1, 170)))
+    assert schema_gate.has_migration_fresh(170, "Control Room") is False
+    assert len(gate) == 2                                                     # the next full run asks again
+
+
+def test_fresh_sees_a_migration_applied_after_the_stash_was_cached(monkeypatch):
+    """After the apply, inside the 4 h metadata window: the stash still says 169, the live read says 170."""
+    _state(monkeypatch, {"_ow_run_seq": 9, schema_gate.STASH_KEY: (9, frozenset(range(1, 170)))})
+    gate = _recorder(monkeypatch, schema_gate, _versions(*range(1, 173)))
+    assert schema_gate.has_migration(170, "Control Room") is False            # the shared gate is unchanged
+    assert schema_gate.has_migration_fresh(170, "Control Room") is True
+    assert schema_gate.has_migration_fresh(171, "Control Room") is True       # same run, same answer
+    assert len(gate) == 1
+
+
+@pytest.mark.parametrize("res", [
+    QueryResult(ok=False, error="warehouse suspended"),
+    QueryResult(df=pd.DataFrame({"VERSION": []}), ok=True),
+    QueryResult(df=pd.DataFrame({"OTHER": [170]}), ok=True),
+])
+def test_fresh_unreadable_is_not_applied_and_asked_once_per_run(monkeypatch, res):
+    _state(monkeypatch, {"_ow_run_seq": 2, schema_gate.STASH_KEY: (2, frozenset(range(1, 170)))})
+    gate = _recorder(monkeypatch, schema_gate, res)
+    assert schema_gate.has_migration_fresh(170, "Control Room") is False
+    assert schema_gate.has_migration_fresh(170, "Control Room") is False
+    assert len(gate) == 1
+
+
+def test_fresh_without_a_run_sequence_reads_every_call_and_stashes_nothing(monkeypatch):
+    state = _state(monkeypatch, {})
+    gate = _recorder(monkeypatch, schema_gate, _versions(*range(1, 170)))
+    assert schema_gate.has_migration_fresh(170, "Control Room") is False
+    assert schema_gate.has_migration_fresh(170, "Control Room") is False
+    assert [c["tier"] for c in gate] == ["metadata", "live", "metadata", "live"] and state == {}
+    gate.clear()
+    monkeypatch.setattr(schema_gate, "run", lambda sql, **kw: gate.append(kw) or _versions(170))
+    assert schema_gate.has_migration_fresh(170, "Control Room") is True
+    assert [c["tier"] for c in gate] == ["metadata"]                          # found on the shared gate's read
+
+
+def test_control_room_declare_overload_and_its_captions_read_fresh():
+    """The declare CALL (its SQL preview and the click) and the two captions that claim V170 behaviour use ONE
+    fresh answer per run; no other has_migration(170) is left in the Incidents section."""
+    cr = read("app/ui/pages/control_room.py")
+    body = cr.split('elif section == "Incidents & triage":', 1)[1].split("\n    elif section ==", 1)[0]
+    assert "has_migration(170, _PAGE)" not in body
+    assert body.count("_v170 = has_migration_fresh(170, _PAGE)") == 1
+    first_use = min(body.index("_declared_by_caption(_v170,"), body.index("actor_sql=identity_sql() if _v170"))
+    assert body.index("_v170 = has_migration_fresh(170, _PAGE)") < first_use
+    assert "from app.ui.schema_gate import has_migration, has_migration_fresh" in cr
+
+
 def test_control_room_v154_caption_rides_the_shared_gate():
     cr = read("app/ui/pages/control_room.py")
     body = cr.split("def _v154_applied()", 1)[1].split("\ndef ", 1)[0]

@@ -488,6 +488,40 @@ def test_v170_class_changes_vs_v072():
     assert not {"STALE", "ERR"} & _bands()
 
 
+def test_v170_text_names_the_rules_it_classifies_and_the_prefixed_ones_it_does_not():
+    """Holistic #11: the header, the SCHEMA_VERSION text and Admin claimed every user / warehouse / object rule added
+    since V072 got its entity kind. COST_CLOUD_SVC_ANOMALY (V150, key part 2 'CLOUD SVC <WH>') stays SCOPE, and must:
+    the declare filters on the raw part 2, so ENTITY_NAME keeps the prefix. The text now names what moved."""
+    from app.ui.pages.admin import _EXPECTED_MIGRATIONS
+    header = _MIG[:_MIG.index("EXECUTE IMMEDIATE")]
+    desc = re.search(r"SELECT 170 AS VERSION,\n       '(.*)' AS DESCRIPTION\n", _MIG, re.S).group(1)
+    admin = str(_EXPECTED_MIGRATIONS[170])
+    for text in (header, desc, admin):
+        assert "added since V072" not in text
+        assert "series-prefixed keys" in text.lower()
+    for rule in ("COST_IDLE_OPPORTUNITY", "COST_SLEEP_POLLING", "PIPE_DT_FAILURES", "PIPE_VOLUME_DROP", "DQ_BREACH",
+                 "DQ_SCHEMA_DRIFT", "SEC_FAILED_LOGINS", "SEC_LOGIN_TAKEOVER", "SEC_ADMIN_GRANT",
+                 "COST_AI_USER_RUNAWAY"):
+        assert rule in header, rule
+    assert "COST_CLOUD_SVC_ANOMALY ('CLOUD SVC <WH>')" in header and "COST_CLOUD_SVC_ANOMALY" in admin
+    assert "CLOUD SVC <WH> stay SCOPE" in desc
+    for rule in ("COST_CLOUD_SVC_ANOMALY", "COST_ANOMALY_SWEEP"):
+        assert _kind(EXPECTED[rule][0]) == "SCOPE", rule
+        assert f"'{rule}'" not in _CASE, rule
+
+
+def test_v170_part_b_declare_check_says_how_to_see_the_5_arg_call(tmp_path):
+    """Holistic #16: V170.6 is run after the first manual declare; it says how to confirm, before declaring, that the
+    app CALLs the 5-arg overload (an earlier declare keeps the app owner for good)."""
+    _, part_b = _extras(tmp_path)
+    grid = part_b[part_b.index("-- V170.6 "):]
+    head = grid[:grid.index("\nSELECT ")]
+    assert "30 s or more after the apply" in head
+    assert "SQL preview must end with the viewer as a 5th argument" in head
+    assert "press Refresh data" in head
+    assert "keeps the app owner (history is not rewritten)" in head
+
+
 def test_v170_bands_cover_every_supersede_token():
     """Every band token the hourly supersede sweep escalates between is an ACCOUNT token here, so an escalated
     band never reads as an entity (V072 drifted: EXH was added to the sweep, never to the view)."""
@@ -582,7 +616,11 @@ def _declare_block() -> str:
 
 def test_declare_call_site_gates_the_actor_on_v170_and_reads_the_verdict():
     body = _CR.split('elif section == "Incidents & triage":', 1)[1]
-    assert "actor_sql=identity_sql() if has_migration(170, _PAGE) else None" in body
+    # holistic #16: the overload is decided from the run's FRESH V170 answer (schema_gate.has_migration_fresh: a live
+    # re-read when the 4 h metadata stash lacks 170), so the first declare after the apply credits the DBA
+    assert "actor_sql=identity_sql() if _v170 else None" in body
+    assert body.count("_v170 = has_migration_fresh(170, _PAGE)") == 1
+    assert body.index("_v170 = has_migration_fresh(170, _PAGE)") < body.index("actor_sql=identity_sql() if _v170")
     blk = _declare_block()
     # the CALL goes through execute_action with NO fallback: the legacy two-INSERT path V131 removed never returns
     assert 'execute_action(_call + ";", [], page=_PAGE)' in blk
@@ -655,14 +693,15 @@ def test_declare_captions_are_schema_gated():
     body = _CR.split('elif section == "Incidents & triage":', 1)[1]
     # pre-V170 honesty: manual declares credit the app owner until the 5-arg overload exists; after the apply the
     # caption is kept (history is not rewritten) while a manual declare is listed -- both decided by the helper
-    assert body.count("_declared_by_caption(has_migration(170, _PAGE),") == 1
-    i = body.index("_declared_by_caption(has_migration(170, _PAGE),")
+    assert body.count("_declared_by_caption(_v170,") == 1
+    i = body.index("_declared_by_caption(_v170,")
+    assert body.index("_v170 = has_migration_fresh(170, _PAGE)") < i
     assert 'oi.df["DECLARED_BY"] if "DECLARED_BY" in oi.df.columns else None' in body[i:i + 200]
     assert "selectable_table(" in body[i - 600:i]          # right under the Open incidents table
     # the V170 confidence rule is claimed only once applied
     assert "reach HIGH only with a matching task change" in body
     gate = body.index("reach HIGH only with a matching task change")
-    assert "has_migration(170, _PAGE)" in body[gate - 400:gate]
+    assert "if _v170:" in body[gate - 400:gate]
     assert '"account-wide (the whole family)" if _entity_kind.upper() == "ACCOUNT"' in body
     assert 'f"Scope: {_scope} | confidence {_confidence}. "' in body
 

@@ -13,7 +13,9 @@
 -- COST_EGRESS_SPIKE named the destination of the largest single row in 14 days, counted same-region internal
 -- moves, and its rolling window never counted the ~2h before each scan. (R1-071) COST_IDLE_OPPORTUNITY skipped a
 -- never-suspend warehouse (SHOW reports a NULL timer). (R1-233) SEC_TRUST_REGRESSION fired on unchanged counts at
--- a threshold of 0.
+-- a threshold of 0. (Holistic #4/#9) the OPS_PIPELINE_DEGRADED ERR DETAIL told every logged loader failure 'its task
+-- still reads SUCCEEDED', but V166's SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back and re-raise, so
+-- TASK_HISTORY shows those runs FAILED.
 --
 --   ~ SP_ALERT_SCAN_DAILY re-derived from V163 (its current definer), byte-identical except:
 --     ~ both mtd CTEs + MTD_COMPLETE_USD (DAY < today, the two-partition pricing): [08] pace and [09] forecast use
@@ -26,6 +28,10 @@
 --     ~ [19]: the previous complete Central day of TRUE egress (TARGET_REGION or TARGET_CLOUD set), top
 --       destination = the largest per-region total of that day; TITLE 'Egress N GB on <day> (14d avg ...)'.
 --     ~ [24]: a NULL snapshot timer reads as 0 (never suspends); [29]: GREATEST(COALESCE(THRESHOLD_NUM, 1), 1).
+--     ~ [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' / 'StorageTruth' row, the V166
+--       loaders that roll back, log and re-raise); the DETAIL says that run FAILED (TASK_HISTORY shows it), and
+--       keeps 'returned normally, so its task still reads SUCCEEDED' for every other loader. Keys, sources and
+--       windows unchanged; byte-identical to V168's hourly twin.
 --     ~ the RETURN label names V169; the 14-block tally is unchanged.
 --   ~ ALERT_CONFIG NAME of COST_EGRESS_SPIKE, only while it still equals the V043 seed text.
 --
@@ -60,7 +66,7 @@ BEGIN
 END;
 $$;
 
--- >>> derived:SP_ALERT_SCAN_DAILY  (from V163; [08]/[09] complete-day MTD, [16] contract start gate + end bound, [12] live DATABASE_ID, [18] error-cycle-day key, [19] previous-day true egress, [24] NULL timer as 0, [29] threshold floor, V169)
+-- >>> derived:SP_ALERT_SCAN_DAILY  (from V163; [08]/[09] complete-day MTD, [16] contract start gate + end bound, [12] live DATABASE_ID, [18] error-cycle-day key, [19] previous-day true egress, [24] NULL timer as 0, [29] threshold floor, [22] ERR re-raise wording, V169)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN_DAILY()
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -608,8 +614,10 @@ BEGIN
     --      past the shared name-rule cadence (DAILY/METERING in the name 30h, else 3h -- the app health strip,
     --      Admin, Control Room and NATIVE_ALERT_STALE_FACTS judge it the same way), including the scans' own
     --      heartbeat rows ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY -- at most one event per source per last-load
-    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged and swallowed
-    --      (its task still reads SUCCEEDED) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one
+    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged -- most
+    --      loaders swallow it (their task still reads SUCCEEDED); V166's SP_LOAD_APP_COST and
+    --      SP_LOAD_STORAGE_TRUTH roll back to the previous fill and re-raise (their task reads FAILED), and
+    --      the DETAIL says which (RERAISED, V168 + V169) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one
     --      event per (type, source, Central day). The three OPTIONAL SP_LOAD_MARTS_V27 arm sources (tag
     --      coverage, task node, AI usage) are left to the STALE leg, so a persistently failing optional arm
     --      raises once per episode instead of every day. (c) NOTIFY: SP_NOTIFY_WEBHOOK has not acquired its
@@ -632,7 +640,8 @@ BEGIN
         errs AS (
             SELECT ERROR_TYPE, SPLIT_PART(COALESCE(CONTEXT, ''), ' ', 1) AS SRC,
                    TO_DATE(LOGGED_AT) AS ERR_DAY, COUNT(*) AS N,
-                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG
+                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG,
+                   MAX(IFF(PAGE IN ('AppCost', 'StorageTruth'), 1, 0)) AS RERAISED   -- the V166 loads that roll back and re-raise
             FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
             WHERE ERROR_TYPE IN ('mart_load_failed', 'fact_load_failed', 'extract_load_failed',
                                  'cloud_svc_mart_failed', 'object_cost_load_failed')
@@ -676,8 +685,12 @@ BEGIN
         UNION ALL
         SELECT c.RULE_ID, 'ALL', c.SEVERITY,
                LEFT(x.ERROR_TYPE || ': ' || x.SRC || ' failed ' || x.N || 'x on ' || TO_VARCHAR(x.ERR_DAY), 300),
-               LEFT('The loader logged this and returned normally, so its task still reads SUCCEEDED and readers '
-                   || 'keep the previous fill. Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '
+               LEFT(IFF(x.RERAISED = 1,
+                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '
+                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',
+                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '
+                        || 'readers keep the previous fill.')
+                   || ' Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '
                    || COALESCE(LEFT(x.LAST_MSG, 600), '—') || '. Admin > Errors & telemetry (persisted error log).', 2000),
                x.N,
                c.RULE_ID || '|ERR|' || x.ERROR_TYPE || '|' || x.SRC || '|' || TO_VARCHAR(x.ERR_DAY)
@@ -1186,5 +1199,5 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 169 AS VERSION,
-       'Round-2 review, alerts cluster (R2-041, R2-042, R2-103, R2-044, R2-020, R2-043, R2-047, R1-071, R1-233). SP_ALERT_SCAN_DAILY re-derived from V163, byte-identical except: both mtd CTEs gain MTD_COMPLETE_USD (complete days only), which COST_BUDGET_PACE compares with the completed-days allowance and COST_FORECAST_BREACH projects with the remaining days including today; COST_CONTRACT_BREACH counts TOTAL only with a parsable CONTRACT_START_DATE, bounds CONSUMED by CONTRACT_END_DATE (exclusive) and raises nothing once the term is over or when the exhaustion falls on or after its end; COST_STORAGE_SURGE compares per live DATABASE_ID; DQ_RECON_ERROR keys on the newest error-cycle date; COST_EGRESS_SPIKE reads the previous complete Central day of true egress with the top destination by per-region total; COST_IDLE_OPPORTUNITY reads a NULL snapshot timer as never suspends; SEC_TRUST_REGRESSION floors its threshold at 1; RETURN names V169, tally 14 unchanged. ALERT_CONFIG NAME of COST_EGRESS_SPIKE refreshed only while it equals the seed text. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
+       'Round-2 review, alerts cluster (R2-041, R2-042, R2-103, R2-044, R2-020, R2-043, R2-047, R1-071, R1-233). SP_ALERT_SCAN_DAILY re-derived from V163, byte-identical except: both mtd CTEs gain MTD_COMPLETE_USD (complete days only), which COST_BUDGET_PACE compares with the completed-days allowance and COST_FORECAST_BREACH projects with the remaining days including today; COST_CONTRACT_BREACH counts TOTAL only with a parsable CONTRACT_START_DATE, bounds CONSUMED by CONTRACT_END_DATE (exclusive) and raises nothing once the term is over or when the exhaustion falls on or after its end; COST_STORAGE_SURGE compares per live DATABASE_ID; DQ_RECON_ERROR keys on the newest error-cycle date; COST_EGRESS_SPIKE reads the previous complete Central day of true egress with the top destination by per-region total; COST_IDLE_OPPORTUNITY reads a NULL snapshot timer as never suspends; SEC_TRUST_REGRESSION floors its threshold at 1; the OPS_PIPELINE_DEGRADED ERR detail says a run of the V166 app-cost or storage-truth loader rolled back and FAILED instead of claiming its task still reads SUCCEEDED; RETURN names V169, tally 14 unchanged. ALERT_CONFIG NAME of COST_EGRESS_SPIKE refreshed only while it equals the seed text. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 169);
