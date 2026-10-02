@@ -51,7 +51,8 @@ def mirror(tmp_path_factory):
 def test_the_sweep_sees_every_generator():
     assert len(_GENERATORS) >= 88
     assert {g.name for g in _GENERATORS} >= {"gen_v091.py", "gen_v101.py", "gen_v130.py", "gen_v147.py",
-                                             "gen_v165.py"}
+                                             "gen_v165.py", "gen_v166.py", "gen_v167.py", "gen_v168.py",
+                                             "gen_v169.py", "gen_v170.py", "gen_v171.py", "gen_v172.py"}
 
 
 @pytest.mark.parametrize("gen", _GENERATORS, ids=lambda p: p.stem)

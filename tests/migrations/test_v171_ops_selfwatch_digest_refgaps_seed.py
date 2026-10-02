@@ -829,3 +829,23 @@ def test_v171_seed_is_when_not_matched_only_and_never_satisfies_validate():
     assert len(lists) == 2
     for lst in lists:
         assert "'FALSE'" not in lst and "FALSE" not in re.findall(r"'([^']*)'", lst)
+
+
+def test_v171_seed_matches_the_app_default_and_never_reads_as_an_override():
+    """Integration (CREDIT-PRICE-SEED app half): DEFAULT_SETTINGS carries the seeded value, and Admin's mirror of
+    validate's override test reads it as no override."""
+    from app.config import DEFAULT_SETTINGS
+    from app.ui.pages import admin
+    assert str(DEFAULT_SETTINGS["CREDIT_PRICE_OVERRIDE"]) == "FALSE"
+    assert "        ('CREDIT_PRICE_OVERRIDE', 'FALSE')\n" in _MIG
+    assert not admin._override_on("FALSE")
+    assert "CREDIT_PRICE_OVERRIDE" in admin._DEPLOY_GATE_SETTINGS
+
+
+def test_v171_in_expected_migrations():
+    """Integrator lockstep: Admin lists V171 with house-rule text (no $, no hand CALL, no trailing '.')."""
+    from app.ui.pages.admin import _EXPECTED_MIGRATIONS
+    text = str(_EXPECTED_MIGRATIONS[171])
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_" not in text and "$" not in text and not text.endswith(".")
+    assert "7 complete days" in text and "ref_gap_check_failed" in text and "CREDIT_PRICE_OVERRIDE" in text
+    assert "Hr/Min/Sec" in text

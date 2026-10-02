@@ -175,12 +175,20 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   MOD(ct_hour, 4) = 1, the hourly [22] only when MOD(ct_hour, 3) = 2; a gate wraps an UNCHANGED arm
   and a gated-off arm counts as ok. `app/logic/quotas.runaway_days` is the app twin of daily arm [28]:
   re-derive either side only with `tests/test_ai_runaway_parity.py` green (or change both together).
-- Current definers of the wave-4 procs (re-derive forward from THESE): SP_ALERT_SCAN and
-  SP_INCIDENT_AUTODECLARE = V162, SP_ALERT_SCAN_DAILY = V163, SP_NOTIFY_WEBHOOK = V164 (its escalation
-  SETTINGS expressions are pinned to `mart_sql.ESCALATE_*` by `tests/test_escalation_delivery.py`, and
-  `last_delivery_health` still keys on the `route <id> integration <name>` CONTEXT), SP_DAILY_DIGEST =
-  V165 (its grounding literals live in `app/logic/digest_grounding.py`, locked by
-  `tests/test_digest_grounding_parity.py`). A proc-calling task's TASK_HISTORY RETURN_VALUE is NULL:
+- Current definers (re-derive forward from THESE): SP_ALERT_SCAN = V168, SP_ALERT_SCAN_DAILY = V169
+  (arm numbers unchanged; the next free is still [30]), SP_INCIDENT_AUTODECLARE = V162, SP_NOTIFY_WEBHOOK =
+  V164 (its escalation SETTINGS expressions are pinned to `mart_sql.ESCALATE_*` by
+  `tests/test_escalation_delivery.py`, and `last_delivery_health` still keys on the
+  `route <id> integration <name>` CONTEXT), SP_DAILY_DIGEST = V171 (its grounding literals still live in
+  `app/logic/digest_grounding.py`, locked by `tests/test_digest_grounding_parity.py`), SP_CANARY_SENTINEL and
+  SP_SCAN_REF_GAPS = V171, SP_INCIDENT_DECLARE = V170 with TWO overloads (the 4-arg kept until the gated app
+  is deployed, the 5-arg with P_ACTOR: re-derive BOTH, or drop the 4-arg first) and INCIDENT_PROPOSALS = V170,
+  SP_LOAD_MARTS_V27, SP_NIGHTLY_RECONCILE and SP_LOAD_PATTERN_COST = V167, SP_LOAD_SECURITY_FACTS,
+  SP_LOAD_DAILY_FACTS, SP_LOAD_APP_COST and SP_LOAD_STORAGE_TRUTH = V166, SP_CHANGE_IMPACT_SCAN,
+  SP_WAREHOUSE_CHANGE_SCAN, SP_SCAN_SCHEMA_DRIFT, SP_SCAN_CLOUD_SVC_ANOMALY and SP_ANOMALY_SWEEP = V172. The
+  Hr/Min/Sec CASE template in V171's OPS_SLOW_RENDER title and V172's VERDICT_DETAIL is the SQL twin of
+  `formulas.humanize_duration`; the digest (V171) and the sweep (V172) read CORTEX_MODEL with the same
+  literal as `app.core.ai.normalize_model`. A proc-calling task's TASK_HISTORY RETURN_VALUE is NULL:
   verify a scheduled proc by its heartbeat / ledger rows, never by the return string or a hand CALL.
 - Validate/loader worksheets are pasted by Joe; the app monitors the loader
   through APP_ERROR_LOG + SOURCE_FRESHNESS_STATE (loader-owned freshness).
@@ -237,7 +245,7 @@ recorded in locks/comments so the story survives (grep "owner" in tests/).
 ## Standing open items
 
 - r28+ queue: reconciliation v2 by dimension is the one item still open
-  (SP_NIGHTLY_RECONCILE is still the V064 shape). Shipped since: the action
+  (SP_NIGHTLY_RECONCILE is V064's shape plus V167's R2-018 mark-and-sweep of the four wide-edge tables). Shipped since: the action
   layer (V051 OW_ACTION_INTENTS + SP_ALERT_LIFECYCLE; V074/V092
   SP_ACTION_LIFECYCLE with REQUEST_KEY idempotency; the remediation/verify
   procs were deliberately dropped in V053), evidence-grade savings

@@ -13,8 +13,8 @@
 -- that ran and stopped), which is the real dead-man signal on re-runs / DR.
 
 WITH checks AS (
-    SELECT 'V001..V165 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 165) = 165,
+    SELECT 'V001..V172 applied' AS CHECK_NAME,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 172) = 172,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',
@@ -90,7 +90,7 @@ WITH checks AS (
                'OK', 'FAIL: CREDIT_PRICE_USD <= 0 or non-numeric — everything prices to $0')
     UNION ALL
     -- Deliberate-override convention: to run a non-3.68 contracted rate,
-    -- also seed SETTINGS('CREDIT_PRICE_OVERRIDE','TRUE'). Absent that flag a
+    -- also set SETTINGS CREDIT_PRICE_OVERRIDE = 'TRUE' (seeded FALSE by V171; Admin > Settings). Absent that flag a
     -- drifted rate is treated as an accident and fails.
     SELECT 'Credit rate = 3.68 (or CREDIT_PRICE_OVERRIDE set)',
            IFF(ABS(COALESCE(TRY_TO_DOUBLE((SELECT VALUE FROM DBA_MAINT_DB.OVERWATCH.SETTINGS
@@ -153,6 +153,24 @@ WITH checks AS (
                                           'SP_NOTIFY_WEBHOOK', 'SP_NIGHTLY_RECONCILE',
                                           'SP_LOAD_SECURITY_FACTS')) = 5,
                'OK', 'FAIL: one or more key procs missing')
+    UNION ALL
+    SELECT 'SOURCE_FRESHNESS_STATE has COVERAGE_FROM (V167)',
+           IFF(EXISTS (SELECT 1 FROM DBA_MAINT_DB.INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = 'SOURCE_FRESHNESS_STATE'
+                          AND COLUMN_NAME = 'COVERAGE_FROM'),
+               'OK', 'FAIL: SOURCE_FRESHNESS_STATE.COVERAGE_FROM missing — apply V167')
+    UNION ALL
+    -- V170: the declare that credits the DBA (5-arg, P_ACTOR) exists. By signature, not COUNT(*) = 2: the 4-arg
+    -- overload is kept only until the gated app is deployed, and a later migration drops it.
+    SELECT 'SP_INCIDENT_DECLARE with P_ACTOR present (V170)',
+           IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
+                 WHERE PROCEDURE_SCHEMA = 'OVERWATCH' AND PROCEDURE_NAME = 'SP_INCIDENT_DECLARE'
+                   AND CONTAINS(ARGUMENT_SIGNATURE, 'P_ACTOR')) = 1,
+               'OK', 'FAIL: the 5-arg SP_INCIDENT_DECLARE (P_ACTOR) is missing — re-run V170')
+    UNION ALL
+    SELECT 'INCIDENT_PROPOSALS classifies EXH / ALL as account-level (V170)',
+           IFF(CONTAINS(GET_DDL('VIEW', 'DBA_MAINT_DB.OVERWATCH.INCIDENT_PROPOSALS'), '''EXH'', ''ALL'''),
+               'OK', 'FAIL: INCIDENT_PROPOSALS is older than V170 — re-run V170')
 )
 SELECT * FROM checks
 ORDER BY 1;
@@ -186,7 +204,7 @@ DECLARE
 
     e_migrations  EXCEPTION (-20011, 'VALIDATE FAIL: fewer than 88 migrations applied — the V001..V088 platform floor (the load-bearing minimum this block enforces) is not met; run missing migrations. The header SELECT separately reports the full repo-tip count.');
     e_rate_pos    EXCEPTION (-20012, 'VALIDATE FAIL: CREDIT_PRICE_USD is <= 0 or non-numeric — everything prices to $0');
-    e_rate_368    EXCEPTION (-20013, 'VALIDATE FAIL: CREDIT_PRICE_USD != 3.68 and no CREDIT_PRICE_OVERRIDE flag — seed SETTINGS(''CREDIT_PRICE_OVERRIDE'',''TRUE'') to run a non-default rate on purpose');
+    e_rate_368    EXCEPTION (-20013, 'VALIDATE FAIL: CREDIT_PRICE_USD != 3.68 and no CREDIT_PRICE_OVERRIDE flag — set CREDIT_PRICE_OVERRIDE to TRUE on Admin > Settings (an UPDATE, never a second INSERT) to run a non-default rate on purpose');
     e_meter_fresh EXCEPTION (-20014, 'VALIDATE FAIL: FACT_METERING_DAILY newest DAY older than the freshness SLA — the metering loader has stalled (empty passes: nothing loaded yet)');
     e_wh_fresh    EXCEPTION (-20015, 'VALIDATE FAIL: FACT_WAREHOUSE_DAILY newest DAY older than the freshness SLA — the warehouse loader has stalled (empty passes: nothing loaded yet)');
     e_route_blank EXCEPTION (-20016, 'VALIDATE FAIL: an ENABLED ALERT_ROUTES row has a blank INTEGRATION_NAME — those alerts drop silently');

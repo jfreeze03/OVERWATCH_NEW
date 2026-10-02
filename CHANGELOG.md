@@ -1,5 +1,69 @@
 # Changelog
 
+## 4.609.0 - Bug-hunt round 2, server side: seven migrations (V166-V172) for the loaders, marts, alerts, incidents and detection scans (2026-10-01)
+
+Seven migrations, V166-V172, ship the server-side findings 4.608.0 queued, plus the app halves that read them. Four
+owner decisions are not built and are named at the end. The work ran in six clusters (loaders, marts, alerts,
+incidents, ops self-watch, detection). Each procedure was re-derived from its current definer by a generator, and each
+cluster was reviewed adversarially and fixed again. The clusters were merged in version order. **Deploy this app
+first, then apply V162 → V172 in order** (DEPLOYMENT.md has one combined note; V164 still waits on the escalation
+email). Every app read of a new column, and every caption that claims a new behaviour, waits for its own migration.
+Nothing runs at apply time. Three migrations carry small, bounded repairs (V166, V167, V172). The heavy re-loads are
+owner-run blocks in a Central-time session.
+
+- **Loaders (V166).**
+  - Security change history no longer loses hours when the extract runs wide. The hourly reload deleted from the extract's first row but re-read only from midnight, so a swallowed extract failure, the year backfill or a manual short reload left holes in CHANGE RISK, the destructive breakdown and Who changed what. The delete and the re-read now share one bound (R2-007). Owner heal: a 180-day reload with the hourly graph suspended around it.
+  - Storage of re-created and clone-refreshed databases is summed, not averaged. Snowflake keeps a dropped database's bytes under the same name, and the fact averaged the rows (R2-009). The loader, the backfill and the Optimize storage-growth read now sum them, and the migration repairs the days still in Snowflake's 365-day view.
+  - A failed app-cost or storage-truth load no longer leaves a permanent hole. Both loaders deleted and then re-inserted without a transaction, and the next run starts a day later. Each now reloads in one transaction: a failure rolls back to the previous fill, logs `fact_load_failed` (so the self-watch alert raises) and still fails the task (R2-011). Three or more failed runs in a row can still leave one stale day; the catch-up floor is an owner question.
+  - Cost by application x user finds long-lived sessions. Sessions are now looked up 30 days back, not 7, in the loader and in its live twin, so pooled and keep-alive sessions are no longer labelled (unknown) (C10). The daily task now scans 33 days of SESSIONS instead of 10.
+  - `backfill_365.sql` now fills the cloud-services statement mart's history (364 Central days). It also carries an opt-in, commented block that reloads a year of the object-cost ledger.
+- **Marts (V167).**
+  - Idle is no longer overstated at the edge of the efficiency window. Hours that a midnight-crossing job ran after Central midnight stayed "idle", so a busy ELT warehouse could read as a SUSPEND / DOWN sizing candidate and trip COST_IDLE_OPPORTUNITY (R2-015).
+  - No more phantom child-named "pipeline" rows in task-graph costs. A graph run now counts whole on the day its root task started (R2-014). After V167 the panel caption says which days are clean.
+  - Cortex Code days are Central days in the loader and the three live readers. USAGE_TIME carries its own offset, so the old day keys followed the account offset and dropped the previous Central evening on every run (R2-052; this also covers R2-017).
+  - The 180-day, 365-day and Current-year AI panels answer once the loader has reached back. The loader stamps how far back it loaded (SOURCE_FRESHNESS_STATE.COVERAGE_FROM), and the readers test that stamp instead of the first day with usage (R1-016). The Spend CoCo tile shows a measured $0.00 only when the load covers the whole window, and otherwise names the reach it tested.
+  - The nightly reconcile no longer loses its oldest day when one loader arm fails. Four marts are now swept after the reload, and only when that arm loaded, instead of being deleted first (R2-018).
+  - Pattern costs are re-stamped, not doubled, after a company remap. The loader replaces its window in one transaction, and the migration deletes the existing stale-company twins (R2-010). The repeated-pattern panel reads past 90 days only as far back as a re-stamp reached (PATTERN-RESTAMP).
+  - The Cost by application x user caption names the 30-day session lookback behind (unknown), and system or task sessions with no SESSIONS row. Days loaded before V166 keep their 7-day labels until the owner's app-cost reload or until 30 days pass.
+- **Alerts (V168 hourly, V169 nightly).**
+  - PIPE_COPY_FAILURES is keyed by the Central day the files failed, so yesterday's failures no longer page again after midnight (R2-035).
+  - SEC_NEW_ADMIN_NETWORK says "logged in" only when an attempt succeeded, and otherwise "N failed login attempt(s) … (0 successful)". A network that has been quiet for 90 days or more alerts again. A failures-only event is superseded once the success arrives (R2-036, R2-039).
+  - SEC_NEW_EXPOSURE points at Security → Changes (R2-091). PERF events of any age auto-clear once the condition ends (R2-034). Dead prologue reads were dropped (R2-040).
+  - Budget pace and the month-end forecast use month-to-date through yesterday. There is no false pace alert on days 2-5, and the forecast now projects today too (R2-041).
+  - Contract breach requires a contract start date and counts only the term, up to CONTRACT_END_DATE (exclusive). It stays quiet after the term ends, or when the credits outlast it (R2-042, R2-103).
+  - Storage surge compares each live database id (R2-044). Reconciliation errors page once per error cycle (R2-020 / R2-043). Egress spike reads the previous complete Central day of true egress (R2-047). Idle opportunity covers never-suspend warehouses (R1-071). The trust-regression threshold is floored at 1 (R1-233).
+  - App: the contract runway counts only the term. A contract that outlasts its term reads "Outlasts the term", and after the term ends the Cost and Brief verdicts say "contract term over" instead of "no contract runway configured". The Alerts drawer shows change-regression durations in Hr/Min/Sec (R1-124).
+- **Incidents (V170).**
+  - A manual declare credits the DBA who typed DECLARE. A new 5-argument declare procedure takes the actor, and Control Room calls it once V170 is applied (R2-028). The old 4-argument procedure stays for an app not yet redeployed. Earlier declares keep the app owner, and a caption says so while one is listed.
+  - A declare whose alerts all cleared first no longer commits an empty incident. The procedure rolls it back, and the app reads its verdict: it says "Nothing declared" instead of toasting a success (R2-030).
+  - Proposals classify today's rules. EXH and ALL band tokens are account-level, so an EXH band no longer opens a second incident for its family, and the user, warehouse and object rules added since V072 get their entity kind (R2-093). A task-failure proposal no longer counts its own failures as corroboration (R2-031). An account-level proposal reads "Scope: account-wide (the whole family)".
+- **Ops self-watch and the morning digest (V171).**
+  - The canary sentinel no longer blames column drift for a probe that names no column. Its render-SLA handler logs the real error (R2-026). The OPS_SLOW_RENDER title shows the p95 in Hr/Min/Sec.
+  - The morning digest reports the 7 complete days ending yesterday, labelled as warehouse compute spend, not total spend (R1-228). It reads CORTEX_MODEL the way the app does (CORTEX-NULLIF). The Overview digest caption names the window once a V171 row is showing.
+  - One failing reference-gap check no longer silences the others. Each check runs on its own and logs `ref_gap_check_failed` with its name, and both sides compare as text, as the Operations panel does (R2-019, R2-104).
+  - CREDIT_PRICE_OVERRIDE is seeded FALSE when absent; an existing TRUE is never touched. Admin lists the key once, from the app defaults, and validate.sql's -20013 message says to UPDATE it, never to insert a second row (CREDIT-PRICE-SEED).
+  - `webhook_delivery.sql` names V171 as the digest's current definer.
+- **Detection scans (V172).**
+  - Change-impact rows and their PERF_CHANGE_REGRESSION alerts, and the PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT alerts, take their company from the database rule (COMPANY_FOR_DATABASE) instead of a TRXS-prefix guess (R2-023, R2-024). The migration re-stamps the change registry and the live, unlinked events. RESOLVED and incident-linked alerts keep their company.
+  - A procedure call is matched only as `CALL <name>(` or `.<name>(`, so a `RUN_<name>` wrapper no longer blends into `<name>`'s baseline (R2-021).
+  - A task run is one scheduled run. An auto-retry is no longer a failure: 7 of 14 runs that retried once had read as 21 runs with 7 failures (R2-025). AFTER credits per call counts only runs that are more than 8 hours old, which Snowflake has finished attributing (R2-022). Some regressions that were masked may now alert.
+  - Both change scans write their verdict detail in Hr/Min/Sec, so the alert text and the Teams and email lines match the app (R1-124). Older rows are re-rendered by the app with the same ASCII arrow.
+  - A disabled COST_CLOUD_SVC_ANOMALY or COST_ANOMALY_SWEEP rule stops booking (R1-227). The sweep reads CORTEX_MODEL the way the app does. COST_ORG_ACCOUNT_CREEP now points at Cost Intelligence > Contract & Forecast (R2-095).
+  - The Pipeline SLA caption now says "met" means the table was touched, not that rows were loaded (R2-033, caption only).
+- **Corrections, not new spend or new incidents** (the numbers move because the old ones were wrong):
+  - Per-database storage KPIs, Storage MTD / prior month and the showback STORAGE_DB line step UP for databases re-created or clone-refreshed in the last 365 days.
+  - ALL-scope pattern dollars and runs step DOWN on the twin days (roughly Jun 11 - Jul 13 2026, plus days near any remap).
+  - Changes and pipeline / data-quality alerts in databases with no COMPANY_SCOPE mapping that are not `TRXS_*`, `ALFA*` or ADMIN move from ALFA to UNKNOWN (and a `TRXS` database without the underscore moves from Trexis to UNKNOWN). Map them in Spend & Attribution > Unmapped entities.
+  - Idle dollars step DOWN for warehouses whose jobs cross Central midnight. History is re-stamped only by the owner's HOURLY reload, and idle days older than its N stay inflated.
+  - Per-day AI figures shift by the Central evening hours. Until the owner's AI reload runs, Cortex Code totals for the ~3 days around the apply double-count that evening usage.
+  - The digest's spend and counts step DOWN by today's partial day. Incident proposals for the account-level families read LOW instead of MEDIUM on repeat days. COST_IDLE_OPPORTUNITY may raise for never-suspend warehouses for the first time. COST_FORECAST_BREACH is slightly more sensitive. COST_EGRESS_SPIKE no longer counts same-region internal transfers.
+  - Corrections to the record: the 4.371.0 deferral ("the tables self-heal on the next load") was wrong, and V166 fixes it. The V064 #7 / 4.120.0 note ("a gap can't pass silently" / a transient gap) was wrong for the four wide-edge marts, and V167 fixes it. Both old entries are annotated.
+- **Admin, docs and tests.**
+  - Admin > Canary skips the two new coverage checks until V167 is applied, instead of failing them in the deploy-to-apply window. The mart reconciliation keys Cortex Code days in Central once V167 is applied. Admin > Migrations lists V166-V172.
+  - validate.sql expects V001..V172, and it checks the V167 coverage column, the V170 declare procedure (by signature) and the V170 proposals view. The rebuild bundle is regenerated through V172. DEPLOYMENT.md has one combined V162 → V172 apply note and the ordered owner repairs. CLAUDE.md names the current definers.
+  - New locks: no current definer guesses company from a TRXS prefix; every SP_SCAN_* gates on its enabled rule; and the integration text (Admin entries, the canary skip, the validate checks, the apply note and the current definers) is checked against the migrations.
+- **Owner decisions still pending (not built):** R2-029 (attach a family-open declare to the blocking incident), R2-045 (threshold suggestions for COST_BUDGET_PACE, COST_FORECAST_BREACH and DQ_RECON_ERROR, which need their metric values in threshold units), the R2-033 server half (should Pipeline SLA "met" mean rows loaded?) and R2-011 Delta C (a catch-up floor after three or more missed daily runs). Also open: which warehouse and timeout the heavy owner reloads run on, the C10 lookback width, R2-034's SUPERSEDED add-on, R2-042's post-term nudge, R2-047 true egress only, R2-024 UNKNOWN vs every scope, and an R2-028 history repair (default: no).
+
 ## 4.608.0 - Bug-hunt round 2: 63 app-side bug fixes, a replayable rebuild and a safe CI smoke (2026-10-01)
 
 App-only, no migration. Round 2 of the hunt aimed 20 finders at round 1's blind spots (older loaders and alert arms, the
@@ -6513,6 +6577,8 @@ both working as designed). Four fixes ship here; three are deferred with a docum
   repopulates it. The correct fix (wrap in `BEGIN TRANSACTION … COMMIT` with `EXCEPTION … ROLLBACK`,
   mirroring `SP_LOAD_OBJECT_COST`) introduces new control-flow SQL that CI cannot validate, so it
   warrants a tested pass; the tables self-heal on the next load in the meantime.
+  **Correction (4.609.0):** the "self-heal" premise was wrong. The next run starts a day later, so the
+  oldest reloaded day was lost for good. V166 (R2-011) wraps both loaders in one transaction.
 - **[MED] warehouse-efficiency `IDLE_PCT` hour-vs-credit weighting** — the mart stores an hour-count
   idle fraction while the live sizing/idle twins compute a credit-weighted one, so a multi-cluster
   warehouse's right-sizing verdict can flip mart-first vs live. The correct fix stores a
@@ -12390,6 +12456,10 @@ adversarially reviewed CLEAN:
   the delete+reload: the child loaders own their own `BEGIN TRANSACTION`/DDL, which would commit
   it early and break the per-source watermark rewind. Documented with a `TODO`; the #9 verdict now
   makes a mid-reconcile child failure loud so a gap can't pass silently.
+  **Correction (4.609.0):** for MART_WAREHOUSE_EFFICIENCY_DAILY, MART_TASK_GRAPH_DAILY,
+  FACT_QUERY_ROLE_HOURLY and FACT_QUERY_SCHEMA_HOURLY the gap was not transient. The marts loader
+  swallows an arm's error and no later run reaches that edge, so one failed arm left a permanent hole.
+  V167 (R2-018) sweeps those four tables after the reload, and only when that arm loaded.
 - **V066 #37 — invalid SCOPE fails loudly.** `SP_LOAD_MARTS_V27` raises a declared exception when
   `SCOPE NOT IN ('HOURLY','DAILY')` instead of silently loading nothing and returning "MARTS OK".
 - **V066 #23 — AI freshness no longer green on a half-load.** The per-source freshness stamp for

@@ -161,12 +161,11 @@ def test_r2_091_new_exposure_detail_points_where_investigate_lands():
 
 def test_r2_095_org_creep_breakdown_pointer_matches_its_route():
     """R2-095: COST_ORG_ACCOUNT_CREEP's DETAIL said 'Breakdown: Admin > Org spend' while Investigate routes to Cost
-    Intelligence > Contract & Forecast. The SP_ANOMALY_SWEEP fix ships in V172 (detection cluster): this lock
-    skips while the latest sweep still carries the old pointer and arms itself the day V172 lands (the
-    integrator removes the skip guard once V172 is merged)."""
+    Intelligence > Contract & Forecast. V172 re-derived SP_ANOMALY_SWEEP with the true pointer, so this lock is
+    armed (the pre-V172 skip guard was removed at the V166-V172 integration): the old pointer is gone and the
+    DETAIL's page / section is the route Investigate takes."""
     body = _raiser_bodies()["SP_ANOMALY_SWEEP"]
-    if "'. Breakdown: Admin > Org spend.'" in body:
-        pytest.skip("R2-095 lands with V172 (SP_ANOMALY_SWEEP re-derivation, detection cluster)")
+    assert "Admin > Org spend" not in body
     page, section = _detail_pointer("SP_ANOMALY_SWEEP", "    -- COST_ORG_ACCOUNT_CREEP (guarded)",
                                     "o ON c.RULE_ID = 'COST_ORG_ACCOUNT_CREEP'", r"Breakdown: ([\w &]+) > ([\w &]+)\.")
     target = navigate.investigation_target("COST_ORG_ACCOUNT_CREEP", "")

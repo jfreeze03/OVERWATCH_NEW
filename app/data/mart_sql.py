@@ -486,9 +486,11 @@ def _cloud_svc_window(days: int, *, bounds: tuple | None = None, col: str = "DAY
 def _cloud_svc_covered_days(days: int, *, bounds: tuple | None = None) -> str:
     """R2-012: the DISTINCT days MART_CLOUD_SVC_DAILY actually holds in the page window, account-wide.
 
-    The statement mart has no backfill: SP_LOAD_CLOUD_SVC_MART (V055) merges only the last 2 days of the
-    72 h extract, so its history starts the day it was first loaded (and again after a rebuild drops it).
-    A 90/180/365-day or Current-year read therefore sums fewer days than its label. Window predicate ONLY
+    The statement mart has no backfill unless snowflake/backfill_365.sql has run: SP_LOAD_CLOUD_SVC_MART
+    (V055) merges only the last 2 days of the 72 h extract, so without that heal its history starts the day
+    it was first loaded (and again after a rebuild drops it). backfill_365.sql's MART_CLOUD_SVC_DAILY arm
+    (HEAL-CS-MART, v4.609) fills the 364 days before that; until it has run, a 90/180/365-day or
+    Current-year read sums fewer days than its label. Window predicate ONLY
     (no company / warehouse scope), so a quiet scope never reads as missing loader coverage (the R1-016
     lesson). components.served_days() takes it over the requested window (the r34 contract)."""
     return (f'(SELECT COUNT(DISTINCT c0.DAY) FROM {mart_object("MART_CLOUD_SVC_DAILY")} c0 '
@@ -592,8 +594,8 @@ def cloud_svc_billed_families(days: int, company: str = "ALL", warehouse: str = 
     (summing the per-family marginals would over-count once a day's billed CS is below their sum).
     Billing and the app hint are account facts, so those CTEs ignore the company / warehouse scope.
     R2-012: ``bill`` also starts at the statement mart's first day (MIN(DAY), account-wide and unscoped):
-    MART_CLOUD_SVC_DAILY has no backfill (SP_LOAD_CLOUD_SVC_MART merges 2 days per load), so on a window
-    older than the mart, metering for days with no statement history made 'N% of metered' and
+    MART_CLOUD_SVC_DAILY has no backfill unless snowflake/backfill_365.sql has run (SP_LOAD_CLOUD_SVC_MART
+    merges 2 days per load), so on a window older than the mart, metering for days with no statement history made 'N% of metered' and
     METERED_DAYS read the young mart as missing credits. COVERED_DAYS (_cloud_svc_covered_days) names
     the days the statement mart holds in the window, for the panel's coverage note.
     Window totals are SUM() OVER () in ``ranked``, BEFORE the top-N filter (never derived from the
@@ -745,8 +747,9 @@ def cs_by_query_type_mart(days: int, company: str = "ALL", warehouse: str = "",
 
     The served window: callers read it via components.served_days(), never the
     requested one. The live scan clamps a trailing window at 90; the mart's WHERE
-    allows MAX_MART_WINDOW_DAYS, but R2-012: the mart has no backfill (its history
-    starts at its first load), so it can hold FEWER days than the window. The row
+    allows MAX_MART_WINDOW_DAYS, but R2-012: the mart is loaded hourly and has no backfill
+    unless snowflake/backfill_365.sql has run (otherwise its history starts at its first load), so it
+    can hold FEWER days than the window. The row
     therefore carries COVERED_DAYS (_cloud_svc_covered_days, account-wide) beside the
     live twin's columns, wrapped around the shared projection so the twin tail stays
     byte-identical; served_days() takes it over the requested window.
@@ -2536,14 +2539,23 @@ FROM f_q, l_q
 """
 
 
-def mart_vs_live_ai_recon() -> str:
+def mart_vs_live_ai_recon(central_days: bool = False) -> str:
     """Next-Fifty #25: FACT_AI_USAGE_DAILY vs the Cortex usage views it is loaded from, same 28d
     lag-safe window as mart_vs_live_recon (the DAILY task reloads only 3 days, so days older
-    than today-3 are final). Day keys MIRROR THE LOADER byte-for-byte (USAGE_TIME::DATE /
-    START_TIME::DATE, session tz = account tz) -- this checks loader fidelity, so it must not
-    re-key days differently from V146. The Functions live side is a PLAIN SUM(CREDITS) (one row
-    per source row, no FLATTEN): the independent answer the loader's FLATTEN + INDEX=0 dedupe
+    than today-3 are final). Day keys MIRROR THE DEPLOYED LOADER -- this checks loader fidelity,
+    so it must not re-key days differently from the loader it checks.
+
+    R2-052 (V167): the Cortex Code views' USAGE_TIME is TIMESTAMP_TZ, and a bare USAGE_TIME::DATE
+    reads the value's own stored offset, not the session zone. V167's loader (arm [9]) keys the
+    Code days as CONVERT_TIMEZONE('America/Chicago', USAGE_TIME)::DATE, so Admin passes
+    ``central_days=has_migration(167)``: True converts the two Code day keys to Central; False keeps
+    the pre-V167 loader's bare cast (byte-identical SQL; the one bare cast tests/test_timezone_standard
+    allow-lists). START_TIME (the Functions view) is TIMESTAMP_LTZ, so START_TIME::DATE is already the
+    session's (= account's Central) day on both paths. The Functions live side is a PLAIN SUM(CREDITS)
+    (one row per source row, no FLATTEN): the independent answer the loader's FLATTEN + INDEX=0 dedupe
     must equal. Same columns as mart_vs_live_recon so Admin can concat the frames."""
+    code_day = ("CONVERT_TIMEZONE('America/Chicago', USAGE_TIME)::DATE" if central_days
+                else "USAGE_TIME::DATE")
     return f"""
 WITH f_code AS (
     SELECT SUM(CREDITS) AS V
@@ -2563,8 +2575,8 @@ l_code AS (
         FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
         WHERE USAGE_TIME >= DATEADD('day', -33, CURRENT_DATE())
     )
-    WHERE USAGE_TIME::DATE >= DATEADD('day', -31, CURRENT_DATE())
-      AND USAGE_TIME::DATE <  DATEADD('day', -3,  CURRENT_DATE())
+    WHERE {code_day} >= DATEADD('day', -31, CURRENT_DATE())
+      AND {code_day} <  DATEADD('day', -3,  CURRENT_DATE())
 ),
 f_fn AS (
     SELECT SUM(CREDITS) AS V

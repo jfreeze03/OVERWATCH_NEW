@@ -6,6 +6,10 @@ read surfaces (wh_change.humanize_verdict_detail, v4.606); the drawer printed DE
 WH_CHANGE_REGRESSION / PERF_CHANGE_REGRESSION row read '1800.0s' next to a KPI showing '30m' (owner rule: every
 duration humanizes to Hr/Min/Sec). The shim is a no-op on text a later scan already humanized in SQL, so no schema
 gate is needed. Other rules' DETAIL is never rewritten (it is evidence text).
+
+Integration (v4.609): the shim writes the scans' own spaced ASCII ' -> ' arrow (detection review r1, V172), so a
+pre-V172 event re-rendered in the drawer reads exactly like a V172 event (both in Hr/Min/Sec, one arrow) -- the
+Unicode arrow the alerts cluster first pinned here would have shown two arrow styles side by side.
 """
 
 from __future__ import annotations
@@ -25,11 +29,14 @@ _RAW_PERF = "Schema ALFA_DB.RAW changed (ALTER PROCEDURE) | p95 95.5s->120.0s | 
 @pytest.mark.parametrize("rule", ["WH_CHANGE_REGRESSION", "PERF_CHANGE_REGRESSION", " wh_change_regression "])
 def test_change_regression_detail_reads_in_hr_min_sec(rule):
     got = alerts._drawer_detail(rule, _RAW_WH)
-    assert "p95 30m → 40m" in got and "queue 2h 25m → 3h 20m/day" in got
+    assert "p95 30m -> 40m" in got and "queue 2h 25m -> 3h 20m/day" in got
+    assert "\u2192" not in got and "\u2192" not in alerts._drawer_detail(rule, _RAW_PERF)   # the scans' ASCII arrow only
     assert "1800.0s" not in got and "min/d" not in got
     assert got.startswith("credits/day 10.5->12.25 | ") and got.endswith(" | fail 0.0->1.5% | 120->140 queries")
     perf = alerts._drawer_detail(rule, _RAW_PERF)
-    assert "p95 1m 36s → 2m" in perf and "95.5s" not in perf
+    assert "p95 1m 36s -> 2m" in perf and "95.5s" not in perf
+    # a re-rendered pre-V172 event is a fixed point: the drawer renders it again unchanged, like V172's own text
+    assert alerts._drawer_detail(rule, got) == got and alerts._drawer_detail(rule, perf) == perf
 
 
 def test_other_rules_keep_their_detail_verbatim():
