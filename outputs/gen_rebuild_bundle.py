@@ -107,7 +107,9 @@ Around the files (docs/FULL_REBUILD.md has the statements):
 - **Before 00** (step 0): list the opt-in objects and the live ALERT_ROUTES, and
   record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS (V002 sets it back to 300)
   and its resource_monitor (the replay detaches any monitor: if step 0 finds one
-  other than OVERWATCH_RM, ask the owner before 02 whether it goes back).
+  other than OVERWATCH_RM, ask the owner before 02 whether it goes back), and the
+  SETTINGS ESCALATE_AFTER_MIN / ESCALATE_EMAIL_INTEGRATION values (step 2 sets the
+  delay to 0 until 7b).
 - **Between 01 and 02** (step 2): if you kept operator data, switch every
   ALERT_ROUTES row off and set SETTINGS ESCALATE_AFTER_MIN to 0. 01 keeps the
   notification integrations, so with the routes live the notifier 02 resumes

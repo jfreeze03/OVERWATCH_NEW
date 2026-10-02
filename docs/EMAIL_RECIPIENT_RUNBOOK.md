@@ -79,7 +79,9 @@ the escalation email off, blank `ESCALATE_EMAIL_INTEGRATION` in **Admin > Settin
   **suspends** the four alerts; resume them (docs/FULL_REBUILD.md step 7b). It
   keeps them and the `OVERWATCH_EMAIL` integration (owner decision 2026-10-02):
   both are dropped only when its DELIVERY GATE is opened for a true uninstall,
-  and no migration re-creates either. Then re-create both (step 7b).
+  and no migration re-creates either. Then re-create both (step 7b). A full
+  rebuild also leaves SETTINGS ESCALATE_AFTER_MIN at 0 (escalation off) from
+  step 2 until step 7b(b) puts back the value step 0 recorded.
 
 Note: the alerts are `ALERT` objects, **not** tasks and **not** part of the
 numbered migrations — task-graph or migration changes do not affect them, but

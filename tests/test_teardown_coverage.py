@@ -126,8 +126,10 @@ def test_teardown_drops_delivery_objects_only_inside_the_opt_in_gate():
 _ROOT = SNOWFLAKE_DIR.parent
 _GATED = {"snowflake/teardown.sql", "snowflake/rebuild/01_teardown_rebuildables.sql"}
 _NAMED_DELIVERY_DROP = re.compile(
-    r"\bDROP\s+(?:ALERT|NOTIFICATION\s+INTEGRATION|SECRET)\s+(?:IF\s+EXISTS\s+)?"
-    r"(?:\"?DBA_MAINT_DB\"?\s*\.\s*\"?OVERWATCH\"?\s*\.\s*)?\"?("
+    # the type keyword before INTEGRATION is optional in Snowflake (DROP INTEGRATION x is valid), and a name may be
+    # qualified by one or two identifiers (DB.SCHEMA. or SCHEMA.), quoted or not
+    r"\bDROP\s+(?:ALERT|(?:(?:NOTIFICATION|API|SECURITY|STORAGE|EXTERNAL\s+ACCESS)\s+)?INTEGRATION|SECRET)\s+"
+    r"(?:IF\s+EXISTS\s+)?(?:\"?[A-Z0-9_$]+\"?\s*\.\s*){0,2}\"?("
     + "|".join(sorted(_KEPT, key=len, reverse=True)) + r")\b", re.I)
 _TEXT_SUFFIXES = {".sql", ".md", ".py", ".yml", ".yaml", ".toml", ".txt", ".json", ".sh", ".ps1"}
 
@@ -183,7 +185,10 @@ def test_no_file_outside_the_teardown_gate_drops_a_delivery_object():
                        "-- DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_NEW_EVENTS;"),
                       ("snowflake/migrations/V999__x.sql", 'DROP SECRET "DBA_MAINT_DB"."OVERWATCH"."OVERWATCH_TEAMS_URL";'),
                       ("snowflake/teardown.sql", gate + "\nDROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL;\n"),
-                      ("docs/X.md", "```sql\ndrop notification integration overwatch_webhook_teams;\n```")):
+                      ("docs/X.md", "```sql\ndrop notification integration overwatch_webhook_teams;\n```"),
+                      ("snowflake/webhook_delivery.sql", "DROP INTEGRATION IF EXISTS OVERWATCH_EMAIL;"),
+                      ("snowflake/migrations/V998__x.sql", "DROP SECRET IF EXISTS OVERWATCH.OVERWATCH_TEAMS_URL;"),
+                      ("snowflake/x.sql", 'drop integration "OVERWATCH_WEBHOOK_TEAMS";')):
         assert _stray_delivery_drops({rel: text}), rel
     # ...and not on prose that only mentions dropping, or on another object
     assert not _stray_delivery_drops({"x.sql": "-- DROP it as that owner first; DROP ALERT IF EXISTS OTHER_ALERT;"})
