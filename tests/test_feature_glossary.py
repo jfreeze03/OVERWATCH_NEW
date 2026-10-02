@@ -58,10 +58,34 @@ def test_glossary_v4609_rows_track_the_wave():
     assert "'—' until fact loads." not in text                                    # R1-016: the stamped gate
     assert "SESSION_PAD_DAYS" in text                                             # C10
     from app.data.app_cost_sql import SESSION_PAD_DAYS
-    assert f"sessions are resolved {SESSION_PAD_DAYS} days before the window" in text
+    # holistic #18 / #6 / #22: the loader measures the lookback from each query's own day, only the live fallback
+    # from the window start; nothing relabels a pre-V166 day after 30 days
+    app_row = _row(text, "| **Cost by application × user (measured)** |")
+    assert (f"the daily loader resolves a query's session up to SESSION_PAD_DAYS ({SESSION_PAD_DAYS}) days before "
+            "the query's day") in app_row
+    assert f"the live fallback up to {SESSION_PAD_DAYS} days before the window began" in app_row
+    assert "sessions are resolved" not in app_row and "30 days pass" not in app_row
+    assert "_unknown_app_note" in app_row
+    assert "def _unknown_app_note" in (_ROOT / "app/ui/pages/cost_parts/spend.py").read_text(encoding="utf-8")
     contract = _row(text, "| **Contract balance exhausts / Credit commitment exhausts** |")
     assert "Outlasts the term" in contract and "[CONTRACT_START_DATE, CONTRACT_END_DATE)" in contract
     assert "since CONTRACT_START_DATE." not in contract
+    # holistic #21: every contract-runway row follows the same term bound (R2-042)
+    for start in ("| **Contract runway: days left", "| **Contract runway verdict line",
+                  "| **Contract runway bar (days left"):
+        r = _row(text, start)
+        assert "since CONTRACT_START_DATE" not in r, start
+        assert "[CONTRACT_START_DATE, CONTRACT_END_DATE)" in r and "outlasts" in r, start
+    for start in ("| **Contract runway verdict line", "| **Verdict sentence (Healthy"):
+        assert "contract term over (term end <END>)" in _row(text, start), start
+    from app.logic.verdict import contract_term_over_clause
+    assert contract_term_over_clause("<END>").startswith("contract term over (term end <END>)")
+    # holistic #23: the AI spend fallback names the view cortex_model_costs reads, not the frozen one
+    ai_row = _row(text, "| **AI spend (window)** |")
+    from app.data.cortex_sql import cortex_model_costs
+    assert "SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY" in cortex_model_costs(30)
+    assert "-> ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY" in ai_row
+    assert "-> CORTEX_FUNCTIONS_USAGE_HISTORY" not in ai_row
     assert '"value": "Outlasts the term"' in (_ROOT / "app/ui/pages/brief.py").read_text(encoding="utf-8")
     # detection review r1: the shim writes the scans' ASCII arrow, and the glossary quotes it
     assert "30m → 40m" not in text and "'p95 30m -> 40m'" in text

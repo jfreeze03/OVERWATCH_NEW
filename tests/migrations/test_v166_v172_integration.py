@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 
 from app.data import canary
-from tests._source import changelog_entry, read
+from tests._source import ROOT, changelog_entry, read
 from tests.test_probe_read_honesty import _render_canary_tab
 from tests.test_proc_lineage import _definers, _migrations
 
@@ -236,3 +236,173 @@ def test_digest_and_sweep_read_cortex_model_with_one_literal():
     src = "FROM (SELECT LOWER(TRIM(MAX(IFF(KEY = 'CORTEX_MODEL', VALUE, NULL)))) AS cm"
     for name in ("SP_DAILY_DIGEST", "SP_ANOMALY_SWEEP"):
         assert bodies[name].count(read_) == 1 and bodies[name].count(src) == 1, name
+
+
+# ------------------------------------------------------------------------------ holistic docs pass (v4.609) ----
+# The holistic review of the merged wave found owner-facing text that the merged code and migrations contradicted.
+# Each lock reads its truth from the code or the migration text where one exists, so a later change fails here.
+
+def _flat(text: str) -> str:
+    return " ".join(ln.lstrip("> ").strip() for ln in text.splitlines())
+
+
+def _dep_note(head: str) -> str:
+    dep = read("DEPLOYMENT.md")
+    start = dep.index(head)
+    return _flat(dep[start:dep.index("\n\n", start)])
+
+
+def _mig(version: str) -> str:
+    (path,) = (ROOT / "snowflake" / "migrations").glob(f"{version}__*.sql")
+    return path.read_text(encoding="utf-8")
+
+
+def test_apply_note_names_the_only_sanctioned_hand_calls():
+    """Holistic #2 / #10: point 4 banned every hand-CALLed scan while point 6 and the V172 note recommend R172.0, a
+    scan that can page. Point 4 now scopes the ban to the migration worksheet and names both exceptions, and both
+    R172.0 recommendations carry the paging caveat."""
+    note = _flat(_combined_note())
+    p4 = note[note.index("4. **Nothing is CALLed at apply time.**"):note.index("5. Run the read-only PREFLIGHT")]
+    assert "Never hand-CALL a scan" not in p4
+    assert "Outside the OWNER_REPAIRS blocks, never hand-CALL a scan" in p4
+    assert "R172.0" in p4 and "`SP_SCAN_REF_GAPS()`" in p4
+    v172 = _dep_note("> **V172 (detection scans: company and accuracy):**")
+    for text in (note[note.index("- **V172**: R172.0"):], v172):
+        assert "it can raise PERF_CHANGE_REGRESSION, delivered by the next hourly notify" in text
+    from tests.test_alert_rule_consistency import _latest_proc_bodies
+    body = _latest_proc_bodies()["SP_CHANGE_IMPACT_SCAN"]
+    assert "PERF_CHANGE_REGRESSION" in body and "INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS" in body
+
+
+def test_apply_note_says_which_owner_repair_blocks_catch_their_errors():
+    """Holistic #3: V167 step 1 has no EXCEPTION handler and no OwnerRepairV167 row, so 'only V167 step 4 raises' was
+    false; the note names step 1 as the second block a raise stops a Run All at."""
+    note = _flat(_combined_note())
+    assert "only V167 step 4, the atomic rebuild, rolls back and raises by design" not in note
+    assert "Two blocks do not: V167 step 1 verdict-gates its prune" in note
+    gen = read("outputs/gen_v167.py")
+    step1 = gen[gen.index('AI_RELOAD_BLOCK = """'):gen.index('REPAIR = f"""')]
+    assert "EXCEPTION" not in step1 and "OwnerRepairV167" not in step1
+    assert "'FAILED (nothing pruned): " in step1
+
+
+def test_p169_4_twins_point_at_the_guarded_superseded_repair_not_the_alerts_ui():
+    """Holistic #0: the RESOLVE radios cannot set SUPERSEDED, so the apply note sends the P169.4 twins to R169.1 and
+    names R168.1 / R169.1 as the only SQL exceptions to resolving in the Alerts UI."""
+    from app.ui.pages.alerts import RESOLUTION_KINDS
+    assert "SUPERSEDED" not in RESOLUTION_KINDS
+    assert "twins (SUPERSEDED)" not in read("DEPLOYMENT.md")
+    v16x = _dep_note("> **V168 / V169 (hourly and nightly alert keys and windows):**")
+    assert "P169.4 next-day DQ_RECON_ERROR twins: NOT in the Alerts UI" in v16x and "R169.1" in v16x
+    note = _flat(_combined_note())
+    assert "except the two OPTIONAL commented SUPERSEDED blocks R168.1" in note and "R169.1 (P169.4's" in note
+    for gen, block in (("outputs/gen_v168.py", "-- R168.1 OPTIONAL"), ("outputs/gen_v169.py", "-- R169.1 OPTIONAL")):
+        src = read(gen)
+        assert block in src and "RESOLUTION_KIND = 'SUPERSEDED'" in src, gen
+
+
+def test_v170_note_says_the_first_declare_reads_schema_version_fresh():
+    """Holistic #16: the declare overload follows a fresh SCHEMA_VERSION read while the metadata stash lacks V170;
+    the apply note states the real windows (derived from the tiers) and how to check the preview first."""
+    from app.core.query import CACHE_TTLS
+    from app.ui import schema_gate
+    secs = CACHE_TTLS[schema_gate.FRESH_TIER]
+    meta_h = CACHE_TTLS[schema_gate.TIER] // 3600
+    v170 = _dep_note("> **V170 (incident declare + proposals):**")
+    assert (f"While its {meta_h} h schema cache lacks V170, Control Room re-reads SCHEMA_VERSION on the {secs} s"
+            in v170)
+    assert f"made {secs} s or more after the apply" in v170 and "5th argument" in v170
+    assert "press Refresh data" in v170 and "keeps the app owner for good" in v170
+    assert "After the apply it CALLs the new 5-arg overload, so a manual declare" not in v170
+    assert f"read fresh: within {secs} s" in _flat(_combined_note())
+    assert "_v170 = has_migration_fresh(170, _PAGE)" in read("app/ui/pages/control_room.py")
+
+
+def test_v172_docs_carry_delivery_rollback_and_r3_order():
+    """Holistic #12 / #13 / #15: the V172 note states the webhook delivery effect, R3's last-before-the-version-row
+    order and the two-step rollback; RUNBOOK's rollback quotes the V172 header's baseline null byte for byte."""
+    mig = _mig("V172")
+    assert mig.index("-- R4 (R2-025)") < mig.index("-- R3 (R2-021)") < mig.index(
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION")
+    head = mig[:mig.index("EXECUTE IMMEDIATE")]
+    raw = head[head.index("--     UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY"):]
+    raw = raw[:raw.index("NOT ALERTED;") + len("NOT ALERTED;")]
+    stmt = " ".join(ln.lstrip("-").strip() for ln in raw.splitlines())
+    assert stmt.startswith("UPDATE ") and "BASELINE_CREDITS_PER_CALL = NULL" in stmt
+    rb = read("RUNBOOK.md")
+    sec = " ".join(rb[rb.index("**Rolling back V172.**"):rb.index("| Rule | Family |")].split())
+    assert "the re-frozen baselines stay" not in sec
+    assert sec.index("1. Re-run each base CREATE PROCEDURE only") < sec.index("2. Right after V140's CREATE") < (
+        sec.index(stmt))
+    assert "Check any PERF_CHANGE_REGRESSION raised between steps 1 and 2" in sec
+    dep = _dep_note("> **V172 (detection scans: company and accuracy):**")
+    r3 = "R3, the PROCEDURE null, runs last, right before the version row it is gated on"
+    assert r3 in dep and r3 in _flat(_combined_note())
+    assert "Rollback (RUNBOOK §12" in dep and "null the still-tracking TASK and PROCEDURE baselines" in dep
+    assert "Delivery: the five rules" in dep and "stop posting to the ALFA-only Teams route" in dep
+    assert "add an ALL or UNKNOWN route" in dep
+    assert "COMPANY_FILTER = 'ALFA'" in _mig("V034")
+
+
+def test_runbook_wave4_rollbacks_name_the_cross_wave_order():
+    """Holistic #19: once V168 / V169 / V171 re-derive SP_ALERT_SCAN / SP_ALERT_SCAN_DAILY / SP_DAILY_DIGEST from
+    the wave-4 migrations, re-running a wave-4 base reverts the later fix too; the paragraphs say so, derived from
+    the lineage markers."""
+    rb = read("RUNBOOK.md")
+    wave4 = " ".join(rb[rb.index("**Rolling back wave 4 (V162-V165).**"):].split("\n\n", 1)[0].split())
+    assert "Once V166-V172 are applied the wave-4 rollbacks are no longer independent" in wave4
+    assert "Roll back V171 before V165, V169 before V163 and V168 before V162" in wave4
+    for later, proc, base in (("V168", "SP_ALERT_SCAN", "V162"), ("V169", "SP_ALERT_SCAN_DAILY", "V163"),
+                              ("V171", "SP_DAILY_DIGEST", "V165")):
+        assert f"{later} re-derives {proc} from {base}" in wave4
+        assert f"-- >>> derived:{proc}  (from {base};" in _mig(later), later
+    for head, later in (("**Rolling back V165.**", "V171"), ("**Rolling back V163.**", "V169"),
+                        ("**Rolling back V162 (order matters).**", "V168")):
+        sec = " ".join(rb[rb.index(head):rb.index("The two ALERT_CONFIG rows can stay")].split())
+        assert f"On a {later} schema roll {later} back first" in sec, head
+    v160 = " ".join(rb[rb.index("**Rolling back V160.**"):].split("\n\n", 1)[0].split())
+    assert "roll V169 and V163 back first" in v160
+    wave = " ".join(rb[rb.index("**Rolling back the V166-V172 wave.**"):].split("\n\n", 1)[0].split())
+    assert "go from V172 down to V162 in reverse apply order" in wave
+
+
+def test_ops_pipeline_degraded_docs_name_both_err_outcomes():
+    """Holistic #4 / #9: since V166 the app-cost / storage-truth loaders re-raise, so 'logged and swallowed' and
+    'still reads SUCCEEDED' are not true of every ERR row; RUNBOOK's rule row and README's V168 / V169 lines say
+    which, as both [22] arms do."""
+    row = next(ln for ln in read("RUNBOOK.md").splitlines() if ln.startswith("| OPS_PIPELINE_DEGRADED |"))
+    assert "logged and swallowed" not in row
+    assert "roll back and re-raise, so their task reads FAILED" in row
+    readme = read("README.md").splitlines()
+    for n in ("V168__", "V169__"):
+        line = next(ln for ln in readme if ln.startswith(f"snowflake/migrations/{n}"))
+        assert "[22] OPS_PIPELINE_DEGRADED ERR detail" in line and "says the run FAILED" in line, n
+        assert "the run FAILED" in _mig(n[:4])
+
+
+def test_release_and_apply_notes_carry_the_holistic_corrections():
+    """Holistic #1 / #5 / #6 / #7 / #8 / #11 / #12 / #22: the wrong claims are gone from the release entry and the
+    apply note, and the corrected ones carry the numbers the code uses."""
+    from app.data.mart27_sql import AI_FUNCTIONS_VIEW_FROM
+    floor = AI_FUNCTIONS_VIEW_FROM.isoformat()
+    note = _flat(_combined_note())
+    deploy = re.search(r"\*\*Deploy app (\d+\.\d+\.\d+) first\*\*", note)
+    assert deploy
+    entry = " ".join(changelog_entry(deploy.group(1)).split())
+    for gone in ("followed the account offset", "or until 30 days pass",
+                 "Three or more failed runs in a row can still leave one stale day",
+                 "the user, warehouse and object rules added since V072"):
+        assert gone not in entry, gone
+    for kept in ("four or more also leave days no scheduled run reloads", f"floors that stamp at {floor}",
+                 "stops posting to the ALFA-only Teams route", "has_migration_fresh", "R169.1",
+                 "series-prefixed keys"):
+        assert kept in entry, kept
+    dep = " ".join(read("DEPLOYMENT.md").replace("\n>", "\n").split())       # unwrap the quoted notes
+    for gone in ("between the app deploy and OWNER_REPAIRS step 1", "light up only after OWNER_REPAIRS steps 1-2",
+                 "instead of leaving a permanent hole"):
+        assert gone not in dep, gone
+    v167 = _dep_note("> **V167 (mart-loader window edges, AI coverage, atomic pattern reload):**")
+    assert f"floors that stamp at {floor}" in v167 and "may show Cortex Code drift from the V167 apply" in v167
+    assert "central_days=has_migration(167, _PAGE)" in read("app/ui/pages/admin.py")
+    v166 = _dep_note("> **V166 (fact loader window integrity):**")
+    assert "four or more also leave days no scheduled run reloads" in v166

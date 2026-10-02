@@ -11,8 +11,8 @@
     adds or removes no row, and is idempotent.
   * R2-011 -- the daily CALL(3) schedule replayed with failed runs; whether a failure rolls back is read from each
     proc's text (V077 / V046 vs V166). V166: one or two consecutive failures leave no hole; V077: one failure loses
-    day D-3 for good. Three or more consecutive failures still leave a stale day with the wrap (the owner-question
-    catch-up floor, R2-011 Delta C, is not in V166).
+    day D-3 for good. Three consecutive failures still leave a stale day with the wrap, and four or more also leave
+    days no scheduled run reloads (the owner-question catch-up floor, R2-011 Delta C, is not in V166).
   * C10 -- a keep-alive session opened 9 days before its query: resolved by V166's last reload of that day, relabelled
     '(unknown)' by V077's; the pads are parsed from the procs.
   * the owner REPAIR's gap-depth query (R166.4 / R166.5) agrees with the calendar-gap grid's MAX(DAYS_BACK_TO_HEAL).
@@ -357,8 +357,11 @@ def test_r2_011_one_or_two_failures_no_longer_leave_a_hole(name):
     # V166: the failed run rolls back to the previous fill; the next run's window covers what it would have
     assert _damage(_replay(_rolls_back(new), {20})) == ([], [])
     assert _damage(_replay(_rolls_back(new), {20, 21})) == ([], [])
-    # the documented limit (R2-011 Delta C, an owner question): 3+ consecutive failures leave one stale day
+    # the documented limit (R2-011 Delta C, an owner question): 3 consecutive failures leave one stale day; 4 or more
+    # also leave days no scheduled run reloads (holistic #5: CHANGELOG / DEPLOYMENT say so; R166.3 lists them)
     assert _damage(_replay(_rolls_back(new), {20, 21, 22})) == ([], [19])
+    assert _damage(_replay(_rolls_back(new), {20, 21, 22, 23})) == ([20], [19])
+    assert _damage(_replay(_rolls_back(new), {20, 21, 22, 23, 24})) == ([20, 21], [19])
 
 
 # ============================================================================================================

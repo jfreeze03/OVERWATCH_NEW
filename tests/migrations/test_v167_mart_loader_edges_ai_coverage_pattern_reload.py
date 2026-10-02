@@ -353,6 +353,32 @@ def test_v167_owner_repairs_pin_central_and_rebuild_from_the_arm_text(extras):
         assert len(re.findall(r"^\s*CALL ", blk_text, re.M)) <= 1
 
 
+def test_v167_full_rebuild_runs_the_step_1_reload_then_prune_byte_for_byte(extras):
+    """Holistic #20: a rebuild replays V078's top-level CALL SP_LOAD_MARTS_V27('DAILY', 365) on the pre-V167 arm [9]
+    (offset-keyed days), and V167's arm is a MERGE with no delete, so the backfill alone leaves a year of offset-keyed
+    Cortex Code twins. docs/FULL_REBUILD.md section 5 inlines the owner-repair step 1 block (Central pin first); it
+    must be the generator's block byte for byte, so a change to the repair cannot leave the rebuild runbook behind."""
+    rebuild = read("docs/FULL_REBUILD.md")
+    sec = _between(rebuild, "## 5. History backfill", "## 6. Validate")
+    fences = re.findall(r"```sql\n(.*?)```", sec, re.S)
+    assert len(fences) == 1
+    pin = "ALTER SESSION SET TIMEZONE = 'America/Chicago';\n"
+    assert fences[0].startswith(pin)
+    block = fences[0][len(pin):]
+    s1 = _between(extras["repair"], "-- ---- step 1", "-- ---- step 2")
+    assert block.startswith("EXECUTE IMMEDIATE $$\n") and block.endswith("$$;\n") and block in s1
+    assert "DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY" in block
+    flat = " ".join(sec.split())
+    assert "required, even if you skip the backfill" in flat and "V078's top-level" in flat
+    # the premise: V078 really CALLs the loader at top level (replayed by rebuild/02), on its own offset-keyed arm
+    v078 = read("snowflake/migrations/V078__ai_usage_ts_cast.sql")
+    assert re.search(r"^CALL DBA_MAINT_DB\.OVERWATCH\.SP_LOAD_MARTS_V27\('DAILY', 365\);", v078, re.M)
+    assert "SELECT c.USAGE_TIME::DATE AS DAY" in v078
+    assert "CONVERT_TIMEZONE('America/Chicago', c.USAGE_TIME)::DATE AS DAY" in _M
+    readme = " ".join(read("snowflake/rebuild/README.md").split())
+    assert "V167 AI reload-then-prune block in docs/FULL_REBUILD.md §5" in readme
+
+
 @pytest.mark.parametrize(("call", "label"), [
     ("DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(364)", "SP_LOAD_PATTERN_COST(364)"),
     ("DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(90)", "SP_LOAD_QH_EXTRACT(90)"),

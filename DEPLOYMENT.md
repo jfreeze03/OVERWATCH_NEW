@@ -366,15 +366,20 @@ snowflake/validate.sql   -- read the output; every row should be OK
 >    see the V164 verify note below). V165-V172 wait behind it: each guards on the one before.
 > 3. Every app read of a new column and every new caption is gated on its own migration
 >    (`app/ui/schema_gate.py`), so 4.609.0 is safe on either side of the apply; after it the gated text appears
->    within 4 h (the metadata cache) or at once on Refresh. The Admin canary skips the two V167 coverage entries
->    until V167 is applied.
-> 4. **Nothing is CALLed at apply time.** Never hand-CALL a scan, the notifier, the canary sentinel or the digest
->    (each can page, email or spend a Cortex call). Three migrations carry bounded, idempotent in-migration
->    repairs: **V166** (a MERGE that rewrites FACT_STORAGE_DAILY's averaged multi-ID name-days), **V167** (a
->    scan-free DELETE of stale-company MART_PATTERN_COST_DAILY twins) and **V172** (the change registry's and
->    the live, unlinked alerts' COMPANY re-stamped from the database in their object FQN, the suffix-collided
->    PROCEDURE baselines nulled, the tracking TASK baselines re-frozen per scheduled run). If V172 fails
->    part-way, V166-V171 stay in effect and V172 re-runs (R3 is gated on its version row).
+>    within 4 h (the metadata cache) or at once on Refresh (the V170 declare overload and its two Control Room
+>    captions read fresh: within 30 s). The Admin canary skips the two V167 coverage entries until V167 is
+>    applied.
+> 4. **Nothing is CALLed at apply time.** Outside the OWNER_REPAIRS blocks, never hand-CALL a scan, the
+>    notifier, the canary sentinel or the digest from the migration worksheet (each can page, email or spend a
+>    Cortex call). The only hand CALLs are the ones named after the apply: OWNER_REPAIRS R172.0's recommended
+>    `SP_CHANGE_IMPACT_SCAN()` (point 6; it can raise PERF_CHANGE_REGRESSION exactly as its 06:50 run would), and
+>    the V171 note's optional `SP_SCAN_REF_GAPS()`, which only rewrites its scratch table. Three migrations carry
+>    bounded, idempotent in-migration repairs: **V166** (a MERGE that rewrites FACT_STORAGE_DAILY's averaged
+>    multi-ID name-days), **V167** (a scan-free DELETE of stale-company MART_PATTERN_COST_DAILY twins) and
+>    **V172** (the change registry's and the live, unlinked alerts' COMPANY re-stamped from the database in their
+>    object FQN, the tracking TASK baselines re-frozen per scheduled run, and last the suffix-collided PROCEDURE
+>    baselines nulled). If V172 fails part-way, V166-V171 stay in effect and V172 re-runs (R3, the PROCEDURE
+>    null, runs last, right before the version row it is gated on).
 > 5. Run the read-only PREFLIGHT first (`PREFLIGHT_WAVE4.sql` for V162-V165, `PREFLIGHT_V166_V172.sql` for
 >    V166-V172; runbox): it lists exactly what each first run raises and what each repair rewrites. First runs:
 >    V162's next hourly scan raises the last 24 h of takeover episodes and 26 h of admin grants; V163's next
@@ -387,9 +392,12 @@ snowflake/validate.sql   -- read the output; every row should be OK
 >    never-suspend warehouses for the first time (P169.6).
 > 6. **Then the owner-run repairs**, `OWNER_REPAIRS_V166_V172.sql` (runbox), after the whole apply, in a
 >    Central session (its first statement pins it), off-peak, one block at a time, reading each verdict pane.
->    A failed verdict reads `FAILED: ...` (the CALL blocks also log it to APP_ERROR_LOG), so a Run All
->    continues; only V167 step 4, the atomic rebuild, rolls back and raises by design, and a timeout or Stop is
->    never caught (then run that section's RESUME pair by hand):
+>    A failed verdict reads `FAILED ...`, and the guarded CALL blocks also log it to APP_ERROR_LOG and catch
+>    their own errors, so a Run All continues past them. Two blocks do not: V167 step 1 verdict-gates its prune
+>    (`FAILED (nothing pruned): ...`; a failed AI arm logs itself as MartLoader `mart_load_failed`) but writes
+>    no OwnerRepairV167 row and does not catch a raised error, so a raise stops a Run All there; V167 step 4,
+>    the atomic rebuild, rolls back and raises by design. A timeout or Stop is never caught (then run that
+>    section's RESUME pair by hand):
 >    - **V166** (R166.1-R166.6): the optional hole probe; `SP_LOAD_SECURITY_FACTS(180)` with the hourly graph
 >      suspended around it (ALWAYS run the RESUME pair that follows the block); the R2-011 gap grids; the
 >      storage-truth and app-cost (30+ days) heals.
@@ -399,13 +407,17 @@ snowflake/validate.sql   -- read the output; every row should be OK
 >      `SP_LOAD_PATTERN_COST(364)`; step 3 the HOURLY reload inside a TASK_LOAD_HOURLY suspend window; step 4
 >      the atomic 364-day task-graph rebuild, outside the :07 Central slots.
 >    - **V172**: R172.0, the recommended `SP_CHANGE_IMPACT_SCAN()` right after the apply (it closes the
->      mixed-basis day until the 06:50 scan), then the read-only worklists R172.1-R172.4.
+>      mixed-basis day until the 06:50 scan; it can raise PERF_CHANGE_REGRESSION, delivered by the next hourly
+>      notify, exactly as the 06:50 run would), then the read-only worklists R172.1-R172.4.
 >    - Last, the `backfill_365.sql` opt-in heals: select and run only the cloud-services statement mart INSERT
 >      (idempotent), and, once, the commented `SP_LOAD_OBJECT_COST(365)` block on a warehouse whose timeout
 >      allows it.
 >    Resolve the alerts the PREFLIGHT / PART B worklists name in the Alerts UI (never by SQL: RESOLVE feeds
->    per-rule precision), and close member-less or duplicate incidents from Control Room (PART B V170.4 /
->    V170.5). Which warehouse and statement timeout the heavy reloads run on is the owner's call.
+>    per-rule precision), except the two OPTIONAL commented SUPERSEDED blocks R168.1 (PIPE_COPY_FAILURES
+>    carry-over duplicates, PREFLIGHT P168.3) and R169.1 (P169.4's next-day DQ_RECON_ERROR twins): SUPERSEDED
+>    is a machine-close kind the UI cannot set, and it stays out of RESOLVED, MTTR and precision. Close
+>    member-less or duplicate incidents from Control Room (PART B V170.4 / V170.5). Which warehouse and
+>    statement timeout the heavy reloads run on is the owner's call.
 
 > **V166 (fact loader window integrity):** procs only, plus one bounded data repair that runs IN the migration
 > (a MERGE that rewrites FACT_STORAGE_DAILY's DB_BYTES / FAILSAFE_BYTES for the name-days DATABASE_STORAGE_USAGE_HISTORY
@@ -413,9 +425,12 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > daily loader straddles the swap. Corrections the owner will see: per-database storage KPIs, Storage MTD / prior
 > month and the showback STORAGE_DB line step UP for databases re-created or clone-refreshed in the last 365 days
 > (the fact had averaged them; the live twin already summed); Cost by application x user shows less (unknown) on days
-> loaded after V166 (sessions resolve 30 days back). TASK_LOAD_APP_COST scans 33 days of SESSIONS instead of 10
-> (watch its next run in TASK_HISTORY). A failed app-cost or storage-truth run now rolls back and logs
-> fact_load_failed (the self-watch ERR leg raises OPS_PIPELINE_DEGRADED) instead of leaving a permanent hole.
+> loaded after V166 (sessions resolve up to 30 days before the query's day). TASK_LOAD_APP_COST scans 33 days of
+> SESSIONS instead of 10 (watch its next run in TASK_HISTORY). A failed app-cost or storage-truth run now rolls back,
+> logs fact_load_failed and re-raises: its task reads FAILED, and the self-watch ERR leg raises OPS_PIPELINE_DEGRADED
+> (whose detail says the run FAILED, V168 / V169). A single failed run no longer leaves a permanent hole. The task
+> reloads 3 days: three failed runs in a row leave one stale day, and four or more also leave days no scheduled run
+> reloads (OWNER_REPAIRS R166.3 lists them; R166.4 / R166.5 heal them).
 > Owner-run heals after the whole V162-V172 apply: OWNER_REPAIRS V166 section (R166.1-R166.6), Central session.
 > R166.2 (SP_LOAD_SECURITY_FACTS(180)) suspends TASK_LOAD_HOURLY around its CALL and resumes it itself; ALWAYS run
 > the RESUME pair right after it (the only way back after a timeout or Stop). Its d>3 arm commits each DELETE before
@@ -435,16 +450,23 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > 11 - Jul 13 2026, plus days near any remap); Optimize idle / sizing and COST_IDLE_OPPORTUNITY read less idle for
 > warehouses whose jobs cross Central midnight (new days at once; history only after OWNER_REPAIRS step 3, and idle
 > days older than its N stay as they were); the Unit costs task-graph panel loses phantom child-named pipeline rows
-> (history after step 4); Cortex Code days are Central days (the Admin AI recon may show Cortex Code drift between the
-> app deploy and OWNER_REPAIRS step 1; rows older than the views' retention stay offset-keyed). **Run OWNER_REPAIRS
-> step 1 in the same sitting as the apply -- before the next 06:45 Central DAILY run if at all possible.** Until it
+> (history after step 4); Cortex Code days are Central days (the Admin AI recon may show Cortex Code drift from the
+> V167 apply, once the app sees it -- within 4 h, or at once on Refresh -- until OWNER_REPAIRS step 1; before the
+> apply the recon keys days the old way and shows none; rows older than the views' retention stay offset-keyed).
+> **Run OWNER_REPAIRS step 1 in the same sitting as the apply -- before the next 06:45 Central DAILY run if at all
+> possible.** Until it
 > runs, each DAILY ('DAILY', 3) run re-keys only its last ~3 days to Central with a MERGE (no delete): a user whose
 > only usage on an old UTC-keyed day was the previous Central evening keeps that old row beside the new Central-day
 > row, so Cortex Code totals for the ~3 days around the apply DOUBLE-COUNT that evening usage (Chargeback & AI, the
 > Spend CoCo tile, AI budgets and the runaway arm read slightly high), and the evening just before the run's left
-> edge drops out instead. Step 1 (reload-then-prune) removes both. The 180d / 365d / Current-year AI panels and the
-> >90-day repeated-pattern window light up only after OWNER_REPAIRS steps 1-2 stamp COVERAGE_FROM. Do not re-run
-> SP_LOAD_PATTERN_COST before V167 is applied (the V120 MERGE adds twins).
+> edge drops out instead. Step 1 (reload-then-prune) removes both. The Cortex Code panels (Chargeback & AI, the Spend
+> CoCo tile, Security AI guardrails) answer 180d / 365d / Current year once OWNER_REPAIRS step 1 stamps
+> COVERAGE_FROM, and the >90-day repeated-pattern window once step 2 does. The all-source Unit costs "AI spend"
+> (Code + Functions) floors that stamp at 2026-01-05, the canonical Functions view's first day
+> (mart27_sql.AI_FUNCTIONS_VIEW_FROM): a window that starts earlier keeps the first-use test and its labelled
+> Functions-only fallback unless the fact already holds rows that old, so its 365-day window answers from about
+> 2027-01-04 and Current year from 2027-01-01. Do not re-run SP_LOAD_PATTERN_COST before V167 is applied (the V120
+> MERGE adds twins).
 
 > **V167 verify:** PART B V167.1 (COVERAGE_FROM column present; values NULL until each loader's next run) and V167.2
 > (every CHECK_n TRUE: the deployed bodies are V167's) right after the apply; V167.3 (TWIN_ROWS_LEFT = 0). After
@@ -459,16 +481,26 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > failures-only V162 SEC_NEW_ADMIN_NETWORK event inside 48h does not raise its own event during the transition
 > (PREFLIGHT P168.4 second grid). Verify: PART B V168.1 / V168.2 and V169.1 / V169.2 right after the apply; V168.3 /
 > V168.4 after the next :07 Central hourly scan (WILL_AUTO_CLEAR -> 0); V169.3 and V169.4 the next morning (~07:00
-> Central; V169.4 flags a reconciliation error cycle that folded into an event raised before it loaded). Resolve in
+> Central; V169.4 flags a reconciliation error cycle that folded into an event raised before it loaded). Both scans'
+> [22] OPS_PIPELINE_DEGRADED ERR detail now says a V166 app-cost / storage-truth failure rolled back and FAILED
+> (TASK_HISTORY shows it); other loaders keep "returned normally, so its task still reads SUCCEEDED". Resolve in
 > Alerts: P169.1 day 2-5 COST_BUDGET_PACE (NOISE), P169.2 WOULD_RAISE_NEW = FALSE contract events (+ their
-> auto-declared incidents), P169.3 re-created-database storage surges (EXPECTED), P169.4 next-day DQ_RECON_ERROR
-> twins (SUPERSEDED), P169.7 SEC_TRUST_REGRESSION METRIC_VALUE < 1 (EXPECTED). Never DELETE, never rewrite DEDUPE_KEY.
+> auto-declared incidents), P169.3 re-created-database storage surges (EXPECTED), P169.7 SEC_TRUST_REGRESSION
+> METRIC_VALUE < 1 (EXPECTED). P169.4 next-day DQ_RECON_ERROR twins: NOT in the Alerts UI (its RESOLVE radios offer
+> only ACTIONED / NOISE / EXPECTED, which count in RESOLVED and MTTR). Use the OPTIONAL owner repair R169.1 in
+> OWNER_REPAIRS_V166_V172.sql (V169 section): a commented-out UPDATE that closes the OLDER twin as RESOLUTION_KIND =
+> SUPERSEDED, bounded by the EVENT_IDs you paste from P169.4's second grid, RULE_ID = DQ_RECON_ERROR and STATUS IN
+> (OPEN, ACK). Run it in a Central session; as shipped, its placeholder matches no row. Never DELETE, never rewrite
+> DEDUPE_KEY.
 
 > **V170 (incident declare + proposals):** no apply-time run, no data change. Deploy 4.609.0 FIRST, then apply.
 > Before the apply, 4.609.0 CALLs V131's 4-arg overload and reads its "DECLARED: n member(s) linked" verdict
-> (Declared by stays the app owner and a caption says so). After the apply it CALLs the new 5-arg overload, so a
-> manual declare writes the declaring DBA as Declared by / Linked by. Off-order (V170 applied while 4.608.0 is
-> still deployed): the old app keeps working on the re-derived 4-arg overload, but it discards the procedure's
+> (Declared by stays the app owner and a caption says so). After the apply it CALLs the new 5-arg overload. While
+> its 4 h schema cache lacks V170, Control Room re-reads SCHEMA_VERSION on the 30 s live tier, so a manual declare
+> made 30 s or more after the apply writes the declaring DBA as Declared by / Linked by. Before that first declare,
+> confirm that the Control Room SQL preview ends with the viewer as a 5th argument; if it shows 4 arguments, press
+> Refresh data. A declare through the 4-arg CALL keeps the app owner for good. Off-order (V170 applied while
+> 4.608.0 is still deployed): the old app keeps working on the re-derived 4-arg overload, but it discards the procedure's
 > verdict, so when every proposal alert cleared before the CALL it still toasts "Incident declared with members
 > linked." and logs incident_declare for a declare V170 rolled back (nothing written; that inflated event also
 > feeds the optional R2-028 APP_USAGE heuristic) — redeploy promptly. Verify with PART B V170.1-V170.6 (Central
@@ -491,14 +523,28 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > CREDIT_PRICE_OVERRIDE = FALSE seed (WHEN NOT MATCHED; an existing TRUE is never touched).
 
 > **V172 (detection scans: company and accuracy):** V172 carries in-migration repairs (registry and alert COMPANY
-> re-stamps, the first-apply PROCEDURE baseline null, the TASK baseline re-freeze); they read ACCOUNT_USAGE.PROCEDURES
-> once and 30 days of TASK_HISTORY once. If V172 fails part-way, V166-V171 stay in effect and V172 re-runs (every
-> repair is idempotent; R3 is gated on the version row). Right after V172, run OWNER_REPAIRS R172.0 (uncomment
-> `CALL DBA_MAINT_DB.OVERWATCH.SP_CHANGE_IMPACT_SCAN();`, off-peak; one daily scan's ACCOUNT_USAGE reads): until the
-> next scan the change-impact tracking rows sit on mixed bases -- the TASK baselines are re-frozen per scheduled run
-> while AFTER_CALLS / AFTER_FAILS / VERDICT / VERDICT_DETAIL still hold the last V140 scan's attempt-based values, and
-> the PROCEDURE baselines R3 nulled still show their old VERDICT. If skipped, the Operations change table reads mixed
-> until the 06:50 Central scan. Verify: PART B V172.1 / V172.2 right after the apply; V172.3 after the 06:40 / 06:50
+> re-stamps, the TASK baseline re-freeze, and last the first-apply PROCEDURE baseline null); they read
+> ACCOUNT_USAGE.PROCEDURES once and 30 days of TASK_HISTORY once. If V172 fails part-way, V166-V171 stay in effect
+> and V172 re-runs (every repair is idempotent; R3, the PROCEDURE null, runs last, right before the version row it is
+> gated on, so a retry after any earlier stop nulls those rows for the first time). Right after V172, run
+> OWNER_REPAIRS R172.0 (uncomment `CALL DBA_MAINT_DB.OVERWATCH.SP_CHANGE_IMPACT_SCAN();`, off-peak; one daily scan's
+> ACCOUNT_USAGE reads; it can raise PERF_CHANGE_REGRESSION, delivered by the next hourly notify, exactly as the 06:50
+> run would): until the next scan the change-impact tracking rows sit on mixed bases -- the TASK baselines are
+> re-frozen per scheduled run while AFTER_CALLS / AFTER_FAILS / VERDICT / VERDICT_DETAIL still hold the last V140
+> scan's attempt-based values, and the PROCEDURE baselines R3 nulled still show their old VERDICT. If skipped, the
+> Operations change table reads mixed until the 06:50 Central scan. Delivery: the five rules (PERF_CHANGE_REGRESSION,
+> PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH, DQ_SCHEMA_DRIFT) now route by the V044 company. Alerts on a database
+> with no COMPANY_SCOPE row that is not `TRXS_*` / `ALFA*` / ADMIN become UNKNOWN and stop posting to the ALFA-only
+> Teams route (V034 set every existing route's COMPANY_FILTER to ALFA), with no undelivered_expired row;
+> PERF_CHANGE_REGRESSION, PIPE_DT_FAILURES and PIPE_VOLUME_DROP seed HIGH, and PIPE_DT_FAILURES is CRITICAL at 5+
+> failures. To keep them, map the database in Cost
+> Intelligence > Spend & Attribution > Unmapped entities, or add an ALL or UNKNOWN route. Re-stamped OPEN events that
+> now match another route's filter are delivered there once, inside their send window (24 h, 7 d for CRITICAL); an
+> older one raised within 7 days logs one undelivered_expired row instead (V164's per-(EVENT_ID, ROUTE_ID) ledger).
+> Rollback (RUNBOOK §12, "Rolling back V172"; the exact text is in the V172 header) has two ordered steps: re-run the
+> base CREATEs, then, right after V140's CREATE and before the next change-impact scan, null the still-tracking TASK
+> and PROCEDURE baselines, or V140 reads V172's per-run baselines against its own every-attempt AFTER counts and
+> pages a false REGRESSED. Verify: PART B V172.1 / V172.2 right after the apply; V172.3 after the 06:40 / 06:50
 > scans; V172.4 after the next TASK_CHANGE_IMPACT_SCAN (06:50) and TASK_ANOMALY_SWEEP (07:00) runs (FAIL only for a
 > guarded arm that logged since the apply and was silent in the 14 days before).
 
@@ -745,7 +791,8 @@ test (`tests/test_teardown_coverage.py`) fails CI if a migration creates an
 object the teardown does not cover, or if a destructive drop ever goes live.
 
 Restore = every migration in order (V001 through the repo tip) -> roles.sql ->
-validate.sql (all rows OK) -> docs/FULL_REBUILD.md step 7b for the opt-in objects.
+validate.sql (all rows OK) -> docs/FULL_REBUILD.md step 5's V167 AI reload-then-prune (required: the replayed
+V078 first-fill keyed a year of Cortex Code rows on the stored offset) -> step 7b for the opt-in objects.
 
 ## 6. Disaster recovery (summary — full detail in RUNBOOK.md)
 

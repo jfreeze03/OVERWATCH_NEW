@@ -291,14 +291,70 @@ reloads a year. Uncomment and run it once, off-peak, on a warehouse whose
 STATEMENT_TIMEOUT_IN_SECONDS allows it (a timeout rolls the reload back and
 the previous fill stays).
 
+**Then run the V167 AI reload-then-prune (required, even if you skip the
+backfill)**, right after 04 (or here, if you skip it) and outside 06:40-07:30
+Central: the block below is the owner-repair file's V167 step 1, byte for
+byte. Why: the 02 replay runs V078's top-level
+`SP_LOAD_MARTS_V27('DAILY', 365)` on the pre-V167 loader, which keyed
+Cortex Code days on USAGE_TIME's own stored offset, so FACT_AI_USAGE_DAILY
+starts with a year of offset-keyed Code rows. The backfill's DAILY 365 runs
+V167's loader, which re-keys days to Central with a MERGE and no delete: a
+(stored-offset day, user) row whose only usage was the previous Central
+evening never matches a Central key and survives beside the Central row, so
+Cortex Code totals (Chargeback & AI, AI budgets, the runaway arm) read high
+across the year. The block reloads DAILY 365 once more, then deletes only
+the Code rows older than its own start inside the range it re-keyed, and only
+when its own `ai_code` arm loaded. Expect `ok: MARTS OK (DAILY, 365d): ... |
+re-keyed Code rows N from <day>, pruned stale offset-keyed rows M`. A
+`FAILED (nothing pruned): ...` row means the AI arm did not load (its
+`mart_load_failed` row in APP_ERROR_LOG says why): fix it and re-run the
+block. The block does not catch a raised error, and re-running it is safe.
+
+```sql
+ALTER SESSION SET TIMEZONE = 'America/Chicago';
+EXECUTE IMMEDIATE $$
+DECLARE
+    t0 TIMESTAMP_NTZ;
+    rv VARCHAR;
+    touched NUMBER DEFAULT 0;
+    lo DATE;
+    pruned NUMBER DEFAULT 0;
+BEGIN
+    t0 := CURRENT_TIMESTAMP()::TIMESTAMP_NTZ;
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 365);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    -- prune only when THIS reload's ai_code arm loaded (its token is in the verdict); a failed required posture
+    -- arm still reads 'MARTS WITH ERRORS' in the returned verdict -- re-run the block once it is fixed
+    IF (rv IS NULL OR NOT ARRAY_CONTAINS('ai_code'::VARIANT, SPLIT(:rv, ' '))) THEN
+        RETURN 'FAILED (nothing pruned): SP_LOAD_MARTS_V27(DAILY, 365) -> ' || COALESCE(rv, 'no verdict returned');
+    END IF;
+    SELECT COUNT(*), MIN(DAY) INTO :touched, :lo
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY
+    WHERE SOURCE IN ('Snowsight', 'CLI') AND LOAD_TS >= :t0;
+    IF (touched > 0) THEN
+        DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY
+         WHERE SOURCE IN ('Snowsight', 'CLI') AND DAY > :lo AND LOAD_TS < :t0;
+        pruned := SQLROWCOUNT;
+    END IF;
+    RETURN 'ok: ' || rv || ' | re-keyed Code rows ' || touched || ' from ' || COALESCE(TO_VARCHAR(lo), 'n/a')
+           || ', pruned stale offset-keyed rows ' || pruned;
+END;
+$$;
+```
+
 The long-window AI and repeated-pattern reads gate on
 SOURCE_FRESHNESS_STATE.COVERAGE_FROM (V167), which fills on the loaders'
-first runs. The backfill's `SP_LOAD_MARTS_V27('DAILY', 365)` stamps the AI
-reach; the repeated-pattern panel reads past 90 days only after a
-`CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(364);`. A rebuild also
-loses the Cortex Functions history before 2026-01-05 (it came from a frozen
-view no loader reads), so until 2027-01-05 a 365-day or Current-year Unit
-costs "AI spend" falls back to its labelled Functions-only read by design.
+first runs. The backfill's (and the block's) `SP_LOAD_MARTS_V27('DAILY', 365)`
+stamps the AI reach; the repeated-pattern panel reads past 90 days only after a
+`CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(364);`. The all-source Unit
+costs "AI spend" (Code + Functions) floors that stamp at 2026-01-05, the
+canonical Functions view's first day (mart27_sql.AI_FUNCTIONS_VIEW_FROM), on
+any install: a window that starts earlier keeps the first-use test (it
+answers only when the fact's first day, any source, is that old). A rebuild
+also loses the Cortex Functions history before 2026-01-05 (it came from a
+frozen view no loader reads), so unless its Cortex Code rows reach back that
+far, a 365-day "AI spend" falls back to its labelled Functions-only read
+until about 2027-01-04, and a Current-year one until 2027-01-01, by design.
 
 ## 6. Validate
 
