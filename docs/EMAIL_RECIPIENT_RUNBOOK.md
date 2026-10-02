@@ -76,12 +76,14 @@ the escalation email off, blank `ESCALATE_EMAIL_INTEGRATION` in **Admin > Settin
   (page `NotifyWebhook`) and Alerts > Native delivery warns. Or escalation was turned
   off: `ESCALATE_AFTER_MIN` 0, or `ESCALATE_EMAIL_INTEGRATION` blank.
 - A teardown or full rebuild ran: `teardown.sql` (and so `snowflake/rebuild/01`)
-  drops the four alerts **and** the `OVERWATCH_EMAIL` integration, and no
-  migration re-creates either. Re-create both (docs/FULL_REBUILD.md step 7b).
+  **suspends** the four alerts; resume them (docs/FULL_REBUILD.md step 7b). It
+  keeps them and the `OVERWATCH_EMAIL` integration (owner decision 2026-10-02):
+  both are dropped only when its DELIVERY GATE is opened for a true uninstall,
+  and no migration re-creates either. Then re-create both (step 7b).
 
 Note: the alerts are `ALERT` objects, **not** tasks and **not** part of the
 numbered migrations — task-graph or migration changes do not affect them, but
-`teardown.sql` drops them (above).
+`teardown.sql` suspends them (above).
 
 ## Diagnose
 
@@ -159,9 +161,15 @@ ALTER USER <username> SET EMAIL = '<recipient>';   -- or Snowsight: Admin > User
 
 ### Step 2 — allow it on the integration
 
+`SET ALLOWED_RECIPIENTS` **replaces the whole list**. Never run it with only the
+new address: `DESC` first and list every address it already shows, or a working
+recipient silently stops receiving. Skip that statement when `DESC` already lists
+the address.
+
 ```sql
+DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;   -- note every ALLOWED_RECIPIENTS address
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL
-      SET ALLOWED_RECIPIENTS = ('<recipient>');   -- comma-separate to CC several
+      SET ALLOWED_RECIPIENTS = ('<recipient>', <every address DESC listed, each in quotes>);
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET ENABLED = TRUE;
 -- requirement 4 (V164 escalation): the default list the escalation email goes to
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL
@@ -200,6 +208,34 @@ CALL SYSTEM$SEND_EMAIL('OVERWATCH_EMAIL', '<recipient>',
 
 If this errors with a recipient/verification message, Step 1 has not completed
 (the verification link has not been clicked yet).
+
+### Step 5 — verify (requirement 4 included)
+
+```sql
+-- ENABLED true, ALLOWED_RECIPIENTS still lists every address it had, DEFAULT_RECIPIENTS set
+DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;
+-- the escalation path end to end: the same call V164's email leg makes (no address
+-- in the call, so it goes only to DEFAULT_RECIPIENTS)
+CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+     SNOWFLAKE.NOTIFICATION.TEXT_PLAIN('OVERWATCH escalation email test'),
+     SNOWFLAKE.NOTIFICATION.INTEGRATION('OVERWATCH_EMAIL'));
+-- the send only ENQUEUES: read the outcome here (STATUS SUCCESS, no ERROR_MESSAGE)
+SELECT CREATED, INTEGRATION_NAME, STATUS, ERROR_MESSAGE
+  FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.NOTIFICATION_HISTORY(
+         START_TIME => DATEADD('hour', -1, CURRENT_TIMESTAMP()),
+         INTEGRATION_NAME => 'OVERWATCH_EMAIL'))
+ ORDER BY CREATED DESC;
+-- after the next hourly TASK_ALERT_NOTIFY run: no new escalation_email_failed rows
+SELECT LOGGED_AT, ERROR_TYPE, LEFT(ERROR_MESSAGE, 200) AS MSG
+  FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+ WHERE PAGE = 'NotifyWebhook' AND ERROR_TYPE ILIKE 'escalation%'
+ ORDER BY LOGGED_AT DESC LIMIT 20;
+```
+
+Once `DEFAULT_RECIPIENTS` is set, the next hourly run also emails any still-OPEN,
+unacknowledged CRITICAL from the last 7 days that no Teams route delivered (an
+email-only event is not stamped until its email succeeds, so it is retried every
+hour). An escalation Teams already re-posted is stamped and is not re-emailed.
 
 ## Keep the template in sync (optional)
 

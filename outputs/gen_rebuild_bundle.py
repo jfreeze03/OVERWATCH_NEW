@@ -24,9 +24,11 @@ UNDERLINE = "-- ================================================================
 TEARDOWN_BANNER = (
     "-- 01_teardown_rebuildables.sql — BYTE-IDENTICAL copy of snowflake/\n"
     "-- teardown.sql (locked by tests/test_rebuild_bundle.py). Section A runs, and\n"
-    "-- so does Section B's live tail (three rebuildable tables, the ML forecast\n"
-    "-- model, the webhook secrets and the notification integrations); the rest of\n"
-    "-- B and all of C stay commented, so the operator data B lists survives."
+    "-- so does Section B's live tail (three rebuildable tables and the ML forecast\n"
+    "-- model); the rest of B and all of C stay commented, so the operator data B\n"
+    "-- lists survives. The delivery objects (email alerts, notification\n"
+    "-- integrations, webhook secrets) are KEPT: their drops run only inside the\n"
+    "-- DELIVERY GATE, with drop_delivery_objects set TRUE (owner decision 2026-10-02)."
 )
 # 03/04/05 are plain byte copies; their banner is generated too (holistic #14).
 COPY_BANNER = (
@@ -116,9 +118,10 @@ Around the files (docs/FULL_REBUILD.md has the statements):
   the warehouse timeout back (and, on the owner's yes, the monitor step 0
   found), and if another role created the 02 shim's roles, drop them with it
   now: 03 opens by dropping them.
-- **After 05** (step 7b): re-create the opt-in objects 01 dropped (email alerts,
-  drill, ML forecast, notification integrations and secrets) and re-enable the
-  routes step 0 listed.
+- **After 05** (step 7b): re-create the opt-in objects 01 dropped (drill, ML
+  forecast; the email alerts, notification integrations and secrets only if
+  01's delivery gate was opened), resume the four email alerts 01 suspended,
+  and re-enable the routes step 0 listed.
 {end}"""
 
 

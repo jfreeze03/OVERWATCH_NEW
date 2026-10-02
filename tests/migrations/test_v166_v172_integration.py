@@ -140,8 +140,8 @@ def _combined_note() -> str:
 
 
 def test_one_combined_apply_note_orders_the_whole_apply():
-    """Plan integration c: deploy the app first; V162 -> V172 in order, stop on the first error; V164 still needs
-    the escalation email; nothing CALLs at apply; the in-migration repairs are V166 / V167 / V172; then the
+    """Plan integration c: deploy the app first; V162 -> V172 in order, stop on the first error; V164's escalation
+    email needs OVERWATCH_EMAIL's DEFAULT_RECIPIENTS (owner decision 2026-10-02); nothing CALLs at apply; the in-migration repairs are V166 / V167 / V172; then the
     ordered owner-run repairs in a Central session."""
     dep = read("DEPLOYMENT.md")
     assert dep.count("> **V162-V172 (") == 1
@@ -153,7 +153,12 @@ def test_one_combined_apply_note_orders_the_whole_apply():
     assert deploy and "V172" in changelog_entry(deploy.group(1)) and "V166" in changelog_entry(deploy.group(1))
     assert "apply V162 → V172 in order" in note and "stop on the first error" in note
     assert "ALTER SESSION SET TIMEZONE = 'America/Chicago';" in note
-    assert "V164 still needs the escalation email" in note
+    # 2026-10-02 (owner decision): the email leg is chosen -- the note names where V164's escalation email goes and
+    # what P164.1 must show; the old "still needs the escalation email chosen" / Teams-only-seed choice is gone
+    assert "V164's escalation email goes to OVERWATCH_EMAIL's `DEFAULT_RECIPIENTS`" in note
+    assert "the owner chose the email leg and its default recipient on 2026-10-02" in note
+    assert "`DEFAULT_RECIPIENTS_SET` and `SNOW_ACCOUNTADMINS_CAN_USE` TRUE" in note
+    assert "`escalation_email_failed`" in note and "V164 still needs the escalation email" not in note
     assert "Nothing is CALLed at apply time." in note
     for repair in ("**V166** (a MERGE", "**V167** (a scan-free DELETE", "**V172** (the change registry"):
         assert repair in note, repair

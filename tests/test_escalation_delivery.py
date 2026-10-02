@@ -118,6 +118,12 @@ def test_tally_and_failures():
     sev, warn = lines[2]
     assert sev == "warn" and "1 failed escalation pass run(s)" in warn and "2 failed escalation email send(s)" in warn
     assert "DEFAULT_RECIPIENTS" in warn and "USAGE" in warn
+    # 2026-10-02 incident review: V164 stamps an event once Teams re-posts it, so its email is NOT retried;
+    # only an email-only CRITICAL (no route delivered it) retries hourly, within 7 days of being raised.
+    # The old caption ("retries every hourly run until one goes out") overstated that.
+    assert "until one goes out" not in warn
+    assert "re-posted is not emailed again" in warn and "(email-only) is retried" in warn
+    assert "until 7 days after it was raised" in warn
     only_mail = _lines(EMAIL_FAILURES=1)[-1][1]
     assert "pass run" not in only_mail and "1 failed escalation email send(s)" in only_mail
     assert len(_lines()) == 2                                         # no failures -> no warning

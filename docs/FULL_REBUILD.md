@@ -31,23 +31,27 @@ owns the objects: SNOW_ACCOUNTADMINS here (DEPLOYMENT.md §1 and §2; step
     rebuilt from ACCOUNT_USAGE at all.
   - Factory reset (drop these too) only if you want zero history: run the
     Section B0 clone backups FIRST, verify row counts, then Section B.
-- **Opt-in objects** (the email alerts, the alert drill, the ML forecast,
-  the OVERWATCH_* notification integrations and their secrets): always
-  dropped, and no migration re-creates them (step 7b). Note which ones you
-  have first:
+- **Opt-in objects**: the alert drill and the ML forecast are always
+  dropped, and no migration re-creates them (step 7b). The account-level
+  **delivery objects** (the four NATIVE_ALERT_* email alerts, the OVERWATCH_*
+  notification integrations and their secrets) are KEPT: teardown only
+  suspends the alerts, and their drops sit behind its DELIVERY GATE, which
+  you open only for a true uninstall (owner decision 2026-10-02: the email
+  default must never be overwritten again). Note what you have first:
 
       SHOW ALERTS IN SCHEMA DBA_MAINT_DB.OVERWATCH;
       SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;   -- TASK_ALERT_DRILL, TASK_REFRESH_ML_FORECAST
       SHOW NOTIFICATION INTEGRATIONS LIKE 'OVERWATCH%';
-      DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL; -- ALLOWED_ / DEFAULT_RECIPIENTS go with it
+      DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL; -- record ALLOWED_ / DEFAULT_RECIPIENTS
+                                                     -- (they go with it if the gate is opened)
       SHOW GRANTS ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS; -- and each one listed above:
-                                                     -- its grants go with it
+                                                     -- its grants go with it (gate opened)
       SELECT ROUTE_ID, INTEGRATION_NAME FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
        WHERE ENABLED;                               -- the routes live now (step 7b)
 
-  Keep the Teams Workflows URL to hand: its secret is dropped too. Keep the
-  live ROUTE_IDs as well: step 7b re-enables exactly those (the step-1
-  ALERT_ROUTES clone holds them too).
+  If you will open the gate, keep the Teams Workflows URL to hand: its
+  secret is dropped too. Keep the live ROUTE_IDs either way: step 7b
+  re-enables exactly those (the step-1 ALERT_ROUTES clone holds them too).
 - **WH_ALFA_ADMIN settings** (shared with the app and every loader): the
   replay changes two of them (step 3), and step 3b puts back what you record
   now:
@@ -100,13 +104,16 @@ Section B run live anyway. Three rebuildable tables are dropped, and step 3
 re-creates them: APP_QUERY_TELEMETRY and ALERT_DELIVERIES (the per-route
 delivery ledger; step 7b(a) says what its reset means for delivery) come
 back empty, OW_SENDER_LEASE with its one seed row. And the opt-in tail at
-the end of Section B drops the ML forecast model, the webhook secrets and
-the OVERWATCH_* notification integrations (step 7b puts them back). The
-file says to run those integration drops as ACCOUNTADMIN; if your role
-cannot drop one, that statement fails and Run All stops there, so run the
-rest of the file, VERIFY included, by hand. The VERIFY query at the bottom
-should list ONLY operator-data tables afterward (or nothing, after a
-factory reset).
+the end of Section B drops the ML forecast model (step 7b puts it back).
+The DELIVERY GATE after it returns `kept: ...` and drops nothing: the
+OVERWATCH_* notification integrations, the webhook secrets and the four
+NATIVE_ALERT_* email alerts survive (the PREFLIGHT only suspended the
+alerts; step 7b resumes them). Only for a true uninstall set
+`drop_delivery_objects` TRUE in your Snowsight copy and run that block as
+ACCOUNTADMIN; if your role cannot drop one of them, the block fails there,
+so run the rest of the file, VERIFY included, by hand. The VERIFY query at
+the bottom should list ONLY operator-data tables afterward (or nothing,
+after a factory reset).
 
 ## 3. Migrations, in order, one file at a time
 
@@ -159,8 +166,8 @@ now, but the rule stands for every file). Notes:
   route's COMPANY_FILTER to 'ALFA'; V019/V020/V028 reset SEC_CRED_EXPIRY
   (enabled, threshold 10); V043/V045 re-enable PIPE_TASK_FAILURES; V091 and
   V157 turn AUTO_CLEAR_ENABLED on for five rules; V001 resets COMPANY_SCOPE
-  notes; V070 disables every enabled route whose integration the teardown
-  dropped; V118 and V145 re-run their one-time SAVINGS_LEDGER corrections
+  notes; V070 disables every enabled route whose integration is gone (none,
+  unless you opened the teardown's delivery gate); V118 and V145 re-run their one-time SAVINGS_LEDGER corrections
   (apply-time EXECUTE IMMEDIATE blocks, guarded so a re-run normally changes
   nothing); and the seed MERGEs put back the rules, routes, settings, scope and
   department rows you had deleted (V011 even re-adds two retired rules, which
@@ -232,10 +239,12 @@ re-enables the routes (the notifier posts only OPEN events):
        SET STATUS = 'ACK', ACK_BY = CURRENT_USER(), ACK_AT = CURRENT_TIMESTAMP()
      WHERE STATUS = 'OPEN' AND EVENT_ID IN ('<each EVENT_ID to keep quiet>');
 
-The restored ALERT_ROUTES has each route's pre-teardown ENABLED flag, but
-the teardown dropped the OVERWATCH_* notification integrations. Keep every
-route whose integration is gone switched off until step 7b brings it back
-(run the two statements together; the UPDATE reads the SHOW's result):
+The restored ALERT_ROUTES has each route's pre-teardown ENABLED flag. The
+teardown keeps the OVERWATCH_* notification integrations unless you opened
+its delivery gate, but any integration that is gone (gate opened, or never
+installed) must not keep an enabled route. Keep every route whose
+integration is gone switched off until step 7b brings it back (run the two
+statements together; the UPDATE reads the SHOW's result):
 
     SHOW NOTIFICATION INTEGRATIONS;
     UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE
@@ -372,17 +381,22 @@ the full chain.
 ## 7b. Re-install the opt-in objects
 
 teardown.sql (rebuild/01) dropped these, and no migration re-creates them:
-the four NATIVE_ALERT_* email alerts; TASK_ALERT_DRILL; the ML forecast
-(OVERWATCH_SPEND_FORECAST, SP_REFRESH_ML_FORECAST, TASK_REFRESH_ML_FORECAST,
-FORECAST_ML_DAILY); the OVERWATCH_EMAIL, OVERWATCH_WEBHOOK_TEAMS (and Slack
-/ PagerDuty / FinOps recipe) notification integrations; and the
-OVERWATCH_TEAMS_URL / OVERWATCH_WEBHOOK_URL secrets. Until they are back,
-Alerts ▸ Native delivery reads the email path as not installed, a dead
-scan or notifier sends no email, the monthly drill stops, and
-`FORECAST_ENGINE = ml_forecast` falls back to the seasonal engine. Put back
-what step 0 listed:
+TASK_ALERT_DRILL and the ML forecast (OVERWATCH_SPEND_FORECAST,
+SP_REFRESH_ML_FORECAST, TASK_REFRESH_ML_FORECAST, FORECAST_ML_DAILY). It
+KEPT the account-level delivery objects unless you opened its DELIVERY
+GATE: the four NATIVE_ALERT_* email alerts (suspended), the OVERWATCH_EMAIL,
+OVERWATCH_WEBHOOK_TEAMS (and Slack / PagerDuty / FinOps recipe) notification
+integrations, and the OVERWATCH_TEAMS_URL / OVERWATCH_WEBHOOK_URL secrets.
+Until the alerts are resumed (or, gate opened, re-created), Alerts ▸ Native
+delivery reads the email path as suspended or not installed and a dead scan
+or notifier sends no email; until the drill and forecast are back, the
+monthly drill stops and `FORECAST_ENGINE = ml_forecast` falls back to the
+seasonal engine. Put back what step 0 listed (`SHOW NOTIFICATION
+INTEGRATIONS LIKE 'OVERWATCH%'` shows which delivery objects are gone):
 
-(a) **Teams delivery** (as ACCOUNTADMIN): snowflake/webhook_delivery.sql's
+(a) **Teams delivery** (as ACCOUNTADMIN). Integration kept (the default):
+    nothing to re-create — only the route re-enable and the ALERT_DELIVERIES
+    note below apply. Gate opened: snowflake/webhook_delivery.sql's
     first-time setup — the commented `CREATE SECRET IF NOT EXISTS` with the
     URL pasted in Snowsight only, then open its GATE and run it. The
     re-created integration carries no grants: re-apply each one step 0's
@@ -419,13 +433,20 @@ what step 0 listed:
     ALERT_DELIVERIES holds new rows for the route and APP_ERROR_LOG has no
     new `route_send_failed` row (PAGE 'NotifyWebhook').
 
-(b) **Email** (as ACCOUNTADMIN): re-create OVERWATCH_EMAIL from the PREREQS
-    block of snowflake/native_alert_templates.sql (real ALLOWED_RECIPIENTS,
-    USAGE to SNOW_ACCOUNTADMINS) and set its DEFAULT_RECIPIENTS for the V164
-    escalation email (docs/EMAIL_RECIPIENT_RUNBOOK.md, step 2). Then, as
-    SNOW_ACCOUNTADMINS, re-run native_alert_templates.sql with the real
-    recipient. The alerts come back suspended: resume all four only after
-    step 8 passes and that runbook's pre-flight is clean.
+(b) **Email**. Integration and alerts kept (the default): check that
+    `DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL` still shows ENABLED true
+    and DEFAULT_RECIPIENTS set (the V164 escalation email goes only there),
+    then resume the four alerts (below). Gate opened (as ACCOUNTADMIN):
+    re-create OVERWATCH_EMAIL from the PREREQS block of
+    snowflake/native_alert_templates.sql, with ALLOWED_RECIPIENTS naming EVERY
+    address step 0's DESC listed (SET replaces the whole list, so a shorter
+    list drops a recipient) and DEFAULT_RECIPIENTS set as
+    docs/EMAIL_RECIPIENT_RUNBOOK.md requirement 4 says (without it every V164
+    escalation email fails with `escalation_email_failed`), plus USAGE to
+    SNOW_ACCOUNTADMINS; then, as SNOW_ACCOUNTADMINS, re-run
+    native_alert_templates.sql with the real recipient in all four
+    SYSTEM$SEND_EMAIL calls. Either way the alerts are suspended: resume
+    all four only after step 8 passes and that runbook's pre-flight is clean.
 (c) **Drill and ML forecast**: re-run snowflake/alert_drill.sql (it resumes
     its own task) and snowflake/ml_forecast_option.sql (it retrains and
     rewrites FORECAST_ML_DAILY; its weekly task is created suspended, so
