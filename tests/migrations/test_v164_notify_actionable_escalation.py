@@ -689,12 +689,14 @@ def test_v164_docs():
     wd = read("snowflake/webhook_delivery.sql")
     assert "V164: actionable lines" in wd and "ESCALATE_AFTER_MIN / ESCALATE_EMAIL_INTEGRATION" in wd
     assert "-- ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET" in wd
-    assert "--     DEFAULT_RECIPIENTS = ('<recipient>')" in wd
+    # 2026-10-02: SET DEFAULT_RECIPIENTS replaces the whole list, so the recipe keeps every listed address
+    assert "--     DEFAULT_RECIPIENTS = ('<recipient>', <every address DESC listed, each in quotes>)" in wd
     assert "<REDACTED-PASTE-IN-SNOWSIGHT>" in wd and "NEVER PASTE THE REAL URL INTO THIS FILE" in wd
     assert not re.search(r"^\s*ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL", wd, re.M)   # the recipe is commented
     doc = read("docs/EMAIL_RECIPIENT_RUNBOOK.md")
     assert "the recipient lives in exactly 4 requirements" in doc
-    assert "4. **Escalation default recipients (V164)**" in doc and "DEFAULT_RECIPIENTS = ('<recipient>')" in doc
+    assert "4. **Escalation default recipients (V164)**" in doc
+    assert "DEFAULT_RECIPIENTS = ('<recipient>', <every address DESC listed, each in quotes>)" in doc
     assert "escalation_email_failed" in doc and "ESCALATE_EMAIL_INTEGRATION" in doc
     assert "three requirements" not in doc
     rb = read("RUNBOOK.md")

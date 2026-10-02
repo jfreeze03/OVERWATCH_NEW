@@ -52,7 +52,12 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 4. **Every SQL builder gets a canary** (`app/data/canary.py`, default args,
    sqlglot-parses) and **every created object a teardown mention**
    (`tests/test_teardown_coverage.py`). Teardown keeps ALL destructive lines
-   commented; operator data survives; never DROP SCHEMA/DATABASE.
+   commented; operator data survives; never DROP SCHEMA/DATABASE. The
+   account-level delivery objects (OVERWATCH_* notification integrations,
+   webhook secrets, the four NATIVE_ALERT_* email alerts) drop only inside its
+   DELIVERY GATE (`drop_delivery_objects` DEFAULT FALSE, owner decision
+   2026-10-02: the email default must never be overwritten again); the same
+   test locks it.
 5. **Migration guard + floor lockstep:** each V0XX opens with the not_ready
    guard and ends with the idempotent SCHEMA_VERSION insert; bump
    `snowflake/validate.sql` (both the `V001..V0XX applied` label and the

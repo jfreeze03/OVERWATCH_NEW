@@ -547,10 +547,12 @@ def _escalation_lines(row: object, now: object = None) -> list[tuple[str, str]]:
         if pass_f:
             parts.append(f"{pass_f} failed escalation pass run(s)")
         if mail_f:
-            parts.append(f"{mail_f} failed escalation email send(s) — the notifier retries every hourly run "
-                         "until one goes out, so one unsent alert can fail many times; check DEFAULT_RECIPIENTS "
-                         "on the integration and USAGE on it for the app owner role "
-                         "(docs/EMAIL_RECIPIENT_RUNBOOK.md)")
+            parts.append(f"{mail_f} failed escalation email send(s) — an escalation any channel already "
+                         "delivered is stamped and not emailed again; one where every channel failed (always the "
+                         "case for an email-only CRITICAL while the email fails) is retried every hourly run while "
+                         "it stays open and unacknowledged, until 7 days after it was raised, so one such alert "
+                         "can fail many times; check DEFAULT_RECIPIENTS on the integration and USAGE on it for "
+                         "the app owner role (docs/EMAIL_RECIPIENT_RUNBOOK.md)")
         out.append(("warn", f"Last {days} days: " + "; ".join(parts) + " (APP_ERROR_LOG, page NotifyWebhook)."))
     return out
 

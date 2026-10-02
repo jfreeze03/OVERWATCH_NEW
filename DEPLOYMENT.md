@@ -362,9 +362,11 @@ snowflake/validate.sql   -- read the output; every row should be OK
 >    owner worksheet is otherwise UTC, and PART B V172.4 compares `SCHEMA_VERSION.APPLIED_AT` with Central task
 >    stamps). Each migration guards on the one before: stop on the first error, fix it, and re-run that file
 >    (every one is idempotent). Apply outside 06:30-07:30 CT so no daily loader straddles a procedure swap.
-> 2. **V164 still needs the escalation email chosen first** (PREFLIGHT P164.1: `DEFAULT_RECIPIENTS_SET` and
->    `SNOW_ACCOUNTADMINS_CAN_USE` TRUE, or seed `('ESCALATE_EMAIL_INTEGRATION','')` for a Teams-only escalation;
->    see the V164 verify note below). V165-V172 wait behind it: each guards on the one before.
+> 2. **V164's escalation email goes to OVERWATCH_EMAIL's `DEFAULT_RECIPIENTS`** — the owner chose the email leg
+>    and its default recipient on 2026-10-02 (docs/EMAIL_RECIPIENT_RUNBOOK.md requirement 4). PREFLIGHT P164.1
+>    must show `DEFAULT_RECIPIENTS_SET` and `SNOW_ACCOUNTADMINS_CAN_USE` TRUE; without the default list every
+>    escalation email fails with `escalation_email_failed` while the Teams re-post still goes (see the V164
+>    verify note below). V165-V172 wait behind V164: each guards on the one before.
 > 3. Every app read of a new column and every new caption is gated on its own migration
 >    (`app/ui/schema_gate.py`), so 4.609.0 is safe on either side of the apply; after it the gated text appears
 >    within 4 h (the metadata cache) or at once on Refresh (the V170 declare overload and its two Control Room
@@ -785,14 +787,20 @@ no per-user access control. This is a dev path only.
 surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
-- **Section A (live):** tasks, alerts, procs, functions, views, transient
+- **Section A (live):** tasks, procs, functions, views, transient
   facts/marts. Re-run the migrations in order (V001 through the repo tip) and
   the loaders repopulate — except the opt-in objects no migration creates:
-  the four NATIVE_ALERT_* email alerts, TASK_ALERT_DRILL and the ML forecast
-  objects. The opt-in tail at the end of Section B also runs live: it drops
-  the ML forecast model, the webhook secrets and the OVERWATCH_* notification
-  integrations (OVERWATCH_EMAIL, OVERWATCH_WEBHOOK_TEAMS, …). Re-create those
+  TASK_ALERT_DRILL and the ML forecast objects. The opt-in tail at the end of
+  Section B also runs live: it drops the ML forecast model. Re-create those
   with their opt-in scripts afterwards (docs/FULL_REBUILD.md step 7b).
+- **Delivery objects are KEPT** (owner decision 2026-10-02: the email default
+  must never be overwritten again): the four NATIVE_ALERT_* email alerts are
+  only suspended (step 7b resumes them), and the OVERWATCH_* notification
+  integrations (OVERWATCH_EMAIL with its ALLOWED_ / DEFAULT_RECIPIENTS,
+  OVERWATCH_WEBHOOK_TEAMS, …) and the webhook secrets survive. Their drops
+  sit inside the file's DELIVERY GATE, which runs only when
+  `drop_delivery_objects` is set TRUE in a Snowsight copy, as ACCOUNTADMIN,
+  for a true uninstall.
 - **Section B (commented, except two live parts):** operator data — settings,
   company scope, alert config/events/audit, action queue, savings ledger,
   error log, schema_version, OVERWATCH_STAGE. Uncomment only for a factory

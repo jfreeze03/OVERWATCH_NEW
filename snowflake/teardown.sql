@@ -5,19 +5,27 @@
 --     This script NEVER drops the schema or database — only OVERWATCH's own
 --     objects (from every migration and the opt-in scripts), each by fully
 --     qualified name.
---   * Section A (default, live): rebuildable objects — tasks, alerts, procs,
+--   * Section A (default, live): rebuildable objects — tasks, procs,
 --     functions, views, transient fact/mart tables. Re-running every migration
 --     (V001 through the repo tip) restores them and the loaders repopulate from
---     ACCOUNT_USAGE — except the opt-in objects no migration creates (the four
---     NATIVE_ALERT_* email alerts, TASK_ALERT_DRILL, the ML forecast objects).
+--     ACCOUNT_USAGE — except the opt-in objects no migration creates
+--     (TASK_ALERT_DRILL, the ML forecast objects).
 --   * Section B: OPERATOR DATA — settings, alert lifecycle, action queue,
 --     savings ledger, audit/error logs, OVERWATCH_STAGE (app files live on
 --     it — dropping it breaks the deployed app). Commented out: only uncomment
 --     for a true factory reset, and take the B0 clone backups first. Two parts
 --     of Section B run LIVE: the three rebuildable tables (APP_QUERY_TELEMETRY,
---     ALERT_DELIVERIES, OW_SENDER_LEASE) and the opt-in tail (the ML forecast
---     model, the webhook secrets and the OVERWATCH_* notification
---     integrations).
+--     ALERT_DELIVERIES, OW_SENDER_LEASE) and the opt-in tail's ML forecast
+--     model.
+--   * ACCOUNT-LEVEL DELIVERY OBJECTS ARE KEPT (owner decision 2026-10-02: the
+--     email default must never be overwritten again): the OVERWATCH_* notification
+--     integrations (OVERWATCH_EMAIL holds ALLOWED_ / DEFAULT_RECIPIENTS, which
+--     V164's escalation email needs), the Teams/webhook secrets (the Teams URL
+--     lives only there) and the four NATIVE_ALERT_* email alerts. No migration
+--     re-creates any of them. The PREFLIGHT below only SUSPENDs the alerts; their
+--     DROPs, with the integrations' and secrets', sit inside the DELIVERY GATE at
+--     the end of Section B and run only if you set drop_delivery_objects TRUE in
+--     your Snowsight copy, as ACCOUNTADMIN, for a true uninstall.
 --   * Section C (commented out): shared infrastructure — Streamlit app object,
 --     warehouse, resource monitor (already dropped by V045), retired roles.
 --
@@ -25,7 +33,10 @@
 --   0. Before this file: clone the operator tables (B0 below, or
 --      rebuild/00) and record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS
 --      and resource monitor (docs/FULL_REBUILD.md steps 0-1).
---   1. Re-run every migration in snowflake/migrations/ in order (V001 through
+--   1. Keeping operator data? First switch every ALERT_ROUTES row off
+--      (docs/FULL_REBUILD.md step 2): the integrations survive this file, so
+--      the notifier the replay resumes would post with the kept routes live.
+--      Then re-run every migration in snowflake/migrations/ in order (V001 through
 --      the repo tip), then roles.sql. V006-V008 grant to the retired
 --      OVERWATCH_MONITOR / OVERWATCH_OPERATOR roles: create them first
 --      (rebuild/02's replay shim does; roles.sql drops them again).
@@ -36,11 +47,13 @@
 --      V045 detaches any resource monitor). Restore the config tables and the
 --      ledger from the clones, and the timeout: docs/FULL_REBUILD.md step 3b.
 --   2. Run snowflake/validate.sql — every row should be OK.
---   3. Re-create the opt-in objects (email alerts, Teams delivery and its
---      grants, the drill, the ML forecast): docs/FULL_REBUILD.md step 7b. The
---      emptied ALERT_DELIVERIES makes the first notifier run re-post the last
---      24 h of OPEN events (7 days for a CRITICAL); step 7b(a) says how to
---      avoid that burst.
+--   3. Re-create the opt-in objects this file dropped (the drill, the ML
+--      forecast; the email alerts and Teams delivery with its grants only if
+--      you opened the DELIVERY GATE) and RESUME the four email alerts the
+--      PREFLIGHT suspended: docs/FULL_REBUILD.md step 7b. The emptied
+--      ALERT_DELIVERIES makes the first notifier run re-post the last 24 h of
+--      OPEN events (7 days for a CRITICAL); step 7b(a) says how to avoid that
+--      burst.
 --   4. Accidentally dropped a permanent table? Time Travel has your back:
 --        UNDROP TABLE DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER;
 --      (works within the retention window; transient tables have 0-1 days).
@@ -113,11 +126,9 @@ DROP TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_STORAGE_TRUTH;  -- V046
 DROP TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_OBJECT_COST;  -- V048
 DROP TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_APP_COST;  -- V077
 
--- A2. Native alert objects (opt-in delivery templates)
-DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_NEW_EVENTS;
-DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_STALE_FACTS;
-DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_SCAN_HEARTBEAT;
-DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_DELIVERY_FAILING;
+-- A2. Native alert objects (opt-in delivery templates): KEPT, only SUSPENDED by the
+--     PREFLIGHT. They carry the email recipient literally and no migration re-creates
+--     them, so their DROPs live in the DELIVERY GATE at the end of Section B.
 
 -- A3. Procedures
 DROP PROCEDURE IF EXISTS DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS();
@@ -325,17 +336,40 @@ DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE;  -- V064 webhook si
 -- Opt-in script artifacts (2026-07-08 audit: these previously survived a
 -- full teardown — the user's "do we drop email integrations?" catch).
 DROP SNOWFLAKE.ML.FORECAST IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_SPEND_FORECAST;  -- ml_forecast_option.sql
-DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL;                    -- webhook_delivery.sql
 
--- ACCOUNT-LEVEL: notification integrations are not schema objects — run
--- these as ACCOUNTADMIN. IF EXISTS keeps them safe when a recipe was never
--- applied (PagerDuty/finops/email are copy-paste recipes).
-DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK;            -- webhook_delivery.sql
-DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_EMAIL;              -- native_alert_templates.sql recipe
-DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_PAGERDUTY;  -- recipe
-DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_FINOPS;
-DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_TEAMS;     -- recipe
-DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL;    -- recipe (webhook_delivery.sql)
+-- DELIVERY GATE (owner decision 2026-10-02: the email default must never be
+-- overwritten again). The account-level delivery objects are KEPT by default:
+-- the four NATIVE_ALERT_* email alerts (the PREFLIGHT suspended them), the
+-- OVERWATCH_* notification integrations (OVERWATCH_EMAIL carries ALLOWED_ /
+-- DEFAULT_RECIPIENTS, which V164's escalation email needs) and the Teams /
+-- webhook secrets (the Teams URL lives only there). A drop-and-restore does not
+-- need them gone, and no migration re-creates them. Run All passes this block:
+-- it only returns 'kept: ...'. For a TRUE UNINSTALL, set drop_delivery_objects
+-- TRUE in your Snowsight copy and run it as ACCOUNTADMIN (integrations are not
+-- schema objects). Never commit the flag flipped. Re-create them afterwards per
+-- docs/FULL_REBUILD.md step 7b. IF EXISTS keeps each DROP safe when a recipe was
+-- never applied (PagerDuty / FinOps are copy-paste recipes).
+EXECUTE IMMEDIATE $$
+DECLARE
+    drop_delivery_objects BOOLEAN DEFAULT FALSE;
+BEGIN
+    IF (NOT drop_delivery_objects) THEN
+        RETURN 'kept: OVERWATCH_EMAIL, OVERWATCH_WEBHOOK_TEAMS (+ any OVERWATCH_WEBHOOK / _PAGERDUTY / _FINOPS), the OVERWATCH_TEAMS_URL / OVERWATCH_WEBHOOK_URL secrets and the 4 NATIVE_ALERT_* alerts (suspended: docs/FULL_REBUILD.md step 7b resumes them). Delivery gate closed.';
+    END IF;
+    DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_NEW_EVENTS;
+    DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_STALE_FACTS;
+    DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_SCAN_HEARTBEAT;
+    DROP ALERT IF EXISTS DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_DELIVERY_FAILING;
+    DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK;            -- webhook_delivery.sql (legacy)
+    DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_EMAIL;              -- native_alert_templates.sql PREREQS
+    DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_PAGERDUTY;  -- recipe
+    DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_FINOPS;     -- recipe
+    DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_TEAMS;      -- webhook_delivery.sql
+    DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL;     -- webhook_delivery.sql
+    DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL;   -- webhook_delivery.sql (legacy)
+    RETURN 'dropped: the 4 NATIVE_ALERT_* alerts, the OVERWATCH_* notification integrations and the delivery secrets. Re-create them per docs/FULL_REBUILD.md step 7b.';
+END;
+$$;
 
 -- To restore operator data after a factory reset, re-run every migration in order (V001 through
 -- V161 or later; V161 waits ~4 minutes for the backup run V158's tail starts, and if it still

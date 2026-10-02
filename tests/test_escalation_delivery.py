@@ -118,6 +118,18 @@ def test_tally_and_failures():
     sev, warn = lines[2]
     assert sev == "warn" and "1 failed escalation pass run(s)" in warn and "2 failed escalation email send(s)" in warn
     assert "DEFAULT_RECIPIENTS" in warn and "USAGE" in warn
+    # 2026-10-02 incident review: V164 stamps ESCALATED_AT right after ANY channel's send succeeds, so an
+    # escalation one channel delivered is not emailed again; one where EVERY channel failed is stamped by
+    # nothing and retries hourly, within 7 days of being raised. That is always the case for an email-only
+    # CRITICAL while the email fails, but also for a route-delivered one whose Teams re-post failed too.
+    # The first caption ("retries every hourly run until one goes out") overstated the retry; the second
+    # ("only a CRITICAL no route delivered (email-only) is retried") understated it.
+    assert "until one goes out" not in warn and "(email-only) is retried" not in warn
+    assert "an escalation any channel already delivered is stamped and not emailed again" in warn
+    assert "one where every channel failed (always the case for an email-only CRITICAL while the email fails)" \
+        in warn
+    assert "is retried every hourly run while it stays open and unacknowledged" in warn
+    assert "until 7 days after it was raised" in warn
     only_mail = _lines(EMAIL_FAILURES=1)[-1][1]
     assert "pass run" not in only_mail and "1 failed escalation email send(s)" in only_mail
     assert len(_lines()) == 2                                         # no failures -> no warning
