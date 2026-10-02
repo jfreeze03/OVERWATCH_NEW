@@ -1,3 +1,6 @@
+-- >>> FIRST (2026-10-02): run snowflake/run/EMAIL_FIX_2026-10-02.sql. It sets JDees@alfains.com as the
+-- >>> default recipient of OVERWATCH_EMAIL so V164's escalation email stops failing. It is independent of
+-- >>> everything below and safe to run now; this V162 -> V172 package still waits for app 4.609.0.
 -- #####################################################################
 --  OVERWATCH -- RUN_NEXT.sql  (app 4.609.0 package): APPLY V162 -> V172 IN ORDER, IN TWO STAGES, ONE SITTING.
 --  ELEVEN pending migrations. This note overrides the stage-1 header below wherever the two differ.
