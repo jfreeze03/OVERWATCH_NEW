@@ -231,19 +231,25 @@ def test_every_probe_cortex_read_has_a_declared_canary():
     assert reg["cortex.code_token_types"]() == cortex_sql.cortex_code_token_types()
 
 
-def _render_canary_tab(monkeypatch, kinds: dict[str, str]) -> tuple[dict[str, str], _FakeSt, list[str]]:
+def _render_canary_tab(monkeypatch, kinds: dict[str, str], applied: set[int] | None = None,
+                       ran: list[str] | None = None) -> tuple[dict[str, str], _FakeSt, list[str]]:
     """Admin > Canary with fakes: ``kinds`` maps a canary name to the error kind its read fails with (every
-    other entry passes). Returns (name -> STATUS from the runner's own classification, the fake st, the panel
-    help texts)."""
+    other entry passes). ``applied`` is the schema gate's applied set (default: every migration this build
+    expects, so no MIGRATION_GATED entry is skipped); ``ran`` collects the sources the runner actually read.
+    Returns (name -> STATUS from the runner's own classification, the fake st, the panel help texts)."""
     import app.ui.components as components
     from app.ui.pages import admin
     fake = _FakeSt(button_key="adm_canary_run", toggles_off=("adm_recon_on",))   # stop before the recon
     helps: list[str] = []
 
     def fake_run(_sql, *_a, source: str = "", **_k):
+        if ran is not None:
+            ran.append(source)
         kind = kinds.get(source)
         return _failed(kind) if kind else _ok(pd.DataFrame({"X": [1]}))
 
+    gate = set(admin._EXPECTED_MIGRATIONS) if applied is None else set(applied)
+    monkeypatch.setattr(admin, "_gate_applied_versions", lambda _page: set(gate))
     monkeypatch.setattr(admin, "st", fake)
     monkeypatch.setattr(admin, "run", fake_run)
     monkeypatch.setattr(admin, "audit_mode", lambda: False)
