@@ -641,10 +641,13 @@ def test_r2_014_task_graph_caption_claims_root_day_keying_only_after_v167():
 
 
 def test_c10_unknown_application_caption_names_the_30_day_session_pad():
+    """True on both paths: the live read pads SESSION_PAD_DAYS; mart days loaded before V166 used 7."""
     src = read("app/ui/pages/cost_parts/spend.py")
     assert ("session that reported no application, or whose session could not be found (opened "
-            "\"\n                    \"more than 30 days earlier, or a system/task session with no SESSIONS "
-            "row)") in src
+            "\"\n                    f\"more than {app_cost_sql.SESSION_PAD_DAYS} days before the window began, "
+            "or 7 on days \"\n                    \"the daily loader wrote before V166; or a system/task session "
+            "with no SESSIONS row)") in src
+    assert "more than 30 days earlier" not in src
     assert "or could not be joined to a session" not in src
 
 
