@@ -21,7 +21,7 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
-from app.config import LEDGER_AUTOBOOKED_LEVERS, core_object
+from app.config import ADMIN_ACCESS_HINT, LEDGER_AUTOBOOKED_LEVERS, core_object
 from app.core.identity import identity_sql
 from app.core.query import cache_scope, execute_statement, run
 from app.core.result import is_setup_absence
@@ -1909,7 +1909,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                            "(any of its maintenance arms, not rejected): then nothing is added."
                                        if ok else f"Booking failed: {msg}")
                             elif not is_operator:
-                                st.caption("Booking needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+                                st.caption(f"Booking is an in-app change. {ADMIN_ACCESS_HINT}")
                     elif _verdict in ACTION_VERDICTS:
                         st.caption("The object name is quoted, mixed-case or dotted, so no statement is generated "
                                    "(a wrong-case name would target a different object) — write it by hand.")
@@ -2633,8 +2633,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                        "unless one is already booked (not rejected): then nothing is added."
                                    if ok else f"Booking failed: {msg}")
                     elif not is_operator:
-                        st.caption("Copy the SQL freely; booking its saving requires SNOW_ACCOUNTADMINS / "
-                                   "SNOW_SYSADMINS.")
+                        st.caption("Copy the SQL freely. Booking its saving is an in-app change. "
+                                   f"{ADMIN_ACCESS_HINT}")
                 elif is_operator:
                     if (confirm_gate(wh_pick, "Execute + log" if _autobooked else "Execute + log + book estimated savings", key="remed",
                                      prompt="Type the warehouse name to confirm execution", object_name=True)
@@ -2669,7 +2669,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                       else "; the daily change scan books and settles its measured saving."
                                       if _autobooked else "."))
                 else:
-                    st.caption("Copy the SQL freely; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+                    st.caption(f"Copy the SQL freely. {ADMIN_ACCESS_HINT}")
 
         remlog = run(mart_sql.remediation_log(50), page=_PAGE, key="remed_log", tier="live",
                      source="REMEDIATION_LOG")

@@ -51,7 +51,10 @@ def test_dead_cache_gauge_is_off_the_pain_board():
 
 def test_actions_bump_the_refresh_salt_and_tiers_downgrade_safely():
     q = (_ROOT / "app" / "core" / "query.py").read_text(encoding="utf-8")
-    body = q.split("def execute_statement(sql: str, *, page: str) -> tuple", 1)[1].split("\ndef ", 1)[0]
+    # v4.610.0: execute_statement returns execute_statement_count without the row count; the write body lives there
+    wrapper = q.split("def execute_statement(sql: str, *, page: str) -> tuple", 1)[1].split("\ndef ", 1)[0]
+    assert "execute_statement_count(sql, page=page)" in wrapper
+    body = q.split("def execute_statement_count(sql: str, *, page: str) -> tuple", 1)[1].split("\ndef ", 1)[0]
     # r27 #14 superseded the global bump: writes now invalidate domain
     # salts when the target is a known app table, global otherwise.
     assert "_bump_refresh(sql)" in body

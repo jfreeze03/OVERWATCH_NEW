@@ -351,6 +351,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.alert_event_history", lambda: mart_sql.alert_event_history(2)),
     ("mart.alert_mttr", lambda: mart_sql.alert_mttr(7)),
     ("mart.alert_rules", mart_sql.alert_rules),
+    # v4.610.0: the Alerts > Rules 'Recent rule changes' read (ALERT_AUDIT RULE_EDIT rows; a core object)
+    ("mart.alert_rule_edits", lambda: mart_sql.alert_rule_edits(1)),
     ("mart.action_queue", lambda: mart_sql.action_queue(1)),
     ("workbench.action_center", lambda: workbench_sql.action_center(limit=1)),
     ("workbench.action_activity", lambda: workbench_sql.action_activity("canary-probe", 1)),

@@ -7,7 +7,7 @@ from datetime import timedelta
 
 import streamlit as st
 
-from app.config import MAX_LIVE_WINDOW_DAYS, core_object
+from app.config import ADMIN_ACCESS_HINT, MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
 from app.core.query import (
@@ -4766,7 +4766,8 @@ def _emergency_tab(is_operator: bool) -> None:
 
         if not is_operator:
             _emg_preview()
-            st.caption("Copy the SQL; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+            st.caption(f"{ADMIN_ACCESS_HINT} Anyone can copy the SQL; a worksheet run needs "
+                       "SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (SNOW_ACCOUNTADMINS for an ACCOUNT-level lever).")
         elif hasattr(st, "dialog"):
             # rec44: this is the highest-blast-radius single-shot lever, so gate it
             # behind a modal (same hasattr degrade pattern as the Wave 2/3 widgets).

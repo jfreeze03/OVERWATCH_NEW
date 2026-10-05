@@ -556,7 +556,7 @@ def test_alert_drawer_timeout_lever_reads_before_it_writes():
     # one shared warning/info render for both guarded levers, so the raw st.info ceiling holds
     assert al.count('st.info(plan["message"])') == 1 and 'st.info(_cl_plan["message"])' not in al
     assert al.count("_plan_notice(") == 3                                 # def + the two guarded levers
-    assert len(re.findall(r"st\.(?:info|success)\(", al)) <= 9
+    assert len(re.findall(r"st\.(?:info|success)\(", al)) <= 10   # +1 v4.610.0 rule-edit receipt
     # the r34 auto-suspend guard and its V157 note wiring are untouched
     assert "_cl_plan = remediation.tighten_suspend_plan(wh_inline, _cl_cur, _cl_known)" in al
     assert 'STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")' in al

@@ -1142,7 +1142,8 @@ def _settings_tab(is_operator: bool) -> None:
                            else "New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
         # v4.610.0: name both admin routes (the allowlist and a direct admin-role grant).
-        st.caption(f"{ADMIN_ACCESS_HINT} Anyone can copy the SQL for review.")
+        st.caption(f"Saving a setting is an in-app change. {ADMIN_ACCESS_HINT} "
+                   "Anyone can copy the SQL for review.")
 
 
 # v4.610.0 Admin ▸ Access: the 'Re-check now' receipt, shown once on the rerun that follows the click (and

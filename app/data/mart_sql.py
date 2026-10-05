@@ -951,6 +951,21 @@ ORDER BY FAMILY, RULE_ID
 """
 
 
+def alert_rule_edits(limit: int = 20) -> str:
+    """v4.610.0: the newest in-app alert-rule edits, the ALERT_AUDIT 'RULE_EDIT' rows an OVERWATCH admin's
+    threshold / Enabled apply on Alerts > Rules appends (EVENT_ID 'RULE:<RULE_ID>', NOTE 'rule <id>: old -> new
+    -- by <viewer>'). Newest first, capped at 200 rows. A worksheet UPDATE of ALERT_CONFIG writes no audit row,
+    so this lists the in-app edits only."""
+    cap = max(1, min(int(limit), 200))
+    return f"""
+SELECT ACTED_AT, ACTED_BY, REPLACE(EVENT_ID, 'RULE:', '') AS RULE_ID, NOTE AS CHANGE
+FROM {core_object("ALERT_AUDIT")}
+WHERE ACTION = 'RULE_EDIT'
+ORDER BY ACTED_AT DESC
+LIMIT {cap}
+"""
+
+
 def action_queue(limit: int = 200, company: str = "ALL") -> str:
     """Newest OPEN actions (r19 #5): status filters in SQL so an old open
     critical can never age out of the newest-N fetch window. Ranking stays

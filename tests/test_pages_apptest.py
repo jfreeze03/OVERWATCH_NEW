@@ -59,6 +59,8 @@ def _stub_runtime(monkeypatch):
             monkeypatch.setattr(module, "run", _fake_run)
         if hasattr(module, "execute_statement"):
             monkeypatch.setattr(module, "execute_statement", _fake_execute)
+        if hasattr(module, "execute_statement_count"):   # v4.610.0: the alert-rule editor's row-counting write
+            monkeypatch.setattr(module, "execute_statement_count", lambda *_a, **_k: (True, "stubbed", 1))
         if hasattr(module, "current_role"):
             monkeypatch.setattr(module, "current_role", lambda: "SNOW_SYSADMINS")
         if hasattr(module, "load_settings"):
