@@ -20,7 +20,7 @@ from threading import RLock
 import pandas as pd
 import streamlit as st
 
-from app.config import DEFAULT_MAX_ROWS, core_object
+from app.config import ADMIN_ACCESS_ROLE, DEFAULT_MAX_ROWS, core_object
 from app.core.errors import format_snowflake_error, record_error
 from app.core.result import QueryResult
 from app.core.session import (
@@ -586,30 +586,93 @@ _WRITE_PREFIXES = (
 # Next-Fifty #23: the owner-privileged subset of the allow-list. Every SiS viewer executes with
 # the app OWNER's rights, so ACCOUNT-object levers (and query cancel) must not depend on each call
 # site remembering is_operator(). DERIVED from _WRITE_PREFIXES, so any future ALTER lever is
-# privileged the moment it is allow-listed; OVERWATCH-table DML/CALLs stay open (prefs, watchlist,
-# comments, audit rows).
+# privileged the moment it is allow-listed.
 _PRIVILEGED_PREFIXES: tuple[str, ...] = tuple(p for p in _WRITE_PREFIXES if p.startswith("ALTER "))
-_ENTITLEMENT_REFUSAL = ("operator entitlement required — this viewer is not on the in-app "
-                        "operator allowlist (OPERATOR_USERS).")
+# v4.610.0 (owner decision 2026-10-05): every OVERWATCH-table DML / CALL is privileged too, EXCEPT the
+# viewer's own self-service rows: display prefs, the personal watchlist and the usage / query telemetry
+# buffers. The EXACT object token after the allow-listed prefix decides (ended by whitespace, '(' or the
+# end) -- never a substring, so `... ACTION_QUEUE SET NOTE='USER_PREFS'` and `USER_PREFS_X` stay
+# privileged. APP_ERROR_LOG never reaches an executor (errors.record_error submits it directly).
+_OVERWATCH_WRITE_PREFIXES: tuple[str, ...] = tuple(
+    p for p in _WRITE_PREFIXES if p.endswith(core_object("")))
+_SELF_SERVICE_OBJECTS: frozenset[str] = frozenset(
+    {"USER_PREFS", "USER_WATCHLIST", "APP_USAGE", "APP_QUERY_TELEMETRY"})
+_TARGET_TOKEN_RE = re.compile(r"([A-Z0-9_$]+)(?=[\s(]|$)")
+# The access sources whose operator answer needs no write-time lookup: the named allowlist, and off-SiS
+# local dev (the role->profile path; no owner's-rights session). 'role' re-verifies; anything else refuses.
+_OPERATOR_SOURCES_NO_RECHECK: tuple[str, ...] = ("allowlist", "off_sis")
+# The account-level levers that ROLE_ADMIN_ACCOUNT_LEVERS governs for role-sourced admins.
+_ACCOUNT_LEVER_PREFIXES: tuple[str, ...] = ("ALTER USER ", "ALTER ACCOUNT SET ")
+_ENTITLEMENT_REFUSAL = ("operator entitlement required — this viewer is not an OVERWATCH admin (the "
+                        "in-app operator allowlist OPERATOR_USERS, or a direct member of "
+                        f"{ADMIN_ACCESS_ROLE}).")
+_ROLE_RECHECK_REFUSAL = (f"operator entitlement required — {ADMIN_ACCESS_ROLE} membership could not be "
+                         "re-verified for this write (revoked, or the access check is unavailable); "
+                         "nothing ran.")
+_ACCOUNT_LEVER_REFUSAL = ("operator entitlement required — the account-level levers (ALTER USER, ALTER "
+                          "ACCOUNT SET) are limited to the named admin allowlist (OPERATOR_USERS).")
 
 _QUERY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+def _normalized_body(sql: str) -> str:
+    return str(sql or "").strip().rstrip(";").strip().upper()   # same normalization as _statement_allowed
+
+
+def _target_object(body: str) -> str:
+    """The exact object an OVERWATCH DML / CALL names ('' when it is not one, or the name is quoted or
+    qualified further). ``body`` is the normalized (upper-cased) statement."""
+    body = _normalized_body(body)
+    for prefix in _OVERWATCH_WRITE_PREFIXES:
+        if body.startswith(prefix):
+            m = _TARGET_TOKEN_RE.match(body, len(prefix))
+            return m.group(1) if m else ""
+    return ""
+
+
 def _is_privileged(sql: str) -> bool:
-    body = str(sql or "").strip().rstrip(";").strip().upper()   # same normalization as _statement_allowed
-    return body.startswith(_PRIVILEGED_PREFIXES)
+    body = _normalized_body(sql)
+    if body.startswith(_PRIVILEGED_PREFIXES):
+        return True
+    if body.startswith(_OVERWATCH_WRITE_PREFIXES):
+        return _target_object(body) not in _SELF_SERVICE_OBJECTS
+    return False
 
 
 def _entitlement_refusal(sql: str, *, page: str, seam: str, privileged: bool | None = None) -> str | None:
     """None when the statement may run; else the refusal message, already audited to APP_ERROR_LOG.
     Non-privileged statements never consult is_operator() (telemetry flushes stay free of an
-    identity/role probe). Fails CLOSED if the entitlement check itself raises."""
+    identity/role probe). Fails CLOSED if the entitlement check itself raises.
+
+    v4.610.0: an admin whose rights come from ADMIN_ACCESS_ROLE (access_source() == 'role') is
+    re-verified LIVE on every privileged write (session.reverify_role_admin, memo <= WRITE_RECHECK_S),
+    and is refused the account-level levers unless config.ROLE_ADMIN_ACCOUNT_LEVERS (owner 2026-10-05:
+    True, full parity). An allowlisted admin never pays a lookup here.
+
+    is_operator() and access_source() are two reads of the session's access memo, and the memo can
+    expire between them, so the second read may re-resolve to a NON-admin source while the first said
+    operator. The branch is therefore explicit: only _OPERATOR_SOURCES_NO_RECHECK ('allowlist', and
+    'off_sis' for local dev) run outright, 'role' re-verifies, and EVERY other source refuses."""
     if not (_is_privileged(sql) if privileged is None else privileged):
         return None
+    from app import config as _config
     from app.core import session as _session  # module attribute lookup: one monkeypatch point
+    refusal = _ENTITLEMENT_REFUSAL
     try:
         if _session.is_operator():
-            return None
+            source = _session.access_source()
+            if source in _OPERATOR_SOURCES_NO_RECHECK:
+                return None
+            if source == "role":
+                if (not _config.ROLE_ADMIN_ACCOUNT_LEVERS
+                        and _normalized_body(sql).startswith(_ACCOUNT_LEVER_PREFIXES)):
+                    refusal = _ACCOUNT_LEVER_REFUSAL
+                else:
+                    refusal = _ROLE_RECHECK_REFUSAL
+                    if _session.reverify_role_admin():
+                        return None
+            # any other source (default / lookup_failed / unverified / no_identity / unknown): the
+            # access memo moved under us or never named an admin -> refuse, never "not role, so allow"
     except Exception:  # an entitlement probe failure must refuse, never allow
         pass
     try:
@@ -617,9 +680,9 @@ def _entitlement_refusal(sql: str, *, page: str, seam: str, privileged: bool | N
         who = viewer_name() or "?"
     except Exception:  # the audit context is best-effort
         who = "?"
-    record_error(page, PermissionError(_ENTITLEMENT_REFUSAL),
+    record_error(page, PermissionError(refusal),
                  context=f"{seam} refused (viewer={who}): {str(sql)[:200]}")
-    return _ENTITLEMENT_REFUSAL
+    return refusal
 
 
 def _statement_allowed(sql: str) -> tuple[bool, str]:

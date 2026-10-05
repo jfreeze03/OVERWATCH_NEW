@@ -27,7 +27,7 @@ from app.core.query import cache_scope, execute_statement, run
 from app.core.result import is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal, sql_number
-from app.core.state import request_navigation
+from app.core.state import can_open, request_navigation
 from app.data import (
     cost_sql,
     insights_sql,
@@ -2712,7 +2712,8 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
     # Decision Studio ROI; same ledger_totals() source + the uncapped SQL run-rate). This tab keeps the
     # operational VERIFY workflow only.
     st.caption("Verified / estimated / realization totals, and what each saving rests on, live on **Proof**.")
-    if st.button("Open the proof → Proof", key="savings_roi_link"):
+    # v4.610.0: the view-only MONITOR profile has no Proof, so the doorway renders only where it opens
+    if can_open("Proof") and st.button("Open the proof → Proof", key="savings_roi_link"):
         request_navigation("Proof", "Proof")
     if res.empty:
         empty_state("no_data_yet",

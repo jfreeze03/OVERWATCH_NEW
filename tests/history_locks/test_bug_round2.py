@@ -58,4 +58,8 @@ def test_b8_cross_page_nav_clamped_to_profile():
     owner's-rights SiS), not resolve_role_profile (the owner's role for everyone)."""
     body = _state_fn("consume_pending_navigation")
     assert "PAGES_BY_PROFILE" in body and "active_profile" in body
-    assert 'page = "Overview"' in body                          # universal fallback
+    # v4.610.0: Overview stays the fallback for every profile that has it; MONITOR (no Overview) falls back
+    # to its own landing page (state.clamp_page)
+    assert "clamp_page(page, allowed)" in body
+    clamp = _state_fn("clamp_page")
+    assert 'return "Overview" if "Overview" in allowed else allowed[0]' in clamp

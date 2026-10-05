@@ -1,8 +1,12 @@
 """Next-Fifty #23 (v4.588.0): every SiS viewer runs with the app OWNER's rights, so the in-app operator
 allowlist is the authorization boundary. The query executors now re-check it themselves for owner-
 privileged statements (the ALTER levers + query cancel) instead of trusting every call site to remember
-is_operator(). OVERWATCH-table writes (prefs, watchlist, comments, audit rows, action-proc CALLs) never
-consult the entitlement check."""
+is_operator().
+
+v4.610.0 (owner decision 2026-10-05) widened the privileged set: every OVERWATCH-table DML / CALL needs the
+entitlement too (action-proc CALLs included), EXCEPT the viewer's own self-service rows (USER_PREFS,
+USER_WATCHLIST, APP_USAGE, APP_QUERY_TELEMETRY), which never consult it. tests/test_role_access.py covers the
+exact-target matching and the role-sourced write-time re-check."""
 
 from __future__ import annotations
 
@@ -97,7 +101,7 @@ def test_operator_privileged_statement_runs(wired, monkeypatch):
     assert "_ow_refresh_salt" in st.session_state
 
 
-def test_non_privileged_writes_never_consult_entitlement(wired, monkeypatch):
+def test_self_service_writes_never_consult_entitlement(wired, monkeypatch):
     calls = {"n": 0}
 
     def _counting() -> bool:
@@ -108,11 +112,38 @@ def test_non_privileged_writes_never_consult_entitlement(wired, monkeypatch):
     ok, _ = q.execute_statement("INSERT INTO DBA_MAINT_DB.OVERWATCH.USER_PREFS (USER_NAME, PREF_KEY, PREF_VALUE) "
                                 "SELECT 'U','K','V'", page="x")
     assert ok is True
+    assert q.execute_statement_async("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (X) SELECT 1", page="x") is True
+    assert q.execute_statement_async("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY (X) SELECT 1",
+                                     page="Telemetry") is True
+    ok, _ = q.execute_statement("DELETE FROM DBA_MAINT_DB.OVERWATCH.USER_WATCHLIST WHERE 1=0", page="x")
+    assert ok is True
+    assert calls["n"] == 0
+
+
+def test_non_operator_action_proc_call_is_refused(wired, monkeypatch):
+    # v4.610.0 flipped this: an action-proc CALL used to run for any viewer (UI gating only). It now needs the
+    # entitlement like every other non-self-service OVERWATCH write, and the refusal never reaches Snowflake.
+    sess, errors = wired
+    calls = {"n": 0}
+
+    def _counting() -> bool:
+        calls["n"] += 1
+        return False
+
+    monkeypatch.setattr(session_mod, "is_operator", _counting)
+    ok, msg = q.execute_action("CALL DBA_MAINT_DB.OVERWATCH.SP_ALERT_LIFECYCLE('e1','ACK','','','U','k1')",
+                               [], page="Alerts")
+    assert ok is False and "operator entitlement required" in msg
+    assert calls["n"] == 1 and sess.log == []
+    assert len(errors) == 1 and "execute_action refused" in errors[0][2]
+
+
+def test_operator_action_proc_call_runs(wired, monkeypatch):
+    sess, _ = wired
+    monkeypatch.setattr(session_mod, "is_operator", lambda: True)
     ok, _ = q.execute_action("CALL DBA_MAINT_DB.OVERWATCH.SP_ALERT_LIFECYCLE('e1','ACK','','','U','k1')",
                              [], page="Alerts")
-    assert ok is True
-    assert q.execute_statement_async("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (X) SELECT 1", page="x") is True
-    assert calls["n"] == 0
+    assert ok is True and len(sess.log) == 1
 
 
 def test_entitlement_fails_closed_when_the_check_raises(wired, monkeypatch):
