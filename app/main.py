@@ -925,6 +925,10 @@ def main() -> None:
         if st.button("Retry connection"):
             st.cache_resource.clear()
             st.session_state.pop("_ow_current_role", None)
+            # v4.610.0: a lookup that failed during the outage must not hold an admin-by-role read-only
+            # for its retry window once the connection is back (this viewer's memo only).
+            from app.core.session import forget_access
+            forget_access()
             st.rerun()
         return
 

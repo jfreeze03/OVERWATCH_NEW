@@ -1188,7 +1188,8 @@ def _access_tab() -> None:
          "severity": "ok" if operator else "",
          "help": "Admins can run every in-app change; everyone else sees the pages read-only."},
         {"label": "Resolved", "value": f"{humanize_duration(info.get('age_s'))} ago",
-         "help": f"Resolved at {clock}. A resolved answer is re-checked after {humanize_duration(ACCESS_TTL_S)}."},
+         "help": f"Resolved at {clock}. " + access_review.recheck_note(
+             source, sis=sis, unavailable=_session.ACCESS_UNAVAILABLE_SOURCES)},
     ])
     st.caption(f"Decided by: {access_review.source_label(source)}. Pages: {', '.join(pages) or '—'}. "
                f"Resolved at {clock}.")
@@ -1261,9 +1262,20 @@ def _access_tab() -> None:
             if review["status"] == "ok":
                 empty_state("clean", "Exactly the four access roles hold USAGE on the app; no other grantee.")
             if review["missing"]:
-                st.warning(f"Missing USAGE for {', '.join(review['missing'])}: its members cannot open the app. "
-                           "Re-run snowflake/roles.sql's Streamlit grants (a `snow streamlit deploy --replace` "
-                           "or CREATE OR REPLACE STREAMLIT can drop them; the proof block raises -20012).")
+                # OWNERSHIP implies every privilege: an owning role still opens the app without the explicit
+                # USAGE grant roles.sql requires, so only the non-owners are locked out.
+                locked_out = [r for r in review["missing"] if r not in review["owners"]]
+                owning = [r for r in review["missing"] if r in review["owners"]]
+                parts = [f"No explicit USAGE grant for {', '.join(review['missing'])}: roles.sql requires one for "
+                         "each access role. Re-run snowflake/roles.sql's Streamlit grants (a `snow streamlit "
+                         "deploy --replace` or CREATE OR REPLACE STREAMLIT can drop them; the proof block raises "
+                         "-20012)."]
+                if locked_out:
+                    parts.append(f"Until then, members of {', '.join(locked_out)} cannot open the app.")
+                if owning:
+                    parts.append(f"{', '.join(owning)} {'owns' if len(owning) == 1 else 'own'} the app, so "
+                                 f"{'its' if len(owning) == 1 else 'their'} members still open it.")
+                st.warning(" ".join(parts))
             if review["unexpected"]:
                 st.error(f"USAGE granted outside the four access roles: {', '.join(review['unexpected'])}. "
                          "REVOKE it: anyone holding it can open the app and gets the view-only pages "
@@ -1292,7 +1304,8 @@ def _access_tab() -> None:
         "can create an OVERWATCH admin.",
         f"- **Remove an admin**: `REVOKE ROLE {ADMIN_ACCESS_ROLE} FROM USER <username>;` Their in-app changes stop "
         f"within {humanize_duration(WRITE_RECHECK_S)} (every change re-verifies); their pages follow within "
-        f"{humanize_duration(ACCESS_TTL_S)}.",
+        f"{humanize_duration(ACCESS_TTL_S)}. A named admin in config OPERATOR_USERS stays an admin (no lookup) "
+        "until removed from that allowlist and redeployed.",
         "- **When the lookup fails or lists nobody**: admins-by-role are read-only until it recovers (it fails "
         "closed, never open), the sidebar says 'Access check unavailable', and it retries every "
         f"{humanize_duration(ACCESS_RETRY_S)}. The named admins are unaffected.",

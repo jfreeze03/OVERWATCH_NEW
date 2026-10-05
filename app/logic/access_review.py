@@ -3,7 +3,7 @@
 Two different questions, answered in two different places:
   * who can OPEN the app is Snowflake's USAGE on the Streamlit. Exactly config.APP_ACCESS_ROLES may hold it;
     snowflake/roles.sql's -20011/-20012 proof block pins that set, and app_grant_review applies the same
-    rule to a SHOW GRANTS ON STREAMLIT answer;
+    rule to a SHOW GRANTS ON STREAMLIT answer (tests/test_admin_access_tab.py locks the two together);
   * who can CHANGE things is decided in-app per viewer (app.core.session.viewer_access): the named
     OPERATOR_USERS, or a DIRECT user grant of config.ADMIN_ACCESS_ROLE looked up live as the owner. Everyone
     else who can open the app gets the view-only VIEWER_UNKNOWN_PROFILE.
@@ -19,6 +19,8 @@ from collections.abc import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from app.config import (
+    ACCESS_RETRY_S,
+    ACCESS_TTL_S,
     ADMIN_ACCESS_ROLE,
     APP_ACCESS_ROLES,
     PAGES_BY_PROFILE,
@@ -43,16 +45,35 @@ SOURCE_LABELS: dict[str, str] = {
     "off_sis": "Off Streamlit-in-Snowflake (local dev): the role -> profile map decides",
 }
 
-#: What holding USAGE on the app means for each expected role (the grants table's MEANS column).
+#: What holding USAGE on the app means for each expected role (the grants table's MEANS column). Which
+#: role OWNS the app is read from the SHOW answer (app_grant_review's OWNER_MEANING), never assumed here.
 ROLE_MEANING: dict[str, str] = {
-    "SNOW_ACCOUNTADMINS": ("Opens the app and owns it: every viewer's SQL runs with this role's rights. A holder "
-                           "is an admin only via OPERATOR_USERS or a direct admin-role grant."),
+    "SNOW_ACCOUNTADMINS": ("Opens the app. A holder is an admin only via OPERATOR_USERS or a direct admin-role "
+                           "grant; otherwise view-only."),
     "SNOW_SYSADMINS": ("Opens the app. A holder is an admin only via OPERATOR_USERS or a direct admin-role "
                        "grant; otherwise view-only."),
     ADMIN_ACCESS_ROLE: ("Opens the app. A DIRECT user member is an OVERWATCH admin: every page and every "
                         "in-app change. A role granted this role is not expanded."),
     VIEW_ACCESS_ROLE: f"Opens the app. View-only: {_VIEW_PAGES}, no changes.",
 }
+
+#: Prefixed to MEANS for a role the SHOW answer lists with OWNERSHIP (ownership implies every privilege).
+OWNER_MEANING = "Owns the app (OWNERSHIP): every viewer's SQL runs with this role's rights. "
+
+
+def recheck_note(source: object, *, sis: bool, unavailable: Iterable[str]) -> str:
+    """When this viewer's access answer is resolved again (Admin ▸ Access's 'Resolved' help).
+
+    Mirrors session.viewer_access: nothing is memoized for an unidentified viewer or anywhere off
+    Streamlit-in-Snowflake; a source in ``unavailable`` (session.ACCESS_UNAVAILABLE_SOURCES: the lookup
+    failed or listed no user) is retried after ACCESS_RETRY_S; any other answer after ACCESS_TTL_S."""
+    key = str(source or "")
+    if not sis or key in ("no_identity", "off_sis"):
+        return "Resolved again on every run: no lookup answer is kept."
+    if key in tuple(unavailable):
+        return (f"The admin-role lookup could not answer, so it is retried after "
+                f"{humanize_duration(ACCESS_RETRY_S)}.")
+    return f"A resolved answer is re-checked after {humanize_duration(ACCESS_TTL_S)}."
 
 
 def source_label(source: object) -> str:
@@ -148,7 +169,8 @@ def app_grant_review(rows: object, expected: tuple[str, ...] = EXPECTED_APP_GRAN
     The rule is roles.sql's proof block: a USAGE row is allowed only when granted_to = 'ROLE' and the
     grantee is one of ``expected`` (so a database role, application role or share spelled like an access role
     is still unexpected), and every expected role must hold USAGE. Other privileges (OWNERSHIP) never count
-    either way; their grantees are reported as ``owners``.
+    either way; their grantees are reported as ``owners``, and an owning role's MEANS says so (ownership
+    implies every privilege, so it still opens the app while roles.sql's required USAGE grant is missing).
 
     Returns {status: ok | drift | empty, rows, present, missing, unexpected, owners, table}. An empty answer
     is 'empty' (the owner always sees its own OWNERSHIP row, so nothing at all means the read could not see
@@ -180,9 +202,17 @@ def app_grant_review(rows: object, expected: tuple[str, ...] = EXPECTED_APP_GRAN
     table: list[dict[str, str]] = []
     for role in expected:
         ok = role in have
+        owns = role in owners
+        if ok:
+            status_text = "OK"
+        elif owns:
+            status_text = ("Missing: no explicit USAGE grant (it owns the app, so it still opens it); "
+                           "re-run snowflake/roles.sql's Streamlit grants")
+        else:
+            status_text = "Missing: re-run snowflake/roles.sql's Streamlit grants"
         table.append({"GRANTEE": role, "KIND": "ROLE", "EXPECTED": "Yes", "HAS_USAGE": "Yes" if ok else "No",
-                      "STATUS": "OK" if ok else "Missing: re-run snowflake/roles.sql's Streamlit grants",
-                      "MEANS": ROLE_MEANING.get(role, "")})
+                      "STATUS": status_text,
+                      "MEANS": (OWNER_MEANING if owns else "") + ROLE_MEANING.get(role, "")})
     for kind, name in sorted({(k, n) for k, n in usage if not (k == "ROLE" and n in expected)}):
         table.append({"GRANTEE": name, "KIND": kind or "?", "EXPECTED": "No", "HAS_USAGE": "Yes",
                       "STATUS": "Unexpected: REVOKE it (roles.sql's proof block raises -20011)",

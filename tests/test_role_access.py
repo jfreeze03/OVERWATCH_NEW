@@ -291,6 +291,21 @@ def test_off_sis_identified_viewer_never_runs_the_show(env, monkeypatch):
     assert env.shows == 0
 
 
+def test_an_off_sis_default_is_never_memoized(env, monkeypatch):
+    # Review d6c62b87 #2: on SiS a failed connection makes is_sis() False (get_cached_session() is None),
+    # so the off-SiS 'default' answer is reached by a DISCONNECTED SiS run. Kept for ACCESS_TTL_S, it held
+    # a direct DSA member read-only for 5 minutes after the connection came back.
+    sis = {"on": False}
+    monkeypatch.setattr(sess, "is_sis", lambda: sis["on"])
+    a = sess.viewer_access()
+    assert (a["profile"], a["operator"], a["source"]) == ("MONITOR", False, "default")
+    assert "_ow_access" not in st.session_state
+    sis["on"] = True                                     # the connection recovered, same clock
+    a = sess.viewer_access()
+    assert (a["profile"], a["operator"], a["source"]) == ("DBA", True, "role")
+    assert env.shows == 1
+
+
 def test_off_sis_without_identity_keeps_the_role_path(env, monkeypatch):
     env.viewer = ""
     monkeypatch.setattr(sess, "is_sis", lambda: False)
@@ -745,6 +760,38 @@ def test_app_role_admin_gets_the_dba_surface(sis_app):
     _, options, captions = _run_app()
     assert "Admin" in options and "Alerts" in options and "Ask" in options
     assert _unavailable_caption() not in captions
+
+
+def test_app_retry_connection_forgets_the_access_memo(sis_app, monkeypatch):
+    # Review d6c62b87 #2: 'Retry connection' cleared the cached session and role but not the access memo, so
+    # a lookup that failed during the outage kept a direct DSA member read-only until ACCESS_RETRY_S ran out.
+    from streamlit.testing.v1 import AppTest
+
+    import app.main as main_mod
+
+    link = {"up": False}
+    monkeypatch.setattr(main_mod, "connection_available", lambda: link["up"])
+    monkeypatch.setattr(sess, "connection_error", lambda: "")
+    real_clear = st.cache_resource.clear
+
+    def _reconnect() -> None:                # the handler's cache clear is what brings the session back
+        real_clear()
+        link["up"], sis_app["raise"] = True, None
+
+    monkeypatch.setattr(st.cache_resource, "clear", _reconnect)
+    sis_app["raise"] = RuntimeError("connection lost")
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    assert at.session_state["_ow_access"]["source"] == "lookup_failed"
+    retry = [b for b in at.button if str(b.label) == "Retry connection"]
+    assert retry, [b.label for b in at.button]
+    retry[0].click()
+    at.run()
+    assert not at.exception, at.exception
+    options = [o for r in at.radio if str(getattr(r, "key", "") or "").startswith("_ow_nav_")
+               for o in r.options]
+    assert "Admin" in options, options
 
 
 def test_app_failed_lookup_is_read_only_and_says_so(sis_app):

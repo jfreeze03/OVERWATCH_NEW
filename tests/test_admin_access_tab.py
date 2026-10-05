@@ -15,6 +15,7 @@ Read-only apart from the memo clear: the tab issues no write.
 from __future__ import annotations
 
 import ast
+import re
 
 import pandas as pd
 import pytest
@@ -145,6 +146,144 @@ def test_grant_review_table_says_what_each_role_means_and_what_to_do():
         assert ar.ROLE_MEANING[role]
 
 
+def test_ownership_is_read_from_the_answer_never_hardcoded():
+    # OWNERSHIP implies every privilege, so the owning role opens the app with or without an explicit USAGE
+    # grant; which role owns it is whatever SHOW returned, not an assumption about SNOW_ACCOUNTADMINS
+    for role in cfg.APP_ACCESS_ROLES:
+        assert "owns" not in ar.ROLE_MEANING[role].lower(), role
+    frame = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_SYSADMINS"),
+                         *[("USAGE", "ROLE", r) for r in cfg.APP_ACCESS_ROLES])
+    by = {row["GRANTEE"]: row for row in ar.app_grant_review(frame)["table"]}
+    assert "owns the app" in by["SNOW_SYSADMINS"]["MEANS"].lower()
+    assert "owns the app" not in by["SNOW_ACCOUNTADMINS"]["MEANS"].lower()
+
+
+def test_an_owner_without_explicit_usage_is_missing_but_still_opens_the_app():
+    frame = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
+                         *[("USAGE", "ROLE", r) for r in cfg.APP_ACCESS_ROLES[1:]])
+    r = ar.app_grant_review(frame)
+    assert r["status"] == "drift" and r["missing"] == ("SNOW_ACCOUNTADMINS",)   # roles.sql requires the grant
+    by = {row["GRANTEE"]: row for row in r["table"]}
+    assert "still opens" in by["SNOW_ACCOUNTADMINS"]["STATUS"].lower()
+    assert "roles.sql" in by["SNOW_ACCOUNTADMINS"]["STATUS"]
+
+
+# ---------------------------------------------------------------------------
+# roles.sql's proof block and app_grant_review are ONE rule (review d6c62b87 #1)
+# ---------------------------------------------------------------------------
+_PROOF_GRANTEE_LIST = re.compile(r'"grantee_name"\s+(NOT\s+)?IN\s*\(([^)]*)\)', re.IGNORECASE)
+_PROOF_ANY_KIND = re.compile(r'''COUNT_IF\(\s*"privilege"\s*=\s*'USAGE'\s+AND\s+NOT\s*\(\s*"granted_to"\s*=\s*'''
+                             r'''\s*'ROLE'\s+AND\s+"grantee_name"\s+IN\b''', re.IGNORECASE)
+
+
+def _streamlit_proof_block(roles_sql: str) -> str:
+    blocks = [b for b in re.findall(r"EXECUTE IMMEDIATE \$\$(.*?)\$\$;", roles_sql, re.DOTALL)
+              if "SHOW GRANTS ON STREAMLIT" in b]
+    assert len(blocks) == 1, "roles.sql must hold exactly one Streamlit-grant proof block"
+    return blocks[0]
+
+
+def _proof_block_problems(roles_sql: str) -> list[str]:
+    """Why roles.sql's Streamlit proof block is NOT the rule app_grant_review applies ([] when it is):
+    every grantee IN-list is exactly EXPECTED_APP_GRANTEES, the 'bad' count is the any-kind form
+    NOT (granted_to = 'ROLE' AND grantee_name IN (...)) (a DATABASE_ROLE / APPLICATION_ROLE / SHARE grantee
+    counts), every expected role must be present, and each expected role is granted USAGE on the app."""
+    flat = " ".join(roles_sql.split())
+    block = _streamlit_proof_block(roles_sql)
+    problems: list[str] = []
+    expected = sorted(ar.EXPECTED_APP_GRANTEES)
+    lists = _PROOF_GRANTEE_LIST.findall(block)
+    if not lists:
+        problems.append("no grantee IN-list")
+    for negated, body in lists:
+        if negated:
+            problems.append("a NOT IN list (only ROLE rows counted; other grantee kinds slip through)")
+        names = sorted(re.findall(r"'([A-Za-z0-9_$]+)'", body))
+        if names != expected:
+            problems.append(f"IN-list {names} != EXPECTED_APP_GRANTEES {expected}")
+    if not _PROOF_ANY_KIND.search(block):
+        problems.append("the bad count is not COUNT_IF(USAGE AND NOT (granted_to = 'ROLE' AND grantee_name IN ...))")
+    if not re.search(rf"\bpresent\s*<\s*{len(expected)}\b", block):
+        problems.append(f"the missing check is not present < {len(expected)}")
+    if f"SHOW GRANTS ON STREAMLIT {_APP};" not in block:
+        problems.append("the block does not read the app object access_sql.show_grants_on_app_sql() reads")
+    problems.extend(f"no GRANT USAGE ON STREAMLIT ... TO ROLE {role}" for role in expected
+                    if f"GRANT USAGE ON STREAMLIT {_APP} TO ROLE {role};" not in flat)
+    return problems
+
+
+# The owner-approved PART C proof block (access design 2026-10-05) with its Streamlit grants: the form the
+# lock below must accept.
+_PART_C = f"""
+GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_ACCOUNTADMINS;
+GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_SYSADMINS;
+GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_PRI_GFR_PRD_ALFA_DSA;
+GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_PRI_GFR_PRD_ALFA_DTI;
+EXECUTE IMMEDIATE $$
+BEGIN
+  SHOW GRANTS ON STREAMLIT {_APP};
+  SELECT
+    COUNT_IF("privilege" = 'USAGE'
+             AND NOT ("granted_to" = 'ROLE'
+                      AND "grantee_name" IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS',
+                                             'SNOW_PRI_GFR_PRD_ALFA_DSA', 'SNOW_PRI_GFR_PRD_ALFA_DTI'))),
+    COUNT(DISTINCT CASE WHEN "privilege" = 'USAGE' AND "granted_to" = 'ROLE'
+             AND "grantee_name" IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS',
+                                    'SNOW_PRI_GFR_PRD_ALFA_DSA', 'SNOW_PRI_GFR_PRD_ALFA_DTI')
+             THEN "grantee_name" END)
+    INTO :bad, :present
+    FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  IF (bad > 0) THEN
+    RAISE unexpected_grantee;
+  END IF;
+  IF (present < 4) THEN
+    RAISE missing_grantee;
+  END IF;
+END;
+$$;
+"""
+
+# The two-role block roles.sql holds before PART C (ROLE rows only, NOT IN, present < 2).
+_TWO_ROLE = f"""
+GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_ACCOUNTADMINS;
+GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_SYSADMINS;
+EXECUTE IMMEDIATE $$
+BEGIN
+  SHOW GRANTS ON STREAMLIT {_APP};
+  SELECT
+    COUNT_IF("privilege" = 'USAGE' AND "granted_to" = 'ROLE'
+             AND "grantee_name" NOT IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')),
+    COUNT(DISTINCT CASE WHEN "privilege" = 'USAGE' AND "granted_to" = 'ROLE'
+             AND "grantee_name" IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')
+             THEN "grantee_name" END)
+    INTO :bad, :present
+    FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  IF (present < 2) THEN
+    RAISE missing_grantee;
+  END IF;
+END;
+$$;
+"""
+
+
+def test_the_proof_block_lock_accepts_part_c_and_rejects_the_two_role_block():
+    assert _proof_block_problems(_PART_C) == []
+    problems = " | ".join(_proof_block_problems(_TWO_ROLE))
+    for why in ("NOT IN", "IN-list", "bad count", "present < 4", "SNOW_PRI_GFR_PRD_ALFA_DSA"):
+        assert why in problems, (why, problems)
+    fewer = _PART_C.replace(", 'SNOW_PRI_GFR_PRD_ALFA_DTI'", "")
+    assert any("IN-list" in p for p in _proof_block_problems(fewer))
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "v4.610.0 integration lands roles.sql PART C (four roles, any-kind NOT (granted_to = 'ROLE' AND ...)) "
+    "with the regenerated snowflake/rebuild/03 (law 6). Until then roles.sql still holds the two-role block "
+    "and Admin > Access's -20011/-20012 wording is ahead of it. strict: once PART C lands this XPASSes and "
+    "FAILS the suite -- delete this marker in the same change."))
+def test_roles_sql_proof_block_is_the_rule_app_grant_review_applies():
+    assert _proof_block_problems(read("snowflake/roles.sql")) == []
+
+
 # ---------------------------------------------------------------------------
 # roster + source wording
 # ---------------------------------------------------------------------------
@@ -213,14 +352,29 @@ def test_settings_caption_names_both_admin_routes():
 # ---------------------------------------------------------------------------
 # The tab is read-only
 # ---------------------------------------------------------------------------
+def _write_paths() -> set[str]:
+    """Every way to issue a write: each app.core.query executor (derived, so a new execute_* is covered
+    with no edit here), the buffered INSERT, the raw session submitters, the confirm / C48 latch helpers,
+    and the memo clear the tab may reach only through session.recheck_access."""
+    import app.core.query as query_mod
+    executors = {n for n in vars(query_mod) if n.startswith("execute_") and callable(getattr(query_mod, n))}
+    return executors | {"_buffer_write", "submit_collect", "submit_pandas", "confirm_gate", "write_gate_open",
+                        "stamp_write", "forget_access"}
+
+
+def test_the_write_path_set_is_not_vacuous():
+    paths = _write_paths()
+    for name in ("execute_statement", "execute_statement_async", "execute_cancel_query", "execute_action",
+                 "_buffer_write"):
+        assert name in paths, name
+
+
 def test_access_tab_issues_no_write():
     tree = ast.parse(read("app/ui/pages/admin.py"))
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_access_tab")
     called = {n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", "")
               for n in ast.walk(fn) if isinstance(n, ast.Call)}
-    for writer in ("execute_statement", "execute_statement_async", "execute_cancel_query", "confirm_gate",
-                   "write_gate_open", "stamp_write", "forget_access"):
-        assert writer not in called, writer
+    assert not called & _write_paths(), sorted(called & _write_paths())
     assert "recheck_access" in called          # the one side effect: this session's memo
 
 
@@ -423,3 +577,54 @@ def test_off_sis_never_runs_the_role_lookup(access_app):
     assert access_app["shows"] == 0
     assert ar.source_label("off_sis") in _text(at)
     assert "runs only on Streamlit-in-Snowflake" in _text(at)
+
+
+# ---------------------------------------------------------------------------
+# Review d6c62b87 follow-ups: honest wording on the tab
+# ---------------------------------------------------------------------------
+def test_recheck_note_names_the_window_that_actually_applies():
+    from app.logic.formulas import humanize_duration as hd
+
+    unavailable = sess.ACCESS_UNAVAILABLE_SOURCES
+    ttl, retry = cfg.ACCESS_TTL_S, cfg.ACCESS_RETRY_S
+    for source in ("allowlist", "role", "default"):
+        note = ar.recheck_note(source, sis=True, unavailable=unavailable)
+        assert hd(ttl) in note and hd(retry) not in note, (source, note)
+    for source in unavailable:                   # a failed / empty lookup is retried after ACCESS_RETRY_S
+        note = ar.recheck_note(source, sis=True, unavailable=unavailable)
+        assert hd(retry) in note and hd(ttl) not in note, (source, note)
+    # nothing is memoized for an unidentified viewer, or anywhere off Streamlit-in-Snowflake
+    for source, sis in (("no_identity", True), ("off_sis", False), ("default", False), ("allowlist", False)):
+        note = ar.recheck_note(source, sis=sis, unavailable=unavailable)
+        assert "every run" in note and hd(ttl) not in note, (source, sis, note)
+
+
+def test_off_sis_resolved_help_does_not_promise_a_memo(access_app):
+    access_app["sis"] = False
+    access_app["viewer"] = ""
+    at = _open_access(access_app)
+    text = _text(at)
+    assert ar.recheck_note("off_sis", sis=False, unavailable=sess.ACCESS_UNAVAILABLE_SOURCES) in text
+    assert "A resolved answer is re-checked after" not in text
+
+
+def test_remove_an_admin_guidance_names_the_allowlist_exception(access_app):
+    at = _open_access(access_app)
+    bullets = [line for e in at.markdown for line in str(e.value).splitlines() if "Remove an admin" in line]
+    assert len(bullets) == 1, bullets
+    assert "OPERATOR_USERS" in bullets[0] and "stays an admin" in bullets[0]
+
+
+def test_missing_usage_for_the_owner_never_claims_its_members_are_locked_out(access_app):
+    access_app["viewer"] = _ADMIN
+    access_app["grants"] = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
+                                        ("USAGE", "ROLE", "SNOW_SYSADMINS"))
+    at = _open_access(access_app)
+    warn = " ".join(str(w.value) for w in at.warning)
+    assert "no explicit usage grant" in warn.lower() and "roles.sql requires one" in warn
+    locked = re.search(r"members of ([^.]*) cannot open the app", warn)
+    assert locked, warn
+    assert "SNOW_ACCOUNTADMINS" not in locked.group(1)
+    assert cfg.ADMIN_ACCESS_ROLE in locked.group(1) and cfg.VIEW_ACCESS_ROLE in locked.group(1)
+    assert "SNOW_ACCOUNTADMINS owns the app, so its members still open it" in warn
+    assert "owns the app" in _frames(at).lower()                  # the table's MEANS reads the OWNERSHIP row
