@@ -36,7 +36,7 @@ PAGE_SECTION_LABELS = {
     "Proof": ["Proof", "Pipeline"],
     "Alerts": ["Open events", "Rules", "History", "Native delivery"],
     "Security": ["Decision queue", "Access", "AI guardrails", "Changes", "Clients", "Egress", "Exposure", "Least privilege", "Trust Center"],
-    "Admin": ["Settings", "Migrations & freshness", "Setup progress", "Metrics",
+    "Admin": ["Settings", "Access", "Migrations & freshness", "Setup progress", "Metrics",
               "App self-cost", "Performance", "Canary", "Errors & telemetry"],
 }
 

@@ -9,6 +9,12 @@ Owner's-rights Streamlit bars only the SHOW GRANTS forms with NO IN / ON / TO / 
 form is allowed. SHOW lists only what the current role can see: an EMPTY answer is a privilege gap, not
 proof of "no members", and the caller treats it as unverified (read-only), never as a verified answer.
 
+SHOW GRANTS ON STREAMLIT lists who holds a privilege on the app itself (USAGE = who can open it; OWNERSHIP =
+whose rights every viewer runs with). Admin ▸ Access reads it (read-only) to compare the USAGE grantees with
+the four config.APP_ACCESS_ROLES that snowflake/roles.sql's -20011/-20012 proof block pins. The ON form is
+allowed in owner's-rights code, and the owner role owns the app, so it always sees at least its own
+OWNERSHIP row: an empty answer is unverified, never "no grantees".
+
 Not canaried: the Admin canary EXPLAINs every entry and SHOW cannot be EXPLAINed (see app/data/canary.py
 and tests/test_canary_coverage.py's CANARY_EXEMPT).
 """
@@ -17,7 +23,7 @@ from __future__ import annotations
 
 import re
 
-from app.config import ADMIN_ACCESS_ROLE
+from app.config import ADMIN_ACCESS_ROLE, APP_STREAMLIT_NAME, CORE_SCHEMA, OVERWATCH_DB
 
 # An UNQUOTED Snowflake identifier: a letter or underscore, then letters, digits, '_' or '$' (255 max).
 # Nothing else can reach the statement, so neither a quote nor a ';' can.
@@ -40,3 +46,10 @@ def show_grants_of_role_sql(role: str = ADMIN_ACCESS_ROLE) -> str:
     truncated roster could drop the very viewer being checked. Only config constants are passed in
     practice; the identifier check is the injection defence regardless."""
     return f"SHOW GRANTS OF ROLE {_role_ident(role)}"
+
+
+def show_grants_on_app_sql() -> str:
+    """Who can open OVERWATCH: every privilege granted ON the deployed Streamlit (snowflake.yml's
+    DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP). Admin ▸ Access reads it through run(..., max_rows=0) and compares
+    the USAGE rows with config.APP_ACCESS_ROLES (logic.access_review.app_grant_review). Takes no input."""
+    return f"SHOW GRANTS ON STREAMLIT {OVERWATCH_DB}.{CORE_SCHEMA}.{APP_STREAMLIT_NAME}"

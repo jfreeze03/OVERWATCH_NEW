@@ -1,4 +1,4 @@
-"""Admin — settings, migrations & freshness, metric registry, app self-cost,
+"""Admin — settings, access, migrations & freshness, metric registry, app self-cost,
 performance, canary, and errors & telemetry.
 
 Everything that was wrongly parked on the old app's executive page lives
@@ -8,17 +8,27 @@ here, where the people who can act on it will look for it.
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 import pandas as pd
 import streamlit as st
 
 from app.config import (
+    ACCESS_RETRY_S,
+    ACCESS_TTL_S,
+    ADMIN_ACCESS_HINT,
+    ADMIN_ACCESS_ROLE,
     APP_VERSION,
     APP_WAREHOUSE,
     DEFAULT_SETTINGS,
+    ROLE_ADMIN_ACCOUNT_LEVERS,
     THRESHOLDS,
+    VIEW_ACCESS_ROLE,
+    VIEWER_UNKNOWN_PROFILE,
+    WRITE_RECHECK_S,
     core_object,
 )
+from app.core import session as _session
 from app.core.ai import CORTEX_TIMEOUT_SECONDS, normalize_model
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
@@ -27,8 +37,8 @@ from app.core.result import is_privilege_error, is_schema_drift, is_setup_absenc
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
-from app.data import cost_sql, mart_sql, ops_sql
-from app.logic import app_telemetry, deploy_health, stmt_timeout
+from app.data import access_sql, cost_sql, mart_sql, ops_sql
+from app.logic import access_review, app_telemetry, deploy_health, stmt_timeout
 from app.logic.formulas import format_usd, format_usd_precise, humanize_duration, md_dollars, safe_float
 from app.logic.navigate import PAGE_SECTION_LABELS
 from app.ui.components import (
@@ -50,6 +60,7 @@ from app.ui.components import (
     selectable_table,
     snowsight_profile_column,
     stamp_write,
+    status_chips,
     styled_table,
     with_user_names,
     write_gate_open,
@@ -1130,8 +1141,162 @@ def _settings_tab(is_operator: bool) -> None:
                            else "New value is read by the next validate.sql run." if key in _DEPLOY_GATE_SETTINGS
                            else "New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
-        st.caption("Saving in the app is limited to operators (config OPERATOR_USERS); "
-                   "anyone can copy the SQL for review.")
+        # v4.610.0: name both admin routes (the allowlist and a direct admin-role grant).
+        st.caption(f"{ADMIN_ACCESS_HINT} Anyone can copy the SQL for review.")
+
+
+# v4.610.0 Admin ▸ Access: the 'Re-check now' receipt, shown once on the rerun that follows the click (and
+# dropped unseen after _RECHECK_RECEIPT_MAX_S, e.g. when the re-check moved the clicker off Admin).
+_RECHECK_RECEIPT_KEY = "_adm_access_recheck_receipt"
+_RECHECK_RECEIPT_MAX_S = 60.0
+
+
+def _access_tab() -> None:
+    """v4.610.0 (owner decision 2026-10-05): who can open OVERWATCH, and who can change things in it.
+
+    Read-only. Its one side effect is 'Re-check now', which forgets THIS viewer's own access memo and
+    resolves it again with one fresh lookup (session.recheck_access). It never touches another viewer's
+    session (the warehouse runtime gives each viewer their own app instance) and writes nothing."""
+    panel_help(
+        "Who can open OVERWATCH, and who can change things in it. Opening the app is Snowflake's USAGE grant "
+        "on the Streamlit, and exactly four roles may hold it. Changing things is decided in the app, per "
+        f"viewer: the named admins (config OPERATOR_USERS) and DIRECT user members of {ADMIN_ACCESS_ROLE} "
+        "are admins, and everyone else who can open the app gets the view-only pages. Red here means a check "
+        "could not answer, which is never read as 'nobody'."
+    )
+    # module-attribute calls: the session seams the access tests drive
+    sis = _session.is_sis()
+    receipt = st.session_state.pop(_RECHECK_RECEIPT_KEY, None)
+    if not (isinstance(receipt, dict) and 0 <= time.time() - float(receipt.get("at") or 0) < _RECHECK_RECEIPT_MAX_S):
+        receipt = None
+    # The roster lookup runs only on SiS, where viewers are resolved by it: off SiS (local dev) the
+    # role -> profile map decides, so a lookup there would describe nothing the app uses.
+    info = _session.access_info(roster=sis)
+    source = str(info.get("source") or "")
+    profile = str(info.get("profile") or "")
+    pages = access_review.profile_pages(profile)
+    operator = bool(info.get("operator"))
+    clock = access_review.resolved_clock(info.get("resolved_at"))
+
+    section_header("Your access", "", "security")
+    kpi_row([
+        {"label": "Viewer", "value": str(info.get("viewer") or "") or "(not identified)",
+         "help": "Your Snowflake username, from the signed-in Streamlit user (st.user)."},
+        {"label": "Profile", "value": profile or "—",
+         "help": "Pages offered: " + (", ".join(pages) or "—")},
+        {"label": "Can change things", "value": "Yes" if operator else "No: read-only",
+         "severity": "ok" if operator else "",
+         "help": "Admins can run every in-app change; everyone else sees the pages read-only."},
+        {"label": "Resolved", "value": f"{humanize_duration(info.get('age_s'))} ago",
+         "help": f"Resolved at {clock}. A resolved answer is re-checked after {humanize_duration(ACCESS_TTL_S)}."},
+    ])
+    st.caption(f"Decided by: {access_review.source_label(source)}. Pages: {', '.join(pages) or '—'}. "
+               f"Resolved at {clock}.")
+    st.caption("Account-level levers (disable or re-enable a user, ALTER ACCOUNT SET): "
+               + ("role admins have them too, full parity with the named admins (owner decision 2026-10-05)."
+                  if ROLE_ADMIN_ACCOUNT_LEVERS else "limited to the named admins (config OPERATOR_USERS)."))
+
+    summary = access_review.roster_summary(info, now=time.time())
+    section_header(f"Admin role · {ADMIN_ACCESS_ROLE}",
+                   {"ok": "ok", "unavailable": "bad"}.get(summary["state"], ""), "security")
+    if sis:
+        if st.button("Re-check now", key="adm_access_recheck",
+                     help="Forget your own session's access answer and look it up again (one SHOW)."):
+            fresh = _session.recheck_access()
+            st.session_state[_RECHECK_RECEIPT_KEY] = {"at": time.time(), "text": (
+                "Re-checked: your session's access memo was cleared and resolved again with one fresh lookup. "
+                f"Now: {access_review.source_label(fresh.get('source'))}.")}
+            st.rerun()   # the sidebar and the page list follow the fresh answer
+        st.caption(
+            "Re-check now clears only your own session's access memo and runs one fresh lookup. It cannot "
+            "shorten anyone else's wait: each viewer's session re-resolves on its own within "
+            f"{humanize_duration(ACCESS_TTL_S)} ({humanize_duration(ACCESS_RETRY_S)} after a failed lookup), "
+            "and every in-app change by an admin-by-role first re-verifies the membership (an answer at most "
+            f"{humanize_duration(WRITE_RECHECK_S)} old).")
+    if receipt:
+        st.caption(str(receipt.get("text") or ""))
+    if summary["state"] == "ok":
+        status_chips([("Lookup OK", "ok")])
+        st.caption(summary["headline"])
+    elif summary["state"] == "unavailable":
+        empty_state("unavailable", summary["headline"], detail=summary["detail"],
+                    hint=(f"Check: run SHOW GRANTS OF ROLE {ADMIN_ACCESS_ROLE} as SNOW_ACCOUNTADMINS (USE "
+                          "SECONDARY ROLES NONE). It must list each member as a granted_to = USER row; if it errors "
+                          "or lists none, the owner role cannot see the role's grants. The named admins are "
+                          "unaffected."))
+    else:
+        st.caption(summary["headline"])
+    allowlist = tuple(str(u).upper() for u in (info.get("allowlist") or ()))
+    users = tuple(info.get("admin_users") or ())
+    if summary["state"] == "ok" and users:
+        members = pd.DataFrame({"USER_NAME": list(users),
+                                "ALSO_NAMED_ADMIN": ["Yes" if u in allowlist else "No" for u in users]})
+        styled_table(with_user_names(members, _PAGE, user_col="USER_NAME", display_col="Name"))
+    nested = tuple(info.get("nested_roles") or ())
+    if nested:
+        styled_table(pd.DataFrame({
+            "ROLE_GRANTEE": list(nested),
+            "ADMIN": ["No: nested, not expanded"] * len(nested),
+            "WHY": ["Only DIRECT user grants make admins; members of this role are not admins."] * len(nested),
+        }))
+    elif summary["state"] == "ok":
+        empty_state("clean", f"No role is granted {ADMIN_ACCESS_ROLE}: every holder is a direct user grant, "
+                             "so nothing is left unexpanded.")
+    st.caption("Named admins (config OPERATOR_USERS: admins with no lookup, so a failed lookup never locks "
+               f"them out): {', '.join(allowlist) or 'none'}.")
+
+    section_header("Who can open the app · USAGE on the Streamlit", "", "security")
+    res = run(access_sql.show_grants_on_app_sql(), page=_PAGE, key="adm_app_grants", tier="live",
+              source="SHOW GRANTS ON STREAMLIT", max_rows=0)
+    if not res.ok:
+        guard(res, "")
+    else:
+        review = access_review.app_grant_review(res.df)
+        if review["status"] == "empty":
+            empty_state("unavailable",
+                        "SHOW GRANTS ON STREAMLIT returned no rows: unverified. The owner role always sees its "
+                        "own OWNERSHIP row, so an empty answer means the read could not see the app, never that "
+                        "nobody can open it.")
+        else:
+            if review["status"] == "ok":
+                empty_state("clean", "Exactly the four access roles hold USAGE on the app; no other grantee.")
+            if review["missing"]:
+                st.warning(f"Missing USAGE for {', '.join(review['missing'])}: its members cannot open the app. "
+                           "Re-run snowflake/roles.sql's Streamlit grants (a `snow streamlit deploy --replace` "
+                           "or CREATE OR REPLACE STREAMLIT can drop them; the proof block raises -20012).")
+            if review["unexpected"]:
+                st.error(f"USAGE granted outside the four access roles: {', '.join(review['unexpected'])}. "
+                         "REVOKE it: anyone holding it can open the app and gets the view-only pages "
+                         "(roles.sql's proof block raises -20011).")
+            styled_table(pd.DataFrame(review["table"]))
+            if review["owners"]:
+                st.caption(f"OWNERSHIP: {', '.join(review['owners'])}. Every viewer's SQL runs with the owner "
+                           "role's rights (owner's-rights Streamlit), which is why the app decides who may "
+                           "change things.")
+        result_caption(res)
+
+    section_header("How access works", "", "admin")
+    view_pages = " and ".join(access_review.profile_pages(VIEWER_UNKNOWN_PROFILE)) or "—"
+    st.markdown("\n".join([
+        "- **Opening the app**: only the four roles above hold USAGE on it. `snowflake/roles.sql` grants them, "
+        "and its proof block fails (-20011 / -20012) on any other grantee or a missing one. Re-run roles.sql "
+        "after every `snow streamlit deploy --replace` until a redeploy is confirmed to keep the grants.",
+        "- **Admins** (every page, every in-app change): the named admins in config `OPERATOR_USERS`, and DIRECT "
+        f"user members of `{ADMIN_ACCESS_ROLE}`. A role granted `{ADMIN_ACCESS_ROLE}` is not expanded: its "
+        "members are not admins.",
+        f"- **Everyone else who can open the app** (`{VIEW_ACCESS_ROLE}` members, `SNOW_*` holders who are not "
+        f"named admins, and a viewer the app cannot identify): the view-only {VIEWER_UNKNOWN_PROFILE} pages, "
+        f"{view_pages}. No changes.",
+        f"- **Make someone an admin**: `GRANT ROLE {ADMIN_ACCESS_ROLE} TO USER <username>;` It applies to their "
+        f"next session, or within {humanize_duration(ACCESS_TTL_S)} in an open one. Whoever can grant this role "
+        "can create an OVERWATCH admin.",
+        f"- **Remove an admin**: `REVOKE ROLE {ADMIN_ACCESS_ROLE} FROM USER <username>;` Their in-app changes stop "
+        f"within {humanize_duration(WRITE_RECHECK_S)} (every change re-verifies); their pages follow within "
+        f"{humanize_duration(ACCESS_TTL_S)}.",
+        "- **When the lookup fails or lists nobody**: admins-by-role are read-only until it recovers (it fails "
+        "closed, never open), the sidebar says 'Access check unavailable', and it retries every "
+        f"{humanize_duration(ACCESS_RETRY_S)}. The named admins are unaffected.",
+    ]))
 
 
 def _migrations_tab() -> None:
@@ -2445,7 +2610,7 @@ def render() -> None:
     is_operator = _is_operator()
     _context_section()
     section = lazy_sections(
-        ["Settings", "Migrations & freshness", "Setup progress", "Metrics", "App self-cost",
+        ["Settings", "Access", "Migrations & freshness", "Setup progress", "Metrics", "App self-cost",
          "Performance", "Canary", "Errors & telemetry"], key="adm_section")
     section_filter_contract(
         f,
@@ -2454,6 +2619,8 @@ def render() -> None:
     )
     if section == "Settings":
         _settings_tab(is_operator)
+    elif section == "Access":
+        _access_tab()
     elif section == "Migrations & freshness":
         _migrations_tab()
     elif section == "Setup progress":
