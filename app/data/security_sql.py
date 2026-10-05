@@ -39,8 +39,10 @@ REACHES_ADMIN_ROLES: tuple[str, ...] = (
 # window: 20:00-06:00 America/Chicago plus Saturday/Sunday (ISO weekdays 6 and 7). The SQL literals live in arms
 # [26] / [27]; tests/test_security_alert_parity.py locks them to these constants. No builder here reads them (the
 # app's own grant-anomaly helpers keep their older 07-19 business day and 5-role ELEVATED_ROLES on purpose).
+# V174 (owner access decision 2026-10-05) appended SNOW_PRI_GFR_PRD_ALFA_DSA: a direct holder is an OVERWATCH admin.
 ALERT_ADMIN_ROLES: tuple[str, ...] = (
     "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN", "USERADMIN", "ORGADMIN", "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS",
+    "SNOW_PRI_GFR_PRD_ALFA_DSA",
 )
 OFF_HOURS_START_HOUR = 20          # Central hour >= this is off-hours
 OFF_HOURS_END_HOUR = 6             # Central hour < this is off-hours

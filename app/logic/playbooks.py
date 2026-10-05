@@ -345,7 +345,8 @@ PLAYBOOKS: dict[str, str] = {
         "and treat as a security incident."
     ),
     "SEC_NEW_ADMIN_NETWORK": (
-        "**Means:** a user holding ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS had login attempts "
+        "**Means:** a user holding ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (since V174 also "
+        "SNOW_PRI_GFR_PRD_ALFA_DSA, which makes an OVERWATCH admin) had login attempts "
         "from a client IP not seen for them in the prior 90 days. Since V168 the title says \"logged in\" only "
         "when at least one attempt from that IP succeeded; `<USER>: N failed login attempt(s) from new "
         "network <IP> (0 successful)` is a targeted try against an admin that never got in -- check Security "
@@ -369,7 +370,8 @@ PLAYBOOKS: dict[str, str] = {
         "then a successful login within 60 minutes after that burst: a possible password-spray or brute-force "
         "breakthrough. CRITICAL when that login was off-hours (20:00-06:00 Central, or a Saturday or Sunday) or "
         "the user directly held an admin-tier role at that moment (ACCOUNTADMIN, SECURITYADMIN, SYSADMIN, "
-        "USERADMIN, ORGADMIN, SNOW_ACCOUNTADMINS, SNOW_SYSADMINS); otherwise HIGH. One event per episode: a "
+        "USERADMIN, ORGADMIN, SNOW_ACCOUNTADMINS, SNOW_SYSADMINS; since V174 also "
+        "SNOW_PRI_GFR_PRD_ALFA_DSA); otherwise HIGH. One event per episode: a "
         "further success within the hour belongs to the same event. It never auto-declares an incident: "
         "declare one by hand once you have spoken to the user.\n\n"
         "1. Contact the user: was it them? Then Security > Access → *Account-takeover candidates* for the "
@@ -388,7 +390,8 @@ PLAYBOOKS: dict[str, str] = {
     ),
     "SEC_ADMIN_GRANT": (
         "**Means:** an admin-tier role (ACCOUNTADMIN, SECURITYADMIN, SYSADMIN, USERADMIN, ORGADMIN, "
-        "SNOW_ACCOUNTADMINS or SNOW_SYSADMINS) was granted directly to a user. One event per grant, raised even "
+        "SNOW_ACCOUNTADMINS or SNOW_SYSADMINS; since V174 also SNOW_PRI_GFR_PRD_ALFA_DSA, which makes the "
+        "user an OVERWATCH admin) was granted directly to a user. One event per grant, raised even "
         "when the grant was already revoked (a short-lived elevation is the suspicious shape). The title flags an "
         "off-hours grant (20:00-06:00 Central, or a weekend) and the first grant of that role to that user on "
         "record; the detail names who granted it. HIGH, and it never auto-declares an incident.\n\n"
