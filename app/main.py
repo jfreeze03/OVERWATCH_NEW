@@ -43,6 +43,7 @@ from app.core.query import (  # noqa: E402
 from app.core.session import active_profile, connection_available, current_role  # noqa: E402
 from app.core.sqlsafe import sql_literal  # noqa: E402
 from app.core.state import (  # noqa: E402
+    can_open,
     consume_pending_navigation,
     init_filters,
     remember_page,
@@ -203,9 +204,11 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
         # Wave 1 #9: a persistent Case File presence in the shell. Additions used to
         # vanish into a bottom-of-Brief expander; the running count now rides every
         # page (session-only, so no query), with a one-click jump to open it on Brief.
+        # v4.610.0: only for a profile that offers Brief (MONITOR does not: the clamp would
+        # send the click to its landing page, and the file could never be opened there).
         from app.logic.case_file import CASE_STATE_KEY as _CASE_KEY
         _case_items = st.session_state.get(_CASE_KEY) or []
-        if _case_items:
+        if _case_items and "Brief" in pages:
             _latest = str((_case_items[-1] or {}).get("title") or "").strip()
             if st.button(f"🗂️ Case File · {len(_case_items)}",
                          width="stretch", key="_ow_case_shell",
@@ -439,10 +442,13 @@ def _global_jump(pages: tuple) -> None:
             if "name" in wdf.columns:
                 wh_names = sorted(set(wdf["name"].astype(str)))
         options += [f"WH · {w}" for w in wh_names]
-        rules = run(mart_sql.alert_rules(), page="Sidebar", key="jump_rules", tier="recent",
-                    source="ALERT_CONFIG")
-        if rules.usable() and "RULE_ID" in rules.df.columns:
-            options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
+        # a rule opens on Alerts: no rule options (and no ALERT_CONFIG read) for a profile without
+        # it (v4.610.0 MONITOR), whose clamp would land the pick on its own landing page
+        if "Alerts" in pages:
+            rules = run(mart_sql.alert_rules(), page="Sidebar", key="jump_rules", tier="recent",
+                        source="ALERT_CONFIG")
+            if rules.usable() and "RULE_ID" in rules.df.columns:
+                options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
     else:
         options += [f"WH · {w}" for w in TREXIS_WAREHOUSES]
     # C3: recents strip — the destinations this session jumped to, as one-click
@@ -477,7 +483,8 @@ def _global_jump(pages: tuple) -> None:
     # when "selected" (surprising, and invisible unless you opened the list). The
     # `and` short-circuits so the button only RENDERS while not yet loaded.
     if not st.session_state.get("_ow_jump_loaded") and st.button(
-            "Load all warehouses & alert rules", key="_ow_jump_loadall",
+            "Load all warehouses & alert rules" if "Alerts" in pages else "Load all warehouses",
+            key="_ow_jump_loadall",
             type="tertiary", width="stretch"):
         st.session_state["_ow_jump_loaded"] = True
         st.rerun()
@@ -566,10 +573,11 @@ def _dispatch_jump(pick: str) -> None:
         request_navigation("Operations", "Queries",
                            {"company": _wco if _wco in ("ALFA", "Trexis") else "ALL",
                             "warehouse_contains": name})
-    elif kind == "Rule":
+    elif kind == "Rule" and can_open("Alerts"):
         # r-ux: carry the searched rule's identity so Alerts ▸ Rules lands ON that rule (its
         # precision drill + threshold generator preselect it), like every other palette target —
-        # not the full rules wall with nothing selected.
+        # not the full rules wall with nothing selected. v4.610.0: never for a profile without
+        # Alerts (the options are not offered there; this also stops a stale recent).
         request_navigation("Alerts", "Rules", context={"rule_id": name})
 
 

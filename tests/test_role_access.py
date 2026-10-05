@@ -19,7 +19,9 @@ Every check here fails CLOSED: a lookup failure, an empty roster, a revoke or an
 
 from __future__ import annotations
 
+import ast
 import contextlib
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -523,6 +525,75 @@ def test_allowlisted_admin_write_never_re_verifies(wired, monkeypatch):
     assert q.execute_statement("ALTER USER U SET DISABLED = TRUE", page="Operations")[0] is True
 
 
+def test_off_sis_operator_writes_without_a_lookup(wired, monkeypatch):
+    def _boom() -> bool:
+        raise AssertionError("off-SiS (local dev) has no owner's-rights role to re-verify")
+
+    monkeypatch.setattr(sess, "is_operator", lambda: True)
+    monkeypatch.setattr(sess, "access_source", lambda: "off_sis")
+    monkeypatch.setattr(sess, "reverify_role_admin", _boom)
+    assert q.execute_statement("ALTER WAREHOUSE WH_X SUSPEND", page="Operations")[0] is True
+
+
+@pytest.mark.parametrize("source", ["default", "lookup_failed", "unverified", "no_identity", "", "not_a_source"])
+def test_operator_with_a_non_admin_source_is_refused(wired, monkeypatch, source):
+    """is_operator() and access_source() are two reads of the access memo, and the memo can expire between
+    them, so the second read can come back as a non-admin source while the first said 'operator'. The
+    executor allows only 'allowlist' and 'off_sis' outright, re-verifies 'role', and refuses every other
+    source. It never reasons 'not role, so allowlist'."""
+    s, errs = wired
+
+    def _boom() -> bool:
+        raise AssertionError("only a role-sourced admin re-verifies")
+
+    monkeypatch.setattr(sess, "is_operator", lambda: True)
+    monkeypatch.setattr(sess, "access_source", lambda: source)
+    monkeypatch.setattr(sess, "reverify_role_admin", _boom)
+    for stmt in ("ALTER WAREHOUSE WH_X SUSPEND", "ALTER USER U SET DISABLED = TRUE",
+                 "UPDATE DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE SET NOTE = 'x'"):
+        ok, msg = q.execute_statement(stmt, page="Operations")
+        assert ok is False and "operator entitlement required" in msg, (source, stmt)
+    assert s.log == [] and len(errs) == 3
+
+
+def test_operator_whose_source_read_raises_is_refused(wired, monkeypatch):
+    s, _ = wired
+
+    def _raise() -> str:
+        raise RuntimeError("memo unreadable")
+
+    monkeypatch.setattr(sess, "is_operator", lambda: True)
+    monkeypatch.setattr(sess, "access_source", _raise)
+    assert q.execute_statement("ALTER WAREHOUSE WH_X SUSPEND", page="Operations")[0] is False
+    assert s.log == []
+
+
+@pytest.mark.parametrize("change", ["revoke", "lookup_error", "empty"])
+def test_end_to_end_memo_expiring_between_the_two_reads_never_fails_open(env, wired, monkeypatch, change):
+    """The real session + executor code with only the clock seam driven: the page memo is 299.5 s old when
+    the write starts, so is_operator() still reads it as 'role' and the next read (a tick later) finds it
+    expired and re-resolves. Whatever that re-resolution answers (a revoke, a failed SHOW, an empty roster),
+    the write must not run."""
+    s, _ = wired
+    assert sess.is_operator() is True                      # page memo at t0, source 'role'
+    env.clock.t += cfg.ACCESS_TTL_S - 0.5
+    if change == "revoke":
+        env.rows = _rows(("USER", "SOMEONE_ELSE"))
+    elif change == "lookup_error":
+        env.raise_ = RuntimeError("SHOW failed")
+    else:
+        env.rows = []
+
+    def _ticking() -> float:
+        env.clock.t += 0.3                                  # every clock read moves time on
+        return env.clock.t
+
+    monkeypatch.setattr(sess, "_clock", _ticking)
+    ok, msg = q.execute_statement("ALTER WAREHOUSE WH_X SUSPEND", page="Operations")
+    assert ok is False and "operator entitlement required" in msg
+    assert s.log == []
+
+
 @pytest.mark.parametrize("stmt, allowed", [
     ("ALTER USER U SET DISABLED = TRUE", False),
     ("ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = 7200", False),
@@ -578,7 +649,6 @@ def test_clamp_target_prefers_overview_then_the_profiles_landing():
 
 
 def test_main_falls_back_to_the_least_privileged_surface():
-    from pathlib import Path
     main = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
     body = main.split("def main()", 1)[1]
     assert "PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE[VIEWER_UNKNOWN_PROFILE])" in body
@@ -692,11 +762,307 @@ def test_app_view_only_viewer_sees_two_pages_without_the_outage_caption(sis_app)
     assert _unavailable_caption() not in captions
 
 
+def _jump_app_run(monkeypatch):
+    """The shell with a seeded Case File and the live jump targets loaded; records the run() keys."""
+    from streamlit.testing.v1 import AppTest
+
+    import app.main as main_mod
+    from app.core.result import QueryResult
+    from app.logic.case_file import CASE_STATE_KEY
+
+    keys: list[str] = []
+
+    def _run(*_a, **kwargs):
+        keys.append(str(kwargs.get("key", "")))
+        df = pd.DataFrame({"RULE_ID": ["RULE_X"]}) if kwargs.get("key") == "jump_rules" else pd.DataFrame()
+        return QueryResult(df=df, ok=True, source="stub")
+
+    monkeypatch.setattr(main_mod, "run", _run)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.session_state[CASE_STATE_KEY] = [{"title": "Evidence"}]
+    at.session_state["_ow_jump_loaded"] = True
+    at.run()
+    assert not at.exception, at.exception
+    buttons = [str(b.key or "") for b in at.sidebar.button]
+    jump = [o for sb in at.sidebar.selectbox if str(sb.key or "").startswith("_ow_jump_") for o in sb.options]
+    return buttons, jump, keys
+
+
+def test_app_monitor_shell_offers_no_case_file_or_rule_jumps(sis_app, monkeypatch):
+    """MONITOR has neither Brief (the Case File's home) nor Alerts (where a rule opens): the shell's Case File
+    button and the jump box's 'Rule ·' options would clamp it onto Cost Intelligence, so neither renders and
+    the ALERT_CONFIG read behind the rule options is skipped. A role admin keeps both."""
+    sis_app["viewer"] = _DTI_USER
+    buttons, jump, keys = _jump_app_run(monkeypatch)
+    assert "_ow_case_shell" not in buttons
+    assert not [o for o in jump if o.startswith("Rule · ")] and "jump_rules" not in keys
+    assert [o for o in jump if o.startswith("Page · ")] == ["Page · Cost Intelligence", "Page · Operations"]
+
+
+def test_app_role_admin_shell_keeps_the_case_file_and_rule_jumps(sis_app, monkeypatch):
+    buttons, jump, keys = _jump_app_run(monkeypatch)
+    assert "_ow_case_shell" in buttons
+    assert "Rule · RULE_X" in jump and "jump_rules" in keys
+
+
+def test_rule_jump_dispatch_is_gated_on_alerts(monkeypatch):
+    import app.main as m
+    from app.core import state
+
+    navs: list[tuple] = []
+    monkeypatch.setattr(m, "request_navigation", lambda *a, **k: navs.append(a))
+    monkeypatch.setattr(sess, "current_role", lambda: "")
+    monkeypatch.setattr(sess, "active_profile", lambda role="": "MONITOR")
+    assert not state.can_open("Alerts")
+    m._dispatch_jump("Rule · RULE_X")          # a stale recent can never carry MONITOR off its pages
+    assert navs == []
+    monkeypatch.setattr(sess, "active_profile", lambda role="": "DBA")
+    m._dispatch_jump("Rule · RULE_X")
+    assert navs == [("Alerts", "Rules")]
+
+
+class _CaseSt:
+    """``st`` stand-in for add_to_case_button: records whether the button rendered; it is clicked."""
+
+    def __init__(self) -> None:
+        self.session_state: dict = {}
+        self.buttons = 0
+
+    def button(self, *_a, **_k):
+        self.buttons += 1
+        return True
+
+    def toast(self, *_a, **_k):
+        return None
+
+
+def test_add_to_case_renders_only_where_the_case_file_opens(monkeypatch):
+    """The Case File is reviewed and exported on Brief. MONITOR has no Brief, so an 'Add to Case' button on
+    Operations would fill a file the viewer can never open: it does not render there."""
+    import app.core.state as state
+    from app.core.result import QueryResult
+    from app.logic.case_file import CASE_STATE_KEY
+    from app.ui import components
+
+    fake = _CaseSt()
+    monkeypatch.setattr(components, "st", fake)
+    monkeypatch.setattr(state, "filters", lambda: {"company": "ALFA", "window_label": "30d", "days": 30})
+    monkeypatch.setattr(sess, "current_role", lambda: "")
+    monkeypatch.setattr(sess, "active_profile", lambda role="": "MONITOR")
+    res = QueryResult(df=pd.DataFrame({"A": [1]}), ok=True, source="t")
+    assert components.add_to_case_button("Operations · Queries", res, summary="s", key="k1") is False
+    assert fake.buttons == 0 and CASE_STATE_KEY not in fake.session_state
+    monkeypatch.setattr(sess, "active_profile", lambda role="": "READER")
+    assert components.add_to_case_button("Operations · Queries", res, summary="s", key="k2") is True
+    assert fake.buttons == 1 and len(fake.session_state[CASE_STATE_KEY]) == 1
+
+
+def test_entity_nav_table_is_a_plain_table_without_control_room(monkeypatch):
+    """entity_nav_table's row click opens Control Room ▸ Entity 360. For MONITOR the clamp sends that click to
+    Cost Intelligence (its landing page), so on Operations it would eject the viewer: the table renders plain,
+    with no row-select hint and no selection, wherever Control Room does not open."""
+    from app.core import state
+    from app.ui import components
+
+    calls = {"styled": 0, "nav_table": 0, "hint": 0}
+    navs: list[tuple] = []
+
+    def _bump(name):
+        return lambda *a, **k: calls.__setitem__(name, calls[name] + 1)
+
+    def _nav_table(frame, key, on_select, **k):
+        calls["nav_table"] += 1
+        on_select(0)
+
+    monkeypatch.setattr(components, "styled_table", _bump("styled"))
+    monkeypatch.setattr(components, "row_select_hint", _bump("hint"))
+    monkeypatch.setattr(components, "selectable_nav_table", _nav_table)
+    monkeypatch.setattr(state, "request_navigation", lambda *a, **k: navs.append(a))
+    monkeypatch.setattr(sess, "current_role", lambda: "")
+    monkeypatch.setattr(sess, "active_profile", lambda role="": "MONITOR")
+    df = pd.DataFrame({"TASK_FQN": ["DB.S.T"]})
+    components.entity_nav_table(df, key="t", key_col="TASK_FQN", entity_type="TASK")
+    assert calls == {"styled": 1, "nav_table": 0, "hint": 0} and navs == []
+    monkeypatch.setattr(sess, "active_profile", lambda role="": "READER")
+    components.entity_nav_table(df, key="t", key_col="TASK_FQN", entity_type="TASK")
+    assert calls == {"styled": 1, "nav_table": 1, "hint": 1} and navs == [("Control Room", "Entity 360")]
+
+
+# ---------------------------------------------------------------------------
+# Structural lock: no doorway off MONITOR's two pages (AGENTS.md "gate the affordance to profiles that have
+# the target page"). MONITOR has no Overview, so the clamp sends an off-profile jump to Cost Intelligence:
+# an ungated drill on Operations is not a no-op, it ejects the viewer.
+# ---------------------------------------------------------------------------
+_ROOT = Path(__file__).resolve().parents[1]
+#: every module that renders on a MONITOR page: the shell, the shared UI the two pages import, the two pages
+_MONITOR_SURFACE: tuple[str, ...] = (
+    "app/main.py", "app/ui/components.py", "app/ui/charts.py", "app/ui/attention.py", "app/ui/ai_panel.py",
+    "app/ui/schema_gate.py", "app/ui/pages/cost.py", "app/ui/pages/operations.py",
+    *sorted(p.relative_to(_ROOT).as_posix() for p in (_ROOT / "app" / "ui" / "pages" / "cost_parts").glob("*.py")),
+    *sorted(p.relative_to(_ROOT).as_posix() for p in (_ROOT / "app" / "ui" / "pages" / "ops_parts").glob("*.py")),
+)
+
+
+def _literal_nav_calls(tree: ast.AST):
+    """(call, target page) for every request_navigation call (any import alias, or state.request_navigation)
+    whose page is a string literal. A computed page (the jump box's own options, a C9 return) is the
+    caller's job to derive from the viewer's pages."""
+    aliases = {"request_navigation"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "app.core.state":
+            aliases.update(a.asname or a.name for a in node.names if a.name == "request_navigation")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        f = node.func
+        named = (isinstance(f, ast.Name) and f.id in aliases) or (
+            isinstance(f, ast.Attribute) and f.attr == "request_navigation")
+        first = node.args[0]
+        if named and isinstance(first, ast.Constant) and isinstance(first.value, str):
+            yield node, first.value
+
+
+def _is_gate(expr: ast.AST, target: str, names: set[str]) -> bool:
+    """can_open("<target>"), "<target>" in <pages>, or a name bound to one of those."""
+    if isinstance(expr, ast.Call) and expr.args and isinstance(expr.args[0], ast.Constant):
+        f = expr.func
+        fname = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+        return fname == "can_open" and expr.args[0].value == target
+    if isinstance(expr, ast.Compare) and len(expr.ops) == 1 and isinstance(expr.ops[0], ast.In):
+        return isinstance(expr.left, ast.Constant) and expr.left.value == target
+    return isinstance(expr, ast.Name) and expr.id in names
+
+
+def _positive(test: ast.AST, target: str, names: set[str]) -> bool:
+    """``test`` true implies the gate is true."""
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        return any(_positive(v, target, names) for v in test.values)
+    return _is_gate(test, target, names)
+
+
+def _negative(test: ast.AST, target: str, names: set[str]) -> bool:
+    """``test`` false implies the gate is true (``not gate``, or ``... or not gate``)."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _positive(test.operand, target, names)
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        return any(_negative(v, target, names) for v in test.values)
+    return False
+
+
+def _gate_names(tree: ast.AST, target: str) -> set[str]:
+    return {t.id for node in ast.walk(tree) if isinstance(node, ast.Assign) and _is_gate(node.value, target, set())
+            for t in node.targets if isinstance(t, ast.Name)}
+
+
+def _covered(node: ast.AST, target: str, parents: dict, names: set[str], seen: frozenset = frozenset()) -> bool:
+    """Is ``node`` reachable only when the gate for ``target`` holds? An enclosing if/else on the gate, an
+    earlier ``if not gate: ... return`` in an enclosing block, or (for a call inside a function) the gate
+    covering every use of that function in its scope."""
+    child, cur = node, parents.get(node)
+    while cur is not None:
+        if isinstance(cur, ast.If):
+            if child in cur.body and _positive(cur.test, target, names):
+                return True
+            if child in cur.orelse and _negative(cur.test, target, names):
+                return True
+        if isinstance(cur, ast.IfExp):
+            if child is cur.body and _positive(cur.test, target, names):
+                return True
+            if child is cur.orelse and _negative(cur.test, target, names):
+                return True
+        if (isinstance(cur, ast.BoolOp) and isinstance(cur.op, ast.And) and child in cur.values
+                and any(_positive(v, target, names) for v in cur.values[:cur.values.index(child)])):
+            return True
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(cur, field, None)
+            if isinstance(block, list) and child in block:
+                for prev in block[:block.index(child)]:
+                    if (isinstance(prev, ast.If) and _negative(prev.test, target, names) and prev.body
+                            and isinstance(prev.body[-1], (ast.Return, ast.Raise))):
+                        return True
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if cur in seen:
+                return False
+            scope = parents.get(cur)
+            while scope is not None and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+                scope = parents.get(scope)
+            inside = {id(n) for n in ast.walk(cur)}
+            refs = [n for n in ast.walk(scope) if isinstance(n, ast.Name) and n.id == cur.name
+                    and isinstance(n.ctx, ast.Load) and id(n) not in inside] if scope is not None else []
+            return bool(refs) and all(_covered(r, target, parents, names, seen | {cur}) for r in refs)
+        child, cur = cur, parents.get(cur)
+    return False
+
+
+def _ungated_doorways(source: str, label: str, monitor: set[str]) -> tuple[list[str], int]:
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    bad, checked = [], 0
+    for call, target in _literal_nav_calls(tree):
+        if target in monitor:
+            continue
+        checked += 1
+        if not _covered(call, target, parents, _gate_names(tree, target)):
+            bad.append(f"{label}:{call.lineno} -> {target}")
+    return bad, checked
+
+
+def test_the_doorway_lock_is_not_vacuous():
+    monitor = set(cfg.PAGES_BY_PROFILE["MONITOR"])
+    ungated = (
+        "def a(df):\n"
+        "    def _open(i):\n"
+        "        request_navigation('Control Room', 'Entity 360')\n"
+        "    selectable_nav_table(df, key='k', on_select=_open)\n"
+        "def b():\n"
+        "    from app.core.state import request_navigation as _go\n"
+        "    if st.button('x'):\n"
+        "        _go('Brief')\n"
+        "def c():\n"
+        "    if not can_open('Alerts'):\n"
+        "        request_navigation('Alerts', 'Rules')\n"        # the gate's polarity is read, not just its name
+        "def d():\n"
+        "    request_navigation('Operations', 'Queries')\n")      # MONITOR has Operations: never flagged
+    bad, checked = _ungated_doorways(ungated, "x", monitor)
+    assert checked == 3 and len(bad) == 3, bad
+    gated = (
+        "def a(df):\n"
+        "    if df.empty or not can_open('Control Room'):\n"
+        "        styled_table(df)\n"
+        "        return\n"
+        "    def _open(i):\n"
+        "        request_navigation('Control Room', 'Entity 360')\n"
+        "    selectable_nav_table(df, key='k', on_select=_open)\n"
+        "def b(pages):\n"
+        "    if 'Brief' in pages and st.button('x'):\n"
+        "        _state.request_navigation('Brief')\n"
+        "def c(fp):\n"
+        "    ok = can_open('Alerts')\n"
+        "    if fp and ok and st.button('y'):\n"
+        "        request_navigation('Alerts', 'Rules')\n"
+        "def e(df):\n"
+        "    def _open(i):\n"
+        "        request_navigation('Control Room', 'Entity 360')\n"
+        "    if can_open('Control Room'):\n"
+        "        selectable_nav_table(df, key='k', on_select=_open)\n"
+        "    else:\n"
+        "        styled_table(df)\n")
+    bad, checked = _ungated_doorways(gated, "x", monitor)
+    assert checked == 4 and bad == [], bad
+
+
 def test_monitor_pages_offer_no_doorway_to_a_page_monitor_lacks():
-    """The Cost Intelligence -> Proof doorway was the one ungated cross-page BUTTON on MONITOR's two pages;
-    it now renders only where Proof opens. (Row drills toward Control Room are gated or, for MONITOR, inert:
-    a clamped jump onto the current page is a no-op.)"""
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(
-        encoding="utf-8")
-    assert 'if can_open("Proof") and st.button("Open the proof → Proof", key="savings_roi_link"):' in src
+    """Every literal request_navigation toward a page MONITOR lacks, anywhere on MONITOR's surface (the shell,
+    the shared UI and the two pages), sits behind a gate on that page (can_open, or a membership test on the
+    viewer's pages). This covers row drills as well as buttons: entity_nav_table and the task-graph tables
+    once sent a MONITOR viewer on Operations to Cost Intelligence."""
+    monitor = set(cfg.PAGES_BY_PROFILE["MONITOR"])
+    bad: list[str] = []
+    checked = 0
+    for rel in _MONITOR_SURFACE:
+        b, c = _ungated_doorways((_ROOT / rel).read_text(encoding="utf-8"), rel, monitor)
+        bad += b
+        checked += c
+    assert bad == [], bad
+    # the Control Room drills (components, operations x2, optimize, optimize_queue x2), Proof, Brief, Alerts
+    assert checked >= 9, checked

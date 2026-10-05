@@ -598,6 +598,9 @@ _OVERWATCH_WRITE_PREFIXES: tuple[str, ...] = tuple(
 _SELF_SERVICE_OBJECTS: frozenset[str] = frozenset(
     {"USER_PREFS", "USER_WATCHLIST", "APP_USAGE", "APP_QUERY_TELEMETRY"})
 _TARGET_TOKEN_RE = re.compile(r"([A-Z0-9_$]+)(?=[\s(]|$)")
+# The access sources whose operator answer needs no write-time lookup: the named allowlist, and off-SiS
+# local dev (the role->profile path; no owner's-rights session). 'role' re-verifies; anything else refuses.
+_OPERATOR_SOURCES_NO_RECHECK: tuple[str, ...] = ("allowlist", "off_sis")
 # The account-level levers that ROLE_ADMIN_ACCOUNT_LEVERS governs for role-sourced admins.
 _ACCOUNT_LEVER_PREFIXES: tuple[str, ...] = ("ALTER USER ", "ALTER ACCOUNT SET ")
 _ENTITLEMENT_REFUSAL = ("operator entitlement required — this viewer is not an OVERWATCH admin (the "
@@ -644,7 +647,12 @@ def _entitlement_refusal(sql: str, *, page: str, seam: str, privileged: bool | N
     v4.610.0: an admin whose rights come from ADMIN_ACCESS_ROLE (access_source() == 'role') is
     re-verified LIVE on every privileged write (session.reverify_role_admin, memo <= WRITE_RECHECK_S),
     and is refused the account-level levers unless config.ROLE_ADMIN_ACCOUNT_LEVERS (owner 2026-10-05:
-    True, full parity). An allowlisted admin never pays a lookup here."""
+    True, full parity). An allowlisted admin never pays a lookup here.
+
+    is_operator() and access_source() are two reads of the session's access memo, and the memo can
+    expire between them, so the second read may re-resolve to a NON-admin source while the first said
+    operator. The branch is therefore explicit: only _OPERATOR_SOURCES_NO_RECHECK ('allowlist', and
+    'off_sis' for local dev) run outright, 'role' re-verifies, and EVERY other source refuses."""
     if not (_is_privileged(sql) if privileged is None else privileged):
         return None
     from app import config as _config
@@ -652,15 +660,19 @@ def _entitlement_refusal(sql: str, *, page: str, seam: str, privileged: bool | N
     refusal = _ENTITLEMENT_REFUSAL
     try:
         if _session.is_operator():
-            if _session.access_source() != "role":
+            source = _session.access_source()
+            if source in _OPERATOR_SOURCES_NO_RECHECK:
                 return None
-            if (not _config.ROLE_ADMIN_ACCOUNT_LEVERS
-                    and _normalized_body(sql).startswith(_ACCOUNT_LEVER_PREFIXES)):
-                refusal = _ACCOUNT_LEVER_REFUSAL
-            else:
-                refusal = _ROLE_RECHECK_REFUSAL
-                if _session.reverify_role_admin():
-                    return None
+            if source == "role":
+                if (not _config.ROLE_ADMIN_ACCOUNT_LEVERS
+                        and _normalized_body(sql).startswith(_ACCOUNT_LEVER_PREFIXES)):
+                    refusal = _ACCOUNT_LEVER_REFUSAL
+                else:
+                    refusal = _ROLE_RECHECK_REFUSAL
+                    if _session.reverify_role_admin():
+                        return None
+            # any other source (default / lookup_failed / unverified / no_identity / unknown): the
+            # access memo moved under us or never named an admin -> refuse, never "not role, so allow"
     except Exception:  # an entitlement probe failure must refuse, never allow
         pass
     try:

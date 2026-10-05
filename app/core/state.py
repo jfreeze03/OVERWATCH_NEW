@@ -280,8 +280,9 @@ def viewer_pages() -> tuple[str, ...]:
 
 def can_open(page: str) -> bool:
     """Does this viewer's profile offer ``page``? Gate every cross-page affordance on it (AGENTS.md:
-    a click toward an off-profile page would silently clamp to Overview). Fail-OPEN on an unreadable
-    profile, like the since-last-visit opener — the navigation clamp still holds either way."""
+    a click toward an off-profile page would silently clamp to Overview, or for MONITOR to its landing
+    page Cost Intelligence -- so an ungated drill on Operations ejects that viewer). Fail-OPEN on an
+    unreadable profile, like the since-last-visit opener — the navigation clamp still holds either way."""
     pages = viewer_pages()
     return not pages or page in pages
 
