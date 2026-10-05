@@ -32,12 +32,13 @@ def test_toggling_enabled_never_rewrites_the_threshold() -> None:
 def test_only_changed_columns_are_written() -> None:
     from app.ui.pages.alerts import _rule_change_sql
     assert _rule_change_sql("COST_X", 30.0, True, 30.0, True) == ""                 # nothing changed
-    assert "SET THRESHOLD_NUM = 45.0, UPDATED_AT" in _rule_change_sql("COST_X", 30.0, True, 45.0, True)
+    # v4.610.0 review r1: the threshold is the fixed-point literal of the value NUMBER(18,4) stores
+    assert "SET THRESHOLD_NUM = 45.0000, UPDATED_AT" in _rule_change_sql("COST_X", 30.0, True, 45.0, True)
     both = _rule_change_sql("COST_X", 30.0, False, 45.0, True)
-    assert "SET THRESHOLD_NUM = 45.0, ENABLED = TRUE, UPDATED_AT" in both
+    assert "SET THRESHOLD_NUM = 45.0000, ENABLED = TRUE, UPDATED_AT" in both
     # an empty box (None) leaves the threshold alone; an unread current threshold is never assumed 0
     assert "THRESHOLD_NUM" not in _rule_change_sql("COST_X", None, True, None, False)
-    assert "SET THRESHOLD_NUM = 5.0" in _rule_change_sql("COST_X", None, True, 5.0, True)
+    assert "SET THRESHOLD_NUM = 5.0000" in _rule_change_sql("COST_X", None, True, 5.0, True)
     assert "'x''y'" in _rule_change_sql("x'y", 1.0, True, 2.0, True)               # literal-quoted
 
 

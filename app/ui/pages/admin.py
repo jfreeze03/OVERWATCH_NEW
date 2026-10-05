@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from app.config import (
+    ADMIN_ACCESS_HINT,
     APP_VERSION,
     APP_WAREHOUSE,
     DEFAULT_SETTINGS,
@@ -1130,8 +1131,8 @@ def _settings_tab(is_operator: bool) -> None:
                            else "New value is read by the next validate.sql run." if key in _DEPLOY_GATE_SETTINGS
                            else "New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
-        st.caption("Saving in the app is limited to operators (config OPERATOR_USERS); "
-                   "anyone can copy the SQL for review.")
+        st.caption(f"Saving a setting is an in-app change. {ADMIN_ACCESS_HINT} "
+                   "Anyone can copy the SQL for review.")
 
 
 def _migrations_tab() -> None:

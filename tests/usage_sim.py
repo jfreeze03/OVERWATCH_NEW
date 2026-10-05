@@ -161,6 +161,8 @@ _READ_STUBS = {
     "run_batch_mixed": _rec_batch,
     "run_mart_first": _rec_mart_first,
     "execute_statement": _fake_execute,
+    # v4.610.0: the alert-rule editor writes through the row-counting variant; a smoke never sends it
+    "execute_statement_count": lambda *_a, **_k: (True, "stubbed", 1),
 }
 
 

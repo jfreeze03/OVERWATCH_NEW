@@ -2633,8 +2633,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                        "unless one is already booked (not rejected): then nothing is added."
                                    if ok else f"Booking failed: {msg}")
                     elif not is_operator:
-                        st.caption("Copy the SQL freely; booking its saving requires SNOW_ACCOUNTADMINS / "
-                                   "SNOW_SYSADMINS.")
+                        st.caption("Copy the SQL freely. Booking its saving is an in-app change. "
+                                   f"{ADMIN_ACCESS_HINT}")
                 elif is_operator:
                     if (confirm_gate(wh_pick, "Execute + log" if _autobooked else "Execute + log + book estimated savings", key="remed",
                                      prompt="Type the warehouse name to confirm execution", object_name=True)

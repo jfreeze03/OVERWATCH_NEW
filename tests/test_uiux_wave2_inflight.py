@@ -133,7 +133,10 @@ def test_every_write_click_block_is_latched():
 
 def test_query_layer_writes_paint_the_inflight_state():
     q = _src("app/core/query.py")
-    stmt = q.split("def execute_statement(sql: str", 1)[1].split("\ndef ", 1)[0]
+    # v4.610.0: execute_statement returns execute_statement_count without the row count (one write body)
+    wrapper = q.split("def execute_statement(sql: str", 1)[1].split("\ndef ", 1)[0]
+    assert "execute_statement_count(sql, page=page)" in wrapper
+    stmt = q.split("def execute_statement_count(sql: str", 1)[1].split("\ndef ", 1)[0]
     act = q.split("def execute_action(", 1)[1].split("\ndef ", 1)[0]
     cancel = q.split("def execute_cancel_query(", 1)[1].split("\ndef ", 1)[0]
     assert 'st.spinner("Executing write…")' in stmt

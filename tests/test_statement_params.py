@@ -169,7 +169,8 @@ def test_cortex_carries_its_ceiling(monkeypatch):
 
 
 def test_every_seam_routes_through_the_transport():
-    for fn in (q._execute, q._execute_batch, q.execute_statement, q.execute_statement_async,
+    # v4.610.0: execute_statement delegates to execute_statement_count, which holds the one write submit
+    for fn in (q._execute, q._execute_batch, q.execute_statement_count, q.execute_statement_async,
                q.execute_cancel_query, q.execute_action, ai.cortex_complete, errors.record_error,
                session.current_role):
         src = inspect.getsource(fn)

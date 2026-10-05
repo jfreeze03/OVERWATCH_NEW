@@ -1473,17 +1473,45 @@ def flush_write_buffer() -> None:
         pass
 
 
+def _dml_row_count(rows: object) -> int | None:
+    """The affected-row count a single-table INSERT / UPDATE / DELETE reports in its first result column
+    ('number of rows inserted' / 'updated' / 'deleted'); None when the result carries no integer there (an
+    ALTER's status text, no rows, an unexpected shape). Pure."""
+    try:
+        value = rows[0][0]  # type: ignore[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    return int(text) if text.isdigit() else None
+
+
 def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
     """Run a single state-changing statement (operator actions only).
 
-    Callers gate this behind role + typed confirmation. Returns (ok, message).
+    Callers gate this behind role + typed confirmation. Returns (ok, message): execute_statement_count without
+    the row count -- the same allow-list, entitlement seam, spinner and cache bump.
+    """
+    ok, msg, _count = execute_statement_count(sql, page=page)
+    return ok, msg
+
+
+def execute_statement_count(sql: str, *, page: str) -> tuple[bool, str, int | None]:
+    """execute_statement plus Snowflake's affected-row count (_dml_row_count; None when the result carries none).
+
+    v4.610.0: a compare-and-set UPDATE or an INSERT ... SELECT that matches nothing still SUCCEEDS, so ok alone
+    cannot say whether anything changed; the alert-rule editor reads the count to tell an applied edit from a
+    conflict, and an audit row written from one that landed none. Returns (ok, message, count).
     """
     ok, why = _statement_allowed(sql)
     if not ok:
-        return False, why
+        return False, why, None
     denied = _entitlement_refusal(sql, page=page, seam="execute_statement")
     if denied:
-        return False, denied
+        return False, denied, None
     try:
         # C48: the in-flight state lives HERE, at the one seam every write
         # crosses — the initiating button freezes for the round-trip, and the
@@ -1491,15 +1519,15 @@ def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
         with st.spinner("Executing write…"):
             session = get_session()
             apply_query_tag(session, build_query_tag(page=page, tier="write"))
-            submit_collect(session, session.sql(sql), statement_params(session, page=page, tier="write"))
+            rows = submit_collect(session, session.sql(sql), statement_params(session, page=page, tier="write"))
         # r24 #8 + r27 #14: a successful action invalidates cached reads —
         # domain-scoped when the write target is a known app table, global
         # otherwise — so post-action freshness never depends on live tiers.
         _bump_refresh(sql)
-        return True, "Statement executed."
+        return True, "Statement executed.", _dml_row_count(rows)
     except Exception as exc:
         record_error(page, exc, context=f"execute_statement: {sql[:200]}")
-        return False, format_snowflake_error(exc)
+        return False, format_snowflake_error(exc), None
 
 
 def execute_cancel_query(query_id: str, *, page: str) -> tuple[bool, str]:

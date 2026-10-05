@@ -92,7 +92,11 @@ def test_non_operator_captions_name_the_real_gate() -> None:
     # "requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS" explained nothing; the in-app gate is OPERATOR_USERS.
     admin = _captions("app/ui/pages/admin.py")
     alerts = _captions("app/ui/pages/alerts.py")
-    assert "Saving in the app is limited to operators (config OPERATOR_USERS)" in _one(admin, "anyone can copy the SQL")
+    # v4.610.0 review r1: the Admin settings caption names who can act now too (config.ADMIN_ACCESS_HINT, read here
+    # as '{}'); a SNOW_* role or the allowlist alone is no longer the whole story
+    assert _one(admin, "Anyone can copy the SQL for review.") == (
+        "Saving a setting is an in-app change. {} Anyone can copy the SQL for review.")
+    assert not [c for c in admin if "limited to operators (config OPERATOR_USERS)" in c]
     # v4.610.0: the Alerts captions read config.ADMIN_ACCESS_HINT (the named admins + direct
     # SNOW_PRI_GFR_PRD_ALFA_DSA members), which _literal_text reads as '{}'; tests/test_alert_rule_edit.py
     # locks that they reference it
