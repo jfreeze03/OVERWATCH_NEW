@@ -517,7 +517,9 @@ def _log_access_event(access: dict) -> None:
         pass
 
 
-def _resolve_identified(name: str) -> dict:
+def _resolve_identified(name: str) -> tuple[dict, bool]:
+    """(access, memoize). The off-SiS answer is never memoized: is_sis() is also False on a DISCONNECTED
+    SiS run (get_cached_session() is None), and that pure 'default' must not outlive the outage."""
     from app.config import (
         OPERATOR_PROFILES,
         VIEWER_UNKNOWN_PROFILE,
@@ -528,28 +530,29 @@ def _resolve_identified(name: str) -> dict:
     admin = OPERATOR_PROFILES[0]
     base = {"viewer": name, "at": _clock(), "error": ""}
     if is_operator_user(name):           # break-glass: the named admins never wait on a lookup
-        return {**base, "profile": admin, "operator": True, "source": "allowlist"}
+        return {**base, "profile": admin, "operator": True, "source": "allowlist"}, True
     view_profile = resolve_viewer_profile(name) or VIEWER_UNKNOWN_PROFILE
     if not is_sis():
         # Off-SiS (local dev, tests) there is no owner's-rights session to look the role up as.
-        return {**base, "profile": view_profile, "operator": False, "source": "default"}
+        return {**base, "profile": view_profile, "operator": False, "source": "default"}, False
     roster = _admin_roster()
     # the answer is as old as the lookup behind it, so the memo expires with the data
     base["at"] = roster["at"]
     if roster["status"] == "ok":
         if name in roster["users"]:
-            return {**base, "profile": admin, "operator": True, "source": "role"}
-        return {**base, "profile": view_profile, "operator": False, "source": "default"}
+            return {**base, "profile": admin, "operator": True, "source": "role"}, True
+        return {**base, "profile": view_profile, "operator": False, "source": "default"}, True
     return {**base, "profile": view_profile, "operator": False, "source": roster["status"],
-            "error": roster["error"]}
+            "error": roster["error"]}, True
 
 
 def viewer_access() -> dict:
     """This viewer's resolved access: {viewer, profile, operator, source, at, error} (a copy).
 
-    Identified viewers are memoized per session (see the block comment above). An unidentified viewer
-    is never memoized: SiS -> NO_IDENTITY_PROFILE, not an operator, source 'no_identity'; off-SiS ->
-    the role->profile map, source 'off_sis'."""
+    Identified viewers are memoized per session (see the block comment above), except the off-SiS answer
+    (no lookup ran; see _resolve_identified). An unidentified viewer is never memoized: SiS ->
+    NO_IDENTITY_PROFILE, not an operator, source 'no_identity'; off-SiS -> the role->profile map, source
+    'off_sis'."""
     from app.config import (
         ACCESS_RETRY_S,
         ACCESS_TTL_S,
@@ -570,8 +573,11 @@ def viewer_access() -> dict:
     if isinstance(memo, dict) and memo.get("viewer") == name and _fresh(
             memo, ACCESS_RETRY_S if memo.get("source") in ACCESS_UNAVAILABLE_SOURCES else ACCESS_TTL_S):
         return dict(memo)
-    memo = _resolve_identified(name)
-    st.session_state[_ACCESS_KEY] = memo
+    memo, keep = _resolve_identified(name)
+    if keep:
+        st.session_state[_ACCESS_KEY] = memo
+    else:
+        st.session_state.pop(_ACCESS_KEY, None)
     _log_access_event(memo)
     return dict(memo)
 

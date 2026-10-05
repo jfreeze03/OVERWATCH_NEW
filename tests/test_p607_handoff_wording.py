@@ -92,7 +92,8 @@ def test_non_operator_captions_name_the_real_gate() -> None:
     # "requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS" explained nothing; the in-app gate is OPERATOR_USERS.
     admin = _captions("app/ui/pages/admin.py")
     alerts = _captions("app/ui/pages/alerts.py")
-    assert "Saving in the app is limited to operators (config OPERATOR_USERS)" in _one(admin, "anyone can copy the SQL")
+    # v4.610.0: the admin caption leads with config.ADMIN_ACCESS_HINT (both admin routes; locked in test_admin_access_tab)
+    assert _one(admin, "Anyone can copy the SQL").startswith("{} ")
     assert "limited to operators (config OPERATOR_USERS)" in _one(alerts, "the SQL is copyable for review")
     assert "limited to operators (config OPERATOR_USERS)" in _one(alerts, "Un-snoozing")
     for text in admin + alerts:

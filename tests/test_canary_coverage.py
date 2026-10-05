@@ -54,6 +54,8 @@ CANARY_EXEMPT: dict[str, dict[str, str]] = {
     "access_sql": {
         "show_grants_of_role_sql": ("SHOW GRANTS OF ROLE (the v4.610.0 admin-access lookup): EXPLAIN cannot "
                                     "compile a SHOW; a failure is logged and shown in the sidebar instead"),
+        "show_grants_on_app_sql": ("SHOW GRANTS ON STREAMLIT (Admin ▸ Access, v4.610.0): EXPLAIN cannot compile "
+                                   "a SHOW; a failed or empty answer renders on the tab as unavailable"),
     },
     "cost_sql": {
         "hourly_credits": _TWIN,
