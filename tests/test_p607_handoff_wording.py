@@ -93,8 +93,12 @@ def test_non_operator_captions_name_the_real_gate() -> None:
     admin = _captions("app/ui/pages/admin.py")
     alerts = _captions("app/ui/pages/alerts.py")
     assert "Saving in the app is limited to operators (config OPERATOR_USERS)" in _one(admin, "anyone can copy the SQL")
-    assert "limited to operators (config OPERATOR_USERS)" in _one(alerts, "the SQL is copyable for review")
-    assert "limited to operators (config OPERATOR_USERS)" in _one(alerts, "Un-snoozing")
+    # v4.610.0: the Alerts captions read config.ADMIN_ACCESS_HINT (the named admins + direct
+    # SNOW_PRI_GFR_PRD_ALFA_DSA members), which _literal_text reads as '{}'; tests/test_alert_rule_edit.py
+    # locks that they reference it
+    assert _one(alerts, "The SQL is copyable for review").startswith("{}")
+    assert _one(alerts, "Waking snoozed events early is an in-app change.").endswith("{}")
+    assert not [c for c in alerts if "limited to operators (config OPERATOR_USERS)" in c]
     for text in admin + alerts:
         assert not text.startswith(("Executing requires SNOW_", "Un-snoozing requires SNOW_")), text
 

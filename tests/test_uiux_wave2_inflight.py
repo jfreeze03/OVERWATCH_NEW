@@ -26,7 +26,7 @@ def _src(rel: str) -> str:
 LATCHED_FILES = {
     "app/ui/pages/cost_parts/optimize.py": 7,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject); +1 Next-Fifty #30 unread-maintenance ESTIMATED booking; -1 the 2026-09-30 hygiene release review: the storage-waste retention control is review only (the allow-list refuses ALTER TABLE, so its write never succeeded); +1 R1-086: the off-hours schedule is review only (the allow-list refuses its multi-statement CREATE TASK script), and its ESTIMATED saving books from its own one-click button
     "app/ui/pages/operations.py": 5,
-    "app/ui/pages/alerts.py": 6,
+    "app/ui/pages/alerts.py": 7,   # +1 v4.610.0: an admin's in-app rule threshold / Enabled apply (Rules)
     "app/ui/workbench.py": 5,   # v4.597: -1 the retired Action Center experiment-start expander
     "app/ui/pages/cost_parts/ai_chargeback.py": 3,
     "app/ui/security_center.py": 2,

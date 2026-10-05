@@ -2,7 +2,9 @@
 
 Lifecycle writes are approval-shaped: the SQL is always shown; in-app
 execution requires the operator profile and writes an ALERT_AUDIT row in the
-same action. Rule changes are generate-only by design.
+same action. A rule's threshold / Enabled change runs in-app for OVERWATCH
+admins (v4.610.0: a compare-and-set UPDATE plus an ALERT_AUDIT RULE_EDIT row);
+for everyone else it stays generate-only.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from app.config import core_object
+from app.config import ADMIN_ACCESS_HINT, core_object
 from app.core.errors import safe_page
 from app.core.identity import idempotency_key, identity_sql, viewer_name
 from app.core.query import execute_action, execute_statement, run, run_batch
@@ -161,22 +163,183 @@ def _rule_current(rules_df: pd.DataFrame, rule_id: str) -> tuple[float | None, b
     return (thr if math.isfinite(thr) else None), enabled
 
 
+# v4.610.0 (owner decision 2026-10-05): OVERWATCH admins apply a rule's THRESHOLD_NUM / ENABLED change in-app.
+# ALERT_CONFIG.THRESHOLD_NUM is NUMBER(18,4): it keeps four decimals (0.00001 would land as 0, which fires on
+# every row), and a value past RULE_THRESHOLD_MAX is a typo (extra zeros), never a rule setting.
+RULE_THRESHOLD_MAX = 1_000_000.0
+_RULE_THRESHOLD_DECIMALS = 4
+_RULE_AUDIT_ACTION = "RULE_EDIT"
+
+
+def _rule_threshold_problem(value: float | int | str | None) -> str:
+    """'' when ``value`` may be written to ALERT_CONFIG.THRESHOLD_NUM (None = leave the threshold alone), else
+    the reason it may not: not a number, NaN / infinity, negative, past RULE_THRESHOLD_MAX, or more decimals than
+    the column keeps. Pure."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "The threshold must be a number."
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "The threshold must be a number."
+    if not math.isfinite(number):
+        return "The threshold must be a finite number."
+    if number < 0:
+        return "The threshold cannot be negative."
+    if number > RULE_THRESHOLD_MAX:
+        return (f"A threshold above {RULE_THRESHOLD_MAX:,.0f} is not a plausible rule setting — "
+                "check for extra zeros.")
+    if abs(round(number, _RULE_THRESHOLD_DECIMALS) - number) > 1e-9:
+        return (f"THRESHOLD_NUM keeps {_RULE_THRESHOLD_DECIMALS} decimal places — round the threshold "
+                f"to at most {_RULE_THRESHOLD_DECIMALS}.")
+    return ""
+
+
+def _known_threshold(value: float | None) -> float | None:
+    """A current threshold as a finite float, or None (NULL / unreadable — never a fabricated 0)."""
+    if value is None:
+        return None
+    number = safe_float(value, default=float("nan"))
+    return number if math.isfinite(number) else None
+
+
+def _rule_changes(cur_threshold: float | None, cur_enabled: bool,
+                  new_threshold: float | None, new_enabled: bool) -> tuple[bool, bool]:
+    """(threshold changes, Enabled changes). An empty threshold box (None) never changes the threshold."""
+    cur = _known_threshold(cur_threshold)
+    thr = new_threshold is not None and (cur is None or abs(float(new_threshold) - cur) > 1e-12)
+    return thr, bool(new_enabled) != bool(cur_enabled)
+
+
+def _sql_bool(value: object) -> str:
+    return "TRUE" if bool(value) else "FALSE"
+
+
+def _threshold_text(value: float | None) -> str:
+    """A threshold for a receipt / audit note: at most 4 decimals, no float artifacts; 'unset' for NULL."""
+    cur = _known_threshold(value)
+    if cur is None:
+        return "unset"
+    return f"{cur:.{_RULE_THRESHOLD_DECIMALS}f}".rstrip("0").rstrip(".")
+
+
+def _rule_change_text(cur_threshold: float | None, cur_enabled: bool,
+                      new_threshold: float | None, new_enabled: bool) -> str:
+    """'threshold 30 -> 45; Enabled on -> off' for exactly the columns that change."""
+    thr, en = _rule_changes(cur_threshold, cur_enabled, new_threshold, new_enabled)
+    parts = []
+    if thr:
+        parts.append(f"threshold {_threshold_text(cur_threshold)} -> {_threshold_text(new_threshold)}")
+    if en:
+        parts.append(f"Enabled {'on' if cur_enabled else 'off'} -> {'on' if new_enabled else 'off'}")
+    return "; ".join(parts)
+
+
 def _rule_change_sql(rule_id: str, cur_threshold: float | None, cur_enabled: bool,
                      new_threshold: float | None, new_enabled: bool) -> str:
-    """The generate-only ALERT_CONFIG UPDATE for the threshold generator, writing ONLY the columns that change
-    (review R1-233): toggling Enabled never rewrites THRESHOLD_NUM, and an empty threshold box (None) leaves it
-    alone. '' when nothing changes."""
-    sets = []
-    if new_threshold is not None and (cur_threshold is None
-                                      or abs(float(new_threshold) - float(cur_threshold)) > 1e-12):
+    """The ALERT_CONFIG UPDATE for a rule change, writing ONLY the columns that change (review R1-233): toggling
+    Enabled never rewrites THRESHOLD_NUM, and an empty threshold box (None) leaves it alone. '' when nothing
+    changes.
+
+    v4.610.0: a compare-and-set -- the WHERE also pins each CHANGED column to the value this page read (a NULL
+    threshold as IS NULL), so a statement built from a stale read (another admin edited the rule meanwhile, or a
+    worksheet copy run later) matches no row instead of overwriting the newer value. The same text is the
+    generate-only preview and the statement an admin's Apply runs. ValueError for a threshold
+    _rule_threshold_problem refuses, so no caller can emit 'nan' or a negative into the SQL."""
+    problem = _rule_threshold_problem(new_threshold)
+    if problem:
+        raise ValueError(problem)
+    thr, en = _rule_changes(cur_threshold, cur_enabled, new_threshold, new_enabled)
+    sets: list[str] = []
+    where = [f"RULE_ID = {sql_literal(rule_id)}"]
+    if thr and new_threshold is not None:
+        cur = _known_threshold(cur_threshold)
         sets.append(f"THRESHOLD_NUM = {float(new_threshold)}")
-    if bool(new_enabled) != bool(cur_enabled):
-        sets.append(f"ENABLED = {str(bool(new_enabled)).upper()}")
+        where.append("THRESHOLD_NUM IS NULL" if cur is None else f"THRESHOLD_NUM = {cur}")
+    if en:
+        sets.append(f"ENABLED = {_sql_bool(new_enabled)}")
+        where.append(f"ENABLED = {_sql_bool(cur_enabled)}")
     if not sets:
         return ""
     return (f"UPDATE {core_object('ALERT_CONFIG')}\n"
             f"SET {', '.join(sets)}, UPDATED_AT = CURRENT_TIMESTAMP()\n"
-            f"WHERE RULE_ID = {sql_literal(rule_id)};")
+            f"WHERE {' AND '.join(where)};")
+
+
+def _rule_audit_sql(rule_id: str, cur_threshold: float | None, cur_enabled: bool,
+                    new_threshold: float | None, new_enabled: bool) -> str:
+    """The append-only ALERT_AUDIT row for an admin's in-app rule edit (v4.610.0): ACTION 'RULE_EDIT', EVENT_ID
+    'RULE:<RULE_ID>' (never an ALERT_EVENTS id, so no event-keyed reader picks it up), the viewer through
+    identity_sql() (never the owner's CURRENT_USER() default), the old and new values in NOTE and the UPDATE as
+    PROOF_SQL. An INSERT ... SELECT from ALERT_CONFIG that lands only while the rule holds the NEW values, so a
+    compare-and-set that matched nothing can never leave an audit row claiming a change. INSERT only: the audit
+    table is append-only (roles.sql REVOKEs UPDATE / DELETE on it)."""
+    thr, en = _rule_changes(cur_threshold, cur_enabled, new_threshold, new_enabled)
+    holds = [f"RULE_ID = {sql_literal(rule_id)}"]
+    if thr and new_threshold is not None:
+        holds.append(f"THRESHOLD_NUM = {float(new_threshold)}")
+    if en:
+        holds.append(f"ENABLED = {_sql_bool(new_enabled)}")
+    note = f"rule {rule_id}: {_rule_change_text(cur_threshold, cur_enabled, new_threshold, new_enabled)}"
+    if viewer_name():
+        note = f"{note} — by {viewer_name()}"
+    proof = _rule_change_sql(rule_id, cur_threshold, cur_enabled, new_threshold, new_enabled).rstrip(";")
+    return (f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE, PROOF_SQL, ACTED_BY) "
+            f"SELECT {sql_literal('RULE:' + str(rule_id))}, {sql_literal(_RULE_AUDIT_ACTION)}, "
+            f"{sql_literal(note, max_len=2000)}, {sql_literal(proof, max_len=4000)}, {identity_sql()} "
+            f"FROM {core_object('ALERT_CONFIG')} WHERE {' AND '.join(holds)};")
+
+
+def _apply_rule_change(rule_id: str, cur_threshold: float | None, cur_enabled: bool,
+                       new_threshold: float | None, new_enabled: bool) -> tuple[str, str]:
+    """Run an OVERWATCH admin's rule edit and say what happened: (outcome, message). v4.610.0.
+
+    1. The compare-and-set UPDATE (_rule_change_sql) through execute_statement, whose executor re-checks the
+       viewer's admin entitlement itself (an ALERT_CONFIG write is privileged; a role-sourced admin is
+       re-verified live).
+    2. A fresh rules read: the UPDATE bumped the alerts cache domain, so this is a new read, not the page's
+       cached frame. It shows whether the rule now holds the new values.
+    3. The ALERT_AUDIT RULE_EDIT row (_rule_audit_sql), skipped only when step 2 proves the compare-and-set
+       matched nothing. It checks the new values itself, so it is still sent when the read fails.
+
+    outcome: 'failed' (nothing ran, or the UPDATE errored: nothing changed), 'conflict' (the rule moved or went
+    away since this page read it: nothing changed, no audit row), 'applied' (changed and audited) or 'partial'
+    (the UPDATE ran, but the audit row or the confirming read failed; the message says which)."""
+    change_sql = _rule_change_sql(rule_id, cur_threshold, cur_enabled, new_threshold, new_enabled)
+    if not change_sql:
+        return "failed", f"Nothing to apply: rule {rule_id} already has that threshold and Enabled."
+    what = _rule_change_text(cur_threshold, cur_enabled, new_threshold, new_enabled)
+    ok, msg = execute_statement(change_sql, page=_PAGE)
+    if not ok:
+        return "failed", f"Rule {rule_id} was not changed: {msg}"
+    fresh = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent", source="ALERT_CONFIG")
+    confirmed = False
+    if fresh.ok and "RULE_ID" in fresh.df.columns:
+        if not (fresh.df["RULE_ID"].astype(str) == str(rule_id)).any():
+            return "conflict", (f"Nothing changed: rule {rule_id} no longer exists in ALERT_CONFIG "
+                                "(removed since this page read it).")
+        thr, en = _rule_changes(cur_threshold, cur_enabled, new_threshold, new_enabled)
+        now_thr, now_en = _rule_current(fresh.df, rule_id)
+        thr_held = not thr or (now_thr is not None and new_threshold is not None
+                               and abs(now_thr - float(new_threshold)) <= 1e-9)
+        held = thr_held and (not en or now_en == bool(new_enabled))
+        if not held:
+            return "conflict", (f"Nothing changed: rule {rule_id} was edited elsewhere since this page read it — "
+                                f"it now reads threshold {_threshold_text(now_thr)}, Enabled "
+                                f"{'on' if now_en else 'off'}. Review the current values and apply again.")
+        confirmed = True
+    audit_ok, audit_msg = execute_statement(
+        _rule_audit_sql(rule_id, cur_threshold, cur_enabled, new_threshold, new_enabled), page=_PAGE)
+    if not confirmed:
+        return "partial", (f"Rule {rule_id}: the UPDATE ran ({what}), but the rule could not be re-read to "
+                           "confirm it — check the Rules table. "
+                           + ("Its audit row is written only if the rule holds the new values."
+                              if audit_ok else f"Its audit row also failed: {audit_msg}"))
+    if not audit_ok:
+        return "partial", (f"Rule {rule_id} updated ({what}) and the change is live, but its ALERT_AUDIT row "
+                           f"could not be written: {audit_msg} (also logged in Admin → Errors & telemetry).")
+    return "applied", f"Rule {rule_id} updated ({what}) and audited — the next scan uses it."
 
 
 RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
@@ -1280,8 +1443,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                         f"{str(row['TITLE'])[:80]} (event {event_id[:8]})" + _nxt_label)
                                     st.rerun()
                         else:
-                            st.caption("Running this in the app is limited to operators (config "
-                                       "OPERATOR_USERS); the SQL is copyable for review.")
+                            st.caption(f"{ADMIN_ACCESS_HINT} The SQL is copyable for review.")
                     st.markdown("**Supporting evidence**")
                     with st.expander("Playbook — what to do first", expanded=False):
                         st.markdown(playbook_for(str(row["RULE_ID"])))
@@ -1775,7 +1937,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         st.session_state["_ow_alert_receipt"] = f"Un-snooze recorded — {_uns_txt}"
                         st.rerun()
             else:
-                st.caption("Un-snoozing in the app is limited to operators (config OPERATOR_USERS).")
+                st.caption(f"Waking snoozed events early is an in-app change. {ADMIN_ACCESS_HINT}")
 
 
 @safe_page(_PAGE)
@@ -1904,6 +2066,17 @@ def render() -> None:
             st.session_state["rule_prec_sel_last"] = _nav_rule
             st.session_state["rule_pick"] = _nav_rule
             st.session_state["_ow_nav_context"] = {k: v for k, v in _nav.items() if k != "rule_id"}
+        # v4.610.0: an admin's rule edit reruns the page so the table re-reads; its receipt renders first
+        # (an action receipt, not an absence), whatever the rules read does next.
+        _rule_receipt = st.session_state.pop("_ow_rule_receipt", None)
+        if isinstance(_rule_receipt, tuple) and len(_rule_receipt) == 2:
+            _rr_kind, _rr_text = _rule_receipt
+            if _rr_kind == "applied":
+                st.success(str(_rr_text), icon="✅")
+            elif _rr_kind == "partial":
+                st.warning(str(_rr_text))
+            else:
+                st.error(str(_rr_text))
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",
                     source="ALERT_CONFIG")
         if guard(rules, "No alert rules found.", setup_hint=_SETUP_HINT):
@@ -1973,7 +2146,10 @@ def render() -> None:
                 elif not _failed_read(mk, "Suggested thresholds could not be read."):
                     empty_state("no_data_yet", "Suggestions appear once resolved events carry metric values "
                                                "and resolution kinds.")
-            with st.expander("Generate a threshold change"):
+            # v4.610.0 (owner decision 2026-10-05): an OVERWATCH admin applies the change in-app; everyone else
+            # keeps the generate-only preview. Same widgets, same SQL, either way.
+            with st.expander("Change a rule's threshold or Enabled" if is_operator
+                             else "Generate a threshold change"):
                 if not rules.empty:
                     rule_ids = rules.df["RULE_ID"].astype(str).tolist()
                     rule_id = st.selectbox("Rule", rule_ids, key="rule_pick")
@@ -1988,16 +2164,53 @@ def render() -> None:
                         value=_cur_thr if _cur_thr is not None and _cur_thr >= 0 else None,
                         key=f"rule_thresh:{rule_id}")
                     enabled = st.checkbox("Enabled", value=_cur_en, key=f"rule_enabled:{rule_id}")
-                    _change_sql = _rule_change_sql(rule_id, _cur_thr, _cur_en, new_threshold, enabled)
-                    if _change_sql:
+                    # v4.610.0: validate before any SQL exists (no negative, NaN, past 4 decimals or absurd)
+                    _thr_problem = _rule_threshold_problem(new_threshold)
+                    _change_sql = "" if _thr_problem else _rule_change_sql(
+                        rule_id, _cur_thr, _cur_en, new_threshold, enabled)
+                    if _thr_problem:
+                        st.error(_thr_problem)
+                    elif _change_sql:
                         st.code(_change_sql, language="sql")
                         if new_threshold is not None and float(new_threshold) == 0.0 and _cur_thr != 0.0:
                             st.warning("A threshold of 0 makes most rules fire on every row they evaluate "
                                        "(a '>= 0' test is always true) — check this is what you mean.")
                     else:
                         st.caption("No change from the rule's current threshold and Enabled — edit either "
-                                   "to generate an UPDATE.")
-                    st.caption("Rule changes are generate-only: review, then run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+                                   "to build an UPDATE.")
+                    if is_operator:
+                        if _change_sql:
+                            # house law 11: a rule change re-tunes what pages people (a CLASSIFYING,
+                            # account-wide write), so it is type-to-confirm on the RULE_ID (exact case), with the
+                            # C48 latch scoped by rule AND values (a different edit is never swallowed). F51: the
+                            # confirm mounts under a nonce the apply bumps, so a typed RULE_ID never carries over
+                            # to the next edit of the same rule (a fresh key is the one reliable reset).
+                            _rule_latch = f"rule_apply:{rule_id}:{new_threshold}:{int(bool(enabled))}"
+                            _rule_nonce = int(st.session_state.get("_ow_rule_nonce", 0) or 0)
+                            if (confirm_gate(rule_id, "Apply rule change + audit",
+                                             key=f"rule_apply:{rule_id}:{_rule_nonce}",
+                                             prompt="Type the rule id to confirm")
+                                    and write_gate_open(_rule_latch)):
+                                _ro, _rmsg = _apply_rule_change(rule_id, _cur_thr, _cur_en, new_threshold, enabled)
+                                stamp_write(_rule_latch, _ro in ("applied", "partial"))  # C48: the UPDATE ran
+                                notify(_ro == "applied", _rmsg)
+                                if _ro != "failed":
+                                    # the rules table above is stale now (changed, or moved under us): rerun so
+                                    # it re-reads; the receipt renders first on the next run
+                                    if _ro in ("applied", "partial"):
+                                        from app.ui.components import log_ui_event
+                                        log_ui_event("alert_rule_edit", page=_PAGE, section="Rules")
+                                    st.session_state["_ow_rule_receipt"] = (_ro, _rmsg)
+                                    st.session_state["_ow_rule_nonce"] = _rule_nonce + 1
+                                    st.rerun()
+                        st.caption("Apply runs this UPDATE as the app — a compare-and-set, so it changes nothing "
+                                   "if the rule moved since this page read it — and appends an ALERT_AUDIT "
+                                   "RULE_EDIT row naming you with the old and new values. The SQL stays copyable "
+                                   "to run it in a worksheet as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS instead.")
+                    else:
+                        st.caption(f"{ADMIN_ACCESS_HINT} For everyone else rule changes are generate-only: "
+                                   "review the SQL, then run it in a worksheet as SNOW_ACCOUNTADMINS / "
+                                   "SNOW_SYSADMINS.")
                     st.caption("WINDOW_HOURS is informational for every rule except DQ_RECON_ERROR: "
                                "scan windows are fixed per family in SP_ALERT_SCAN / "
                                "SP_ALERT_SCAN_DAILY (see the runbook's rule catalogue), so editing "

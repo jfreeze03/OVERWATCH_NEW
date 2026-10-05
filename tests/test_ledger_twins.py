@@ -125,7 +125,9 @@ def test_supersede_sql_is_idempotent_and_audited():
 
 def test_optimize_stops_double_booking_and_offers_cleanup():
     src = _src("app/ui/pages/cost_parts/optimize.py")
-    assert "from app.config import LEDGER_AUTOBOOKED_LEVERS" in src
+    # v4.610.0: the import line also carries ADMIN_ACCESS_HINT (sorted first), so match the name in it
+    assert any(ln.startswith("from app.config import ") and "LEDGER_AUTOBOOKED_LEVERS" in ln.split(" import ", 1)[1]
+               for ln in src.splitlines())
     assert "_autobooked = (_lever in LEDGER_AUTOBOOKED_LEVERS and remediation.autobook_books_change(" in src
     assert src.count('write_gate_open("ledger_twin_reject")') == 1
     assert src.count('stamp_write("ledger_twin_reject", ok)') == 1

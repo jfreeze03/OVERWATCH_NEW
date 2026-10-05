@@ -68,7 +68,9 @@ def test_operations_queries_tile_labels_served_window_not_requested():
     assert 'f"Queries ({_q_wlab})"' in src
     # the raw-days label (the bug) must be gone
     assert 'f"Queries ({days}d)"' not in src
-    assert "from app.config import MAX_LIVE_WINDOW_DAYS" in src
+    # v4.610.0: the import line also carries ADMIN_ACCESS_HINT (sorted first), so match the name in it
+    assert any(ln.startswith("from app.config import ") and "MAX_LIVE_WINDOW_DAYS" in ln.split(" import ", 1)[1]
+               for ln in src.splitlines())
 
 
 # ---------------------------------------------------------------------------
