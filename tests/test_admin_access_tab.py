@@ -276,10 +276,11 @@ def test_the_proof_block_lock_accepts_part_c_and_rejects_the_two_role_block():
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "v4.610.0 integration lands roles.sql PART C (four roles, any-kind NOT (granted_to = 'ROLE' AND ...)) "
-    "with the regenerated snowflake/rebuild/03 (law 6). Until then roles.sql still holds the two-role block "
-    "and Admin > Access's -20011/-20012 wording is ahead of it. strict: once PART C lands this XPASSes and "
-    "FAILS the suite -- delete this marker in the same change."))
+    "roles.sql PART C (four roles, any-kind NOT (granted_to = 'ROLE' AND ...)) plus the DSA/DTI USAGE grants is "
+    "an owner change still pending (the release that added Admin > Access did not make it), with the regenerated "
+    "snowflake/rebuild/03 (law 6). Until then roles.sql still holds the two-role block and Admin > Access's "
+    "-20011/-20012 wording is ahead of it. strict: once PART C lands this XPASSes and FAILS the suite -- delete "
+    "this marker in the same change."))
 def test_roles_sql_proof_block_is_the_rule_app_grant_review_applies():
     assert _proof_block_problems(read("snowflake/roles.sql")) == []
 

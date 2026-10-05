@@ -189,6 +189,7 @@ snowflake/migrations/V170__incident_declare_actor_and_proposals.sql
 snowflake/migrations/V171__ops_selfwatch_digest_refgaps_seed.sql
 snowflake/migrations/V172__detection_scans_company_and_accuracy.sql
 snowflake/migrations/V173__alert_scan_supported_subquery_and_div0.sql
+snowflake/migrations/V174__alert_scan_dsa_admin_role.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -570,6 +571,24 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > OPS_SCAN_DEGRADED events the failures raised. Rollback: RUNBOOK §12, "Rolling back V173" (it brings both failures
 > back).
 
+> **V174 (owner access decision 2026-10-05: SNOW_PRI_GFR_PRD_ALFA_DSA joins the hourly security watch):** apply
+> V174 alone, any time (it guards on V173, error -20174), from a worksheet pinned to Central; no repairs. It is
+> independent of the 4.610.0 deploy: deployed first, the app simply watches DSA in the alert arms from the apply on
+> (the playbooks already say "since V174"). It re-derives SP_ALERT_SCAN from V173 and appends
+> SNOW_PRI_GFR_PRD_ALFA_DSA to the admin-role lists of [27] SEC_ADMIN_GRANT (a direct DSA grant raises one HIGH
+> event), [26] SEC_LOGIN_TAKEOVER (a takeover of a direct holder is CRITICAL at any hour) and [18]
+> SEC_NEW_ADMIN_NETWORK (a holder's login from a network unseen in 90 days raises). It also refreshes the
+> SEC_ADMIN_GRANT rule NAME, only while it still equals its V162 seed. No task change; nothing runs at apply time.
+> Before it, the read-only PREFLIGHT P174.1 lists the direct DSA holders (and who is new to each arm); P174.2-P174.4
+> show what the first hourly scan raises: DSA grants from the last 26h, the CRIT twin of a holder's WARN takeover from
+> the last 24h, and holders' new networks first seen in the last 24h. P174.3 shows each CRIT twin's WARN state. A
+> holder's takeover WARN raised before V174 re-raises as CRITICAL. The V067 sweep supersedes the WARN only while it is
+> OPEN or ACK. A WARN already resolved or snoozed re-opens as a fresh CRITICAL that routes and escalates: resolve or
+> snooze it the same way. After it: PART B V174.1 right away (version row, the DSA token six times in GET_DDL, the
+> NAME); V174.2 after the first hourly scan whose heartbeat lands 55+ minutes after the apply (14/14, no
+> rule_block_failed for the three arms; a WAIT means re-run after the next scan); V174.3 once V174.2 reads OK lists the
+> DSA events raised since the apply: review each in Alerts. Rollback: RUNBOOK §12, "Rolling back V174".
+
 > **V164 verify (actionable Teams lines + CRITICAL escalation — OWNER SMOKE TEST: the send, the ARRAY
 > handling and the nested cursor loop are runtime-only):**
 > 1. Before the apply: PREFLIGHT P164.1 must show `DEFAULT_RECIPIENTS_SET` and
@@ -656,35 +675,69 @@ The loader chain runs on the dedicated **`WH_ALFA_ADMIN`** warehouse
 
 ## 2. Roles and execution model (owner's rights)
 
-**Access is two roles, total** (owner decision 2026-07-13):
-**SNOW_ACCOUNTADMINS** and **SNOW_SYSADMINS**. `roles.sql` grants both
-directly (IMPORTED PRIVILEGES on the SNOWFLAKE db, read/write on the
-OVERWATCH schema, warehouse usage) and actively retires the old
-OVERWATCH_MONITOR / OVERWATCH_OPERATOR layer.
+**Access** (owner decision 2026-10-05, superseding the 2026-07-13 "two
+roles, total"): the decision names four roles. **SNOW_ACCOUNTADMINS** and
+**SNOW_SYSADMINS** keep the direct grants in `roles.sql` (IMPORTED
+PRIVILEGES on the SNOWFLAKE db, read/write on the OVERWATCH schema,
+warehouse usage), which also actively retires the old
+OVERWATCH_MONITOR / OVERWATCH_OPERATOR layer. Direct user members of
+**SNOW_PRI_GFR_PRD_ALFA_DSA** are OVERWATCH admins and
+**SNOW_PRI_GFR_PRD_ALFA_DTI** is view-only; the app decides that per viewer
+(below). As of 4.610.0 `roles.sql` and its `SHOW GRANTS ON STREAMLIT` proof
+block still cover only the two SNOW_* roles: the Snowflake side for DSA and
+DTI is an owner change this release does not make, so until it lands their
+members cannot open the app.
 
 **OVERWATCH is an owner's-rights service.** Streamlit-in-Snowflake executes
 every query with the app owner's privileges, not the viewer's role. The
-viewer's identity (`st.user`, mapped through `config.VIEWER_PROFILES`; an
-unresolved viewer fails closed to the least-privilege profile) decides only
-which navigation profile they see and whether the operator gate opens. Two
-consequences the code accounts for:
+viewer's identity (`st.user`) decides only which navigation profile they see
+and whether the operator gate opens. `session.viewer_access` resolves an
+identified viewer in this order:
+
+1. On `config.OPERATOR_USERS` (the five named admins): DBA pages + admin, no
+   lookup (source `allowlist`).
+2. A direct USER grantee of SNOW_PRI_GFR_PRD_ALFA_DSA, read live with
+   `SHOW GRANTS OF ROLE` run as the owner (`granted_to = USER` rows; a grant to
+   a role is not expanded): DBA pages + admin with full parity, the
+   account-level levers included (source `role`).
+3. Anyone else (a non-DBA `VIEWER_PROFILES` pin, of which none remain; DTI
+   members; SNOW_* holders not on the allowlist): **MONITOR** = Cost
+   Intelligence + Operations, read-only (source `default`). An unidentified SiS
+   viewer also gets MONITOR and is never an admin.
+
+The lookup runs once per session, is re-checked after 5 minutes, and FAILS
+CLOSED: an error (source `lookup_failed`) or an empty USER set (`unverified`,
+a privilege gap, never "no members") means read-only, retried after 1 minute,
+with one APP_ERROR_LOG row (page 'Access') and the sidebar caption "Access
+check unavailable". Each viewer and source writes one APP_USAGE
+`access_resolved` event per session. Admin ▸ Access shows the answer, the DSA
+lookup status and the app's USAGE grantees. Two consequences the code
+accounts for:
 
 - Viewer identity comes from `st.user` (`app/core/identity.py`), because
   `CURRENT_USER()` returns the app owner inside the app. Preferences,
   usage telemetry, and audit actor stamps all ride `identity_sql()`.
-- The in-app execution gate is the `config.OPERATOR_USERS` viewer allowlist
-  (`session.is_operator()`), plus a typed confirmation for classifying or
-  account-touching writes. Because every viewer runs as the owner, that
-  allowlist is the app's authorization boundary. The executors run one
-  statement at a time from a fixed allow-list: DML (INSERT / UPDATE / DELETE /
-  MERGE) on DBA_MAINT_DB.OVERWATCH objects, CALLs of DBA_MAINT_DB.OVERWATCH
-  procs, and the Operations ▸ Emergency levers `ALTER WAREHOUSE`,
-  `ALTER PIPE`, `ALTER TASK`, `ALTER USER` and `ALTER ACCOUNT SET`. The
-  executor re-checks OPERATOR_USERS itself for those ALTER levers (and for
-  query cancel), so anyone on the list can, with the owner's rights, change
-  warehouse settings (size, suspend, timeouts, clusters), pause or resume
-  pipes, suspend or resume tasks, disable or re-enable users and set account
-  parameters.
+- The in-app execution gate is OVERWATCH admin (`session.is_operator()`:
+  the `config.OPERATOR_USERS` allowlist or a direct SNOW_PRI_GFR_PRD_ALFA_DSA
+  member), plus a typed confirmation for classifying or account-touching
+  writes. Because every viewer runs as the owner, that admin set is the app's
+  authorization boundary, and whoever controls DSA membership controls who is
+  an OVERWATCH admin (a trust delegation the owner accepted 2026-10-05). The
+  executors run one statement at a time from a fixed allow-list: DML (INSERT /
+  UPDATE / DELETE / MERGE) on DBA_MAINT_DB.OVERWATCH objects, CALLs of
+  DBA_MAINT_DB.OVERWATCH procs, and the Operations ▸ Emergency levers
+  `ALTER WAREHOUSE`, `ALTER PIPE`, `ALTER TASK`, `ALTER USER` and
+  `ALTER ACCOUNT SET`. Since 4.610.0 the executor re-checks admin itself for
+  those levers, for query cancel, and for every OVERWATCH write except the
+  viewer's own rows (USER_PREFS, USER_WATCHLIST, APP_USAGE,
+  APP_QUERY_TELEMETRY, matched as the exact object name). A role admin is
+  re-verified with a fresh lookup at write time (cached at most 15 seconds),
+  so a revoke of DSA stops their writes within about 15 seconds; their pages
+  follow within 5 minutes (at once after 'Refresh data'). A named admin on
+  `config.OPERATOR_USERS` stays an admin until removed from that list and
+  redeployed. Any admin can, with the owner's rights, change warehouse
+  settings (size, suspend, timeouts, clusters), pause or resume pipes, suspend
+  or resume tasks, disable or re-enable users and set account parameters.
 
 - **The deployment role, SNOW_ACCOUNTADMINS (§1), owns the Streamlit app and
   the OVERWATCH objects.** On this account it is a routine operating role,
@@ -701,7 +754,11 @@ consequences the code accounts for:
   the revokes block accidents, not adversaries; export on a schedule if an
   auditor needs stronger guarantees.
 - `roles.sql` ends with a `SHOW GRANTS ON STREAMLIT` proof block: every
-  grantee should be one of the two roles, and the output says so.
+  grantee should be one of the allowed roles, and the output says so. As of
+  4.610.0 that block still allows the two SNOW_* roles only, while Admin ▸
+  Access ▸ Who can open the app compares the grantees with the four roles the
+  2026-10-05 decision names (so it reports DSA and DTI as missing until the
+  owner's Snowflake-side change lands).
 
 ## 3. Streamlit-in-Snowflake (primary target)
 
@@ -757,7 +814,9 @@ app picks them up on next open.
 `snowflake.yml` defines the app (`streamlit_app.py`, `query_warehouse:
 WH_ALFA_ADMIN`); `environment.yml` pins the Snowflake-channel packages.
 Queries execute with the app owner's rights; USAGE on the Streamlit object
-(two roles only) is the access-control model.
+decides who can open the app (today the two SNOW_* roles `roles.sql` grants;
+see §2 for the 2026-10-05 decision), and the in-app admin check (§2) decides
+who can change things.
 
 ## 4. Local development (dev only)
 

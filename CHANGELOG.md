@@ -1,5 +1,79 @@
 # Changelog
 
+## 4.610.0 - Role-based access: SNOW_PRI_GFR_PRD_ALFA_DSA members are OVERWATCH admins, everyone else gets a two-page read-only view, admins edit alert rules in-app, and V174 watches the new admin role (2026-10-05)
+
+Owner decision 2026-10-05, superseding 2026-07-13's "Access = SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period". The
+owner asked for SNOW_PRI_GFR_PRD_ALFA_DSA to have "admin and full rights" and for SNOW_PRI_GFR_PRD_ALFA_DTI to have
+"view access to all things that don't require admin", and approved this release's spec. The app side ships here.
+**V174** (owner-applied, alone, any time; DEPLOYMENT.md has the note) adds the role to the hourly security alerts.
+**Not in this release:** roles.sql still grants and proves the two SNOW_* roles only. The Snowflake side for DSA and
+DTI (their USAGE on the app and the four-role proof block) is an owner change still to land; until it does, their
+members cannot open the app.
+
+- **Who is an admin.** The five named admins (`config.OPERATOR_USERS`) stay admins with no lookup. A user granted
+  SNOW_PRI_GFR_PRD_ALFA_DSA directly is now an admin too, with full parity: every page (Admin and Ask included),
+  every in-app change, and the account-level levers (disable or re-enable a user, ALTER ACCOUNT SET). A grant of
+  the role to another role is not expanded, so its members stay view-only.
+- **Everyone else gets MONITOR, read-only: Cost Intelligence and Operations.** That covers SNOW_PRI_GFR_PRD_ALFA_DTI
+  members, SNOW_* holders who are not named admins, and a viewer the app cannot identify. DTI is never looked up:
+  the app's USAGE grant decides who can open it. MONITOR lands on Cost Intelligence, and its tables offer no row
+  drill, Case File or rule jump that would lead to a page it cannot open (a structural test enforces this). The four
+  ETL READER pins and the five redundant DBA pins are gone, and a DBA pin is now ignored: only the named list or a
+  direct DSA grant makes an admin.
+- **How membership is checked.** Once per session the app runs `SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA` as its
+  owner and reads the user rows. A good answer is re-checked every 5 minutes; 'Refresh data' re-checks at once.
+- **It fails closed.** If the lookup errors, or lists no users (a privilege gap, never read as "no members"), every
+  DSA member is read-only until it recovers. It retries after 1 minute, writes one APP_ERROR_LOG row per session
+  (page 'Access') and shows "Access check unavailable — read-only until it recovers." in the sidebar. The named admins
+  are unaffected.
+- **Revocation timing.** Before every change, an admin by role is re-checked with a fresh lookup (at most 15 seconds
+  old), so revoking DSA stops their changes within about 15 seconds. Their admin pages go within 5 minutes. A named
+  admin stays one until removed from `config.OPERATOR_USERS` and redeployed.
+- **Trust note.** The app runs every query with its owner's rights, so whoever controls DSA membership (the role's
+  owner, any MANAGE GRANTS holder, or a provisioning system) can create OVERWATCH admins who hold the account-level
+  levers. The owner accepted this delegation.
+- **Audit.** Each viewer's access outcome is logged once per session as an APP_USAGE event `access_resolved`
+  (SECTION = allowlist / role / default / lookup_failed / unverified), so a change of outcome is on the record too.
+- **The executor enforces it.** Every INSERT / UPDATE / DELETE / MERGE / CALL on DBA_MAINT_DB.OVERWATCH now needs admin
+  entitlement at the query layer, not only a hidden button. The exception is the viewer's own rows: USER_PREFS,
+  USER_WATCHLIST, APP_USAGE and APP_QUERY_TELEMETRY, matched on the exact object name, so a name that merely contains
+  one is refused. Query cancel and the ALTER levers stay admin-only.
+- **Admin ▸ Access (new, read-only).** Shows your resolved access and how it was decided, the DSA lookup status (OK
+  with its direct-member count, failed, or unverified), its direct members (with names, and whether each is also a
+  named admin), its role grantees flagged "nested, not expanded", and the named admins. **Who can open the app**
+  compares the app's USAGE grantees (SHOW GRANTS ON STREAMLIT) with the four access roles: a missing role warns, any
+  other grantee is an error, an empty answer is unverified. Until the owner's Snowflake-side change lands it reports
+  DSA and DTI as missing. **Re-check now** clears only your own session's answer; it cannot shorten another viewer's
+  wait.
+- **Alerts ▸ Rules: admins change a rule's threshold and Enabled in the app.** Type the RULE_ID to confirm. The
+  UPDATE is a compare-and-set judged by Snowflake's row count: if the rule changed since the page read it, nothing
+  changes and the receipt says "edited elsewhere". Each applied change appends an ALERT_AUDIT RULE_EDIT row (who,
+  old -> new, the UPDATE), listed under the new **Recent rule changes**. Thresholds are validated (no negative, NaN
+  or infinity, at most 4 decimals, at most 1,000,000). Rules whose scan never reads a threshold offer Enabled only,
+  and switching off or re-tuning a SECURITY rule warns first. Everyone else keeps the generate-only SQL preview.
+- **Captions name who can act.** The "who may do this" captions on Alerts, Operations ▸ Emergency, Optimization &
+  Savings and Admin ▸ Settings now name the named admins and DSA members, instead of the allowlist alone or a SNOW_*
+  role that grants nothing in-app. Captions about running generate-only SQL in a worksheet as SNOW_* are unchanged.
+- **Security counts DSA as an admin role.** Privileged role holders and both new-network-login panels now include
+  direct holders of SNOW_PRI_GFR_PRD_ALFA_DSA; DTI joins no admin tier. These panels are labelled "privileged", not
+  "break-glass" (the auditor pack sheet is now privileged_role_holders.csv), and note that GRANTS_TO_USERS lags up to
+  about 2 hours while the in-app check is live. The admin MFA and admin network-policy checks still cover the five
+  elevated roles only; their help names DSA as not checked (widening them is a pending owner decision).
+- **V174 (owner-applied; guards on V173).** Re-derives SP_ALERT_SCAN from V173, byte-identical except that
+  SNOW_PRI_GFR_PRD_ALFA_DSA is appended to the three admin-role lists: [27] SEC_ADMIN_GRANT (a direct DSA grant
+  raises one HIGH event), [26] SEC_LOGIN_TAKEOVER (a takeover of a direct holder is CRITICAL at any hour) and [18]
+  SEC_NEW_ADMIN_NETWORK (a holder's login from a network unseen in 90 days raises). It refreshes the SEC_ADMIN_GRANT
+  rule name only while it still equals its V162 seed. The 14-arm tally, RETURN labels, every other arm and
+  SP_ALERT_SCAN_DAILY are unchanged; nothing runs at apply time. First run: the next hourly scan raises, for DSA only,
+  what the arms' windows hold (grants from the last 26h, holders' new networks first seen in the last 24h, and a
+  CRITICAL twin of a holder's takeover WARN from the last 24h). A WARN already resolved or snoozed re-opens as a fresh
+  CRITICAL that routes and escalates. Read-only PREFLIGHT P174.1-P174.4 and PART B V174.1-V174.3 come with it. The
+  validate floor is V001..V174.
+- **Locks.** New tests cover the access resolution, memo timings and fail-closed paths, the executor's exact-target
+  matrix, the Admin ▸ Access tab, the rule editor, the security tiers (tied to `config`'s access roles), V174
+  (normalize-to-V173 with teeth, both Snowflake-only static locks, an executed harness) and the V174 run docs. A strict
+  xfail ties roles.sql's proof block to the app's grant rule; it flips when the owner's roles.sql change lands.
+
 ## 4.609.1 - Hotfix: V173 (the hourly new-admin-network alert compiles again, the nightly idle alert no longer divides by zero) and the escalation email's delivery objects survive a teardown (2026-10-02)
 
 Three production failures after the V162-V172 apply. Two alert rules failed; both fixes land when the owner applies

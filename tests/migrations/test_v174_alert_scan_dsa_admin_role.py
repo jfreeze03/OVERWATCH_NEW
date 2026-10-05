@@ -290,6 +290,21 @@ def test_v174_in_expected_migrations():
         assert phrase in text, phrase
 
 
+def test_v174_run_docs_list_it_with_a_short_apply_note():
+    """Law 5: both run lists name V174, and DEPLOYMENT's apply note carries the order, the PREFLIGHT / PART B steps,
+    the first-run CRITICAL re-raise (a WARN already resolved or snoozed re-opens as a fresh CRITICAL) and the
+    rollback pointer."""
+    for rel in ("DEPLOYMENT.md", "README.md"):
+        assert f"snowflake/migrations/{_NAME}" in read(rel), rel
+    dep = read("DEPLOYMENT.md")
+    block = dep[dep.index("> **V174 ("):]
+    block = block[:block.index("\n\n")]
+    note = " ".join(" ".join(ln.lstrip("> ") for ln in block.splitlines()).split())
+    for phrase in ("V174 alone, any time", "no repairs", "PREFLIGHT P174.1", "P174.3", "PART B V174.1", "V174.2",
+                   "V174.3", "resolved or snoozed", "Rolling back V174"):
+        assert phrase in note, phrase
+
+
 # -- lineage + round 13 ------------------------------------------------------------------------------------
 def _assert_v174_lineage(texts: dict[int, str]) -> None:
     """Bounded at 174: a later re-derivation must not turn it red."""

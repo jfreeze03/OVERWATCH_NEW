@@ -139,3 +139,16 @@ def test_admin_role_holders_docstring_tracks_the_access_model():
     assert _DSA in doc and "2026-10-05" in doc
     assert "the only roles with access are SNOW_ACCOUNTADMINS / SNOW_SYSADMINS" not in doc
 
+
+def test_security_tiers_track_the_access_roles():
+    """v4.610.0 integration (grants review issue 6): the security tiers follow app.config's access roles, so renaming
+    or swapping either access role cannot leave the admin-holder panels, the alert parity twin or the view-only
+    exclusion behind. DSA is an admin tier (holder panels, last in the V174 alert list, the one role the ELEVATED
+    checks skip); DTI is in no tier."""
+    from app import config
+    assert config.ADMIN_ACCESS_ROLE in security_sql.ADMIN_HOLDER_ROLES
+    assert security_sql.ALERT_ADMIN_ROLES[-1] == config.ADMIN_ACCESS_ROLE
+    assert security_sql.ADMIN_HOLDERS_OUTSIDE_ELEVATED == (config.ADMIN_ACCESS_ROLE,)
+    for tier in (security_sql.ADMIN_HOLDER_ROLES, security_sql.ALERT_ADMIN_ROLES, security_sql.ELEVATED_ROLES,
+                 security_sql.BREAK_GLASS_ROLES, security_sql.REACHES_ADMIN_ROLES):
+        assert config.VIEW_ACCESS_ROLE not in tier, tier

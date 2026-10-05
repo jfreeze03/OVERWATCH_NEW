@@ -70,6 +70,9 @@ def test_new_admin_network_arm_keeps_its_own_narrower_list():
     # ACCOUNTADMIN): every role those panels count as an admin holder, the alert watches too -- dropping one from the
     # arm (or adding one to the panels alone) fails here instead of silently diverging the alert from the panel
     assert set(security_sql.ADMIN_HOLDER_ROLES) <= set(_in_list(arm18)) - {"ACCOUNTADMIN"}
+    # v4.610.0 integration (V174 review issue 6): with p610-grants merged, [18] is exactly ACCOUNTADMIN followed by the
+    # panels' own list, in order -- a role added to either side alone fails here
+    assert _in_list(arm18) == ("ACCOUNTADMIN", *security_sql.ADMIN_HOLDER_ROLES)
 
 
 def test_the_parity_check_has_teeth():

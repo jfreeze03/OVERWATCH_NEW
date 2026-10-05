@@ -187,8 +187,8 @@ savings_rollup, unread_maintenance).
 - User/database spend: allocated from query elapsed-time share (or
   `QUERY_ATTRIBUTION_HISTORY` when present) and always labeled **allocated**.
 - Rates come from `SETTINGS` (seeded $3.68 compute / $2.20 Cortex /
-  $23 TB-mo). The Admin page edits them (viewers on the `OPERATOR_USERS`
-  allowlist, type-to-confirm); code ships matching defaults only as offline
+  $23 TB-mo). The Admin page edits them (OVERWATCH admins: the `OPERATOR_USERS`
+  allowlist or direct SNOW_PRI_GFR_PRD_ALFA_DSA members, type-to-confirm); code ships matching defaults only as offline
   fallback.
 - All conversion math lives in `app/logic/formulas.py` and is regression-tested.
 
@@ -196,8 +196,10 @@ savings_rollup, unread_maintenance).
 
 - **The app runs owner's-rights under Streamlit-in-Snowflake.** Every viewer's
   statements execute as the app owner. Snowflake RBAC decides who can open the
-  app (USAGE on the Streamlit object: SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, per
-  `roles.sql`). It does NOT limit data per viewer: every viewer reads with the
+  app (USAGE on the Streamlit object: today SNOW_ACCOUNTADMINS + SNOW_SYSADMINS,
+  per `roles.sql`; the owner decision of 2026-10-05 names four roles, adding
+  SNOW_PRI_GFR_PRD_ALFA_DSA and SNOW_PRI_GFR_PRD_ALFA_DTI, whose Snowflake side
+  is a pending owner change). It does NOT limit data per viewer: every viewer reads with the
   owner's privileges. Viewer identity comes from `st.user`
   (`app/core/identity.py`).
 - Company scoping (ALFA vs Trexis) is a shared-account *convenience filter*,
@@ -206,14 +208,26 @@ savings_rollup, unread_maintenance).
   isolation mechanism and the docs never claim it is.
 - User classification: `TRXS_*` → Trexis; explicit override `KEBARR1` → ALFA
   (holds both companies' roles, treated as ALFA by policy).
-- Page visibility depends on the viewer's username (`config.VIEWER_PROFILES`;
-  an identified viewer not in the map gets READER). It filters *pages*, not
-  data. Off-SiS, with no viewer identity, it falls back to the role → profile
-  map.
-- Operator actions are gated at each call site by the viewer-username allowlist
-  `config.OPERATOR_USERS` (`session.is_operator()`). The executors re-check the
-  owner-privileged statements themselves: the `ALTER WAREHOUSE/PIPE/TASK/USER`
-  and `ALTER ACCOUNT SET` levers (`query._PRIVILEGED_PREFIXES`) and query cancel.
+- Page visibility and the admin gate depend on the viewer
+  (`session.viewer_access`, owner decision 2026-10-05): a viewer on
+  `config.OPERATOR_USERS` is an admin with no lookup (source `allowlist`); a
+  direct USER grantee of SNOW_PRI_GFR_PRD_ALFA_DSA, read live with
+  `SHOW GRANTS OF ROLE` run as the owner, is an admin with full parity
+  (source `role`; a grant to a role is not expanded); everyone else, and an
+  unidentified SiS viewer, gets the read-only MONITOR profile (Cost
+  Intelligence + Operations; source `default`). The lookup is memoized per
+  session (re-checked after 300 s; a failure, `lookup_failed`, or an empty USER
+  set, `unverified`, is retried after 60 s) and fails closed. It filters
+  *pages*, not data. Off-SiS, with no viewer identity, it falls back to the
+  role → profile map.
+- Admin actions are gated at each call site by `session.is_operator()`. The
+  executors re-check entitlement themselves (`query._entitlement_refusal`) for
+  the `ALTER WAREHOUSE/PIPE/TASK/USER` and `ALTER ACCOUNT SET` levers
+  (`query._PRIVILEGED_PREFIXES`), query cancel, and every
+  INSERT/UPDATE/DELETE/MERGE/CALL on OVERWATCH except the viewer's own
+  self-service rows (USER_PREFS, USER_WATCHLIST, APP_USAGE,
+  APP_QUERY_TELEMETRY, matched as the exact object token); a role-sourced
+  admin is re-verified live at write time (memo at most 15 s).
   Operator and UI writes go through the executors (`query.execute_statement`,
   `execute_statement_async`, `execute_action`), whose allow-list admits one
   statement aimed at OVERWATCH objects or a lever. Two paths skip that
@@ -289,7 +303,8 @@ Snowpark binds would not remove the display/require-review path.
 
 **Hardcoded company scope instead of row access policies.** Two companies,
 one account, scope is convenience not a security boundary (the Streamlit
-grant and the `OPERATOR_USERS` / `VIEWER_PROFILES` allowlists are). RAPs
+grant and the in-app admin check, `OPERATOR_USERS` plus direct
+SNOW_PRI_GFR_PRD_ALFA_DSA members, are). RAPs
 cannot bind SNOWFLAKE.ACCOUNT_USAGE itself, and policy sprawl across derived
 objects buys admin burden without closing the actual exposure. Revisit on a
 compliance driver.

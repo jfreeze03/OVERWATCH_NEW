@@ -52,9 +52,9 @@ _TWIN = "reads only columns a registered canary already compiles (R2-062/R2-064 
 # reviewer accepts; a _TWIN reason is checked mechanically (test_twins_read_only_columns_a_canary_compiles).
 CANARY_EXEMPT: dict[str, dict[str, str]] = {
     "access_sql": {
-        "show_grants_of_role_sql": ("SHOW GRANTS OF ROLE (the v4.610.0 admin-access lookup): EXPLAIN cannot "
+        "show_grants_of_role_sql": ("SHOW GRANTS OF ROLE (the 2026-10-05 admin-access lookup): EXPLAIN cannot "
                                     "compile a SHOW; a failure is logged and shown in the sidebar instead"),
-        "show_grants_on_app_sql": ("SHOW GRANTS ON STREAMLIT (Admin ▸ Access, v4.610.0): EXPLAIN cannot compile "
+        "show_grants_on_app_sql": ("SHOW GRANTS ON STREAMLIT (Admin ▸ Access, 2026-10-05): EXPLAIN cannot compile "
                                    "a SHOW; a failed or empty answer renders on the tab as unavailable"),
     },
     "cost_sql": {
