@@ -77,8 +77,11 @@ from app.ui.pages import (  # noqa: E402
 # active-rail shows position, and each page's header carries its SVG icon.
 # This removes the inconsistent emoji CoCo flagged, cleanly.
 
-# v4.610.0: the sidebar caption while the admin-role lookup cannot answer (session.viewer_access).
-ACCESS_CHECK_UNAVAILABLE = "Access check unavailable — read-only until it recovers."
+# v4.610.0: the sidebar caption while the admin-role lookup cannot answer (session.viewer_access). Every
+# viewer not on OPERATOR_USERS sees it: without the lookup the app cannot tell a DSA member from a DTI one.
+# So it says who is held read-only (admins) and never promises a view-only viewer changes on recovery
+# (holistic 4.610 #2/#13).
+ACCESS_CHECK_UNAVAILABLE = "Admin access check unavailable — OVERWATCH admins are read-only until it recovers."
 
 _RENDERERS = {
     "Overview": overview.render,
@@ -120,7 +123,8 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
                 'color:var(--ow-ink-mute);border:1px solid var(--ow-ink-mute)">'
                 '🔒 Read-only</div>', unsafe_allow_html=True)
             # v4.610.0: the admin-role lookup failed or listed nobody, so an admin by role is
-            # read-only for now (fail closed). Say why instead of silently hiding their controls.
+            # read-only for now (fail closed). Say why instead of silently hiding their controls. A
+            # view-only viewer sees it too (membership is unknown meanwhile); the wording holds for both.
             if access_source() in ACCESS_UNAVAILABLE_SOURCES:
                 st.caption(ACCESS_CHECK_UNAVAILABLE)
         if connected:

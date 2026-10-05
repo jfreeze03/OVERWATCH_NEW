@@ -74,9 +74,11 @@ things, the account-level levers included. Everyone else who can open the app (S
 SNOW_* holders not on the allowlist, an unidentified viewer) gets the read-only **MONITOR** profile: Cost
 Intelligence and Operations only, landing on Cost Intelligence; its tables show no row drill, Case File or rule
 jump that would lead to a page it cannot open. The check fails closed: a failed lookup or an empty member list
-means read-only, retried after 1 minute, with the sidebar caption **"Access check unavailable — read-only until it
-recovers."** Each viewer and outcome writes one APP_USAGE event **`access_resolved`** per session (SECTION =
-allowlist / role / default / lookup_failed / unverified).
+means read-only, retried after 1 minute, then 2 and 4, then every 5 minutes while it keeps failing, with the sidebar
+caption **"Admin access check unavailable — OVERWATCH admins are read-only until it recovers."** (every viewer not on
+the allowlist sees it, since membership is unknown meanwhile). Membership is an exact, case-sensitive match of the
+viewer's username with the grantee name. Each viewer and outcome writes one APP_USAGE event **`access_resolved`**
+per session (SECTION = allowlist / role / default / lookup_failed / unverified).
 
 **Anomaly / robust-z.** Spikes use a **median/MAD modified z-score** (not mean/std, which a
 spike inflates to hide itself). A flag needs `|z| ≥ 3.5` **and** materiality (≥ $50 on the
@@ -945,15 +947,15 @@ Every tunable the app reads (rates, budgets, platform-score/governance weights, 
 
 *Columns:* **KEY** — Setting name (mart_sql.settings -> SETTINGS.KEY).; **VALUE** — Stored value as a STRING (numbers/dates are string-typed in SETTINGS).; **UPDATED_AT** — Timestamp of the last edit (SETTINGS.UPDATED_AT), account-time.; **Updated by** — SETTINGS.UPDATED_BY resolved to a display name by with_user_names().
 
-### Access
-v4.610.0 (owner decision 2026-10-05), read-only: who can open OVERWATCH and who can change things in it. Its one side effect is **Re-check now**, which clears only your own session's access answer and runs one fresh lookup (it cannot shorten another viewer's 5m / 1m window).
+### App access
+v4.610.0 (owner decision 2026-10-05), read-only: who can open OVERWATCH and who can change things in it (section slug `app-access`; Security keeps `access`). Its one side effect is **Re-check now**, which clears only your own session's access answer and runs one fresh lookup (it cannot shorten another viewer's 5m window, or the retry of a failed lookup: 1m, doubling to 5m).
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|
 | **Viewer / Profile / Can change things / Resolved** | Your username, profile and its pages, whether you are an OVERWATCH admin, and how long ago the answer was resolved (Central clock in the help). | session.access_info(); source label = named admin (allowlist) / direct SNOW_PRI_GFR_PRD_ALFA_DSA member (role) / view-only default / lookup failed / unverified. | text | app.core.session.access_info |
 | **Lookup OK: N direct user members of SNOW_PRI_GFR_PRD_ALFA_DSA** | The live DSA membership lookup: OK with its USER count, failed, or unverified (an empty answer is a privilege gap, never "no members"). | access_review.roster_summary over SHOW GRANTS OF ROLE rows with granted_to = USER; granted_to = ROLE rows are listed as nested, not expanded. | count | access_sql.show_grants_of_role_sql (canary-exempt: SHOW) |
 | **DSA members table** | Direct USER members, with display names and whether each is also a named admin; role grantees flagged "No: nested, not expanded". | with_user_names over the USER rows; ALSO_NAMED_ADMIN = user in config.OPERATOR_USERS. | rows | session.access_info(roster=True) |
-| **Who can open the app** | The app's USAGE grantees compared with the four access roles of the 2026-10-05 decision: missing roles warn (re-run roles.sql, -20012), any other grantee is an error (REVOKE it, -20011), an empty answer is unverified. As of 4.610.0 roles.sql still grants only the two SNOW_* roles, so DSA and DTI read as missing until the owner's Snowflake-side change lands. | access_review.app_grant_review: a USAGE row passes only for granted_to = ROLE and a name in config.APP_ACCESS_ROLES; the OWNERSHIP row names the owning role. | rows | access_sql.show_grants_on_app_sql -> SHOW GRANTS ON STREAMLIT (tier live, canary-exempt) |
+| **Who can open the app** | The app's USAGE grantees compared with the four access roles of the 2026-10-05 decision. A missing role roles.sql grants warns "re-run roles.sql" (-20012); a missing role it does not grant yet reads "not granted by roles.sql yet (owner-side change pending)", and one that holds USAGE anyway warns that roles.sql's current proof block raises -20011 on its next run. Any other grantee is an error (REVOKE it; -20011 is promised only for a ROLE grantee), an empty answer is unverified. As of 4.610.0 roles.sql still grants only the two SNOW_* roles, so DSA and DTI read as pending until the owner's Snowflake-side change lands. | access_review.app_grant_review: a USAGE row passes only for granted_to = ROLE and a name in config.APP_ACCESS_ROLES; the remedy splits on config.ROLES_SQL_APP_GRANTEES (pinned to roles.sql by test); the OWNERSHIP row names the owning role. | rows | access_sql.show_grants_on_app_sql -> SHOW GRANTS ON STREAMLIT (tier live, canary-exempt) |
 
 ### Migrations & freshness
 Contract check of applied schema migrations against what this build expects, the optional Flyway ledger, and per-source loader freshness with a stale-source diagnoser.

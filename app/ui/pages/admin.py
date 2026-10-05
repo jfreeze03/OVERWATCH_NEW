@@ -14,7 +14,6 @@ import pandas as pd
 import streamlit as st
 
 from app.config import (
-    ACCESS_RETRY_S,
     ACCESS_TTL_S,
     ADMIN_ACCESS_HINT,
     ADMIN_ACCESS_ROLE,
@@ -22,6 +21,7 @@ from app.config import (
     APP_WAREHOUSE,
     DEFAULT_SETTINGS,
     ROLE_ADMIN_ACCOUNT_LEVERS,
+    ROLES_SQL_APP_GRANTEES,
     THRESHOLDS,
     VIEW_ACCESS_ROLE,
     VIEWER_UNKNOWN_PROFILE,
@@ -1151,7 +1151,7 @@ def _settings_tab(is_operator: bool) -> None:
                    "Anyone can copy the SQL for review.")
 
 
-# v4.610.0 Admin ▸ Access: the 'Re-check now' receipt, shown once on the rerun that follows the click (and
+# v4.610.0 Admin ▸ App access: the 'Re-check now' receipt, shown once on the rerun that follows the click (and
 # dropped unseen after _RECHECK_RECEIPT_MAX_S, e.g. when the re-check moved the clicker off Admin).
 _RECHECK_RECEIPT_KEY = "_adm_access_recheck_receipt"
 _RECHECK_RECEIPT_MAX_S = 60.0
@@ -1163,9 +1163,13 @@ def _access_tab() -> None:
     Read-only. Its one side effect is 'Re-check now', which forgets THIS viewer's own access memo and
     resolves it again with one fresh lookup (session.recheck_access). It never touches another viewer's
     session (the warehouse runtime gives each viewer their own app instance) and writes nothing."""
+    pending = access_review.pending_roles()
     panel_help(
         "Who can open OVERWATCH, and who can change things in it. Opening the app is Snowflake's USAGE grant "
-        "on the Streamlit, and exactly four roles may hold it. Changing things is decided in the app, per "
+        "on the Streamlit: the 2026-10-05 decision names four roles to hold it, and snowflake/roles.sql grants "
+        f"{', '.join(ROLES_SQL_APP_GRANTEES)} today"
+        + (f" ({', '.join(pending)}: an owner-side change still pending)" if pending else "")
+        + ". Changing things is decided in the app, per "
         f"viewer: the named admins (config OPERATOR_USERS) and DIRECT user members of {ADMIN_ACCESS_ROLE} "
         "are admins, and everyone else who can open the app gets the view-only pages. Red here means a check "
         "could not answer, which is never read as 'nobody'."
@@ -1217,7 +1221,7 @@ def _access_tab() -> None:
         st.caption(
             "Re-check now clears only your own session's access memo and runs one fresh lookup. It cannot "
             "shorten anyone else's wait: each viewer's session re-resolves on its own within "
-            f"{humanize_duration(ACCESS_TTL_S)} ({humanize_duration(ACCESS_RETRY_S)} after a failed lookup), "
+            f"{humanize_duration(ACCESS_TTL_S)} (a failed lookup is retried {access_review.retry_schedule()}), "
             "and every in-app change by an admin-by-role first re-verifies the membership (an answer at most "
             f"{humanize_duration(WRITE_RECHECK_S)} old).")
     if receipt:
@@ -1237,7 +1241,8 @@ def _access_tab() -> None:
     users = tuple(info.get("admin_users") or ())
     if summary["state"] == "ok" and users:
         members = pd.DataFrame({"USER_NAME": list(users),
-                                "ALSO_NAMED_ADMIN": ["Yes" if u in allowlist else "No" for u in users]})
+                                # the allowlist folds case by design (hand-typed); roster names are exact
+                                "ALSO_NAMED_ADMIN": ["Yes" if str(u).upper() in allowlist else "No" for u in users]})
         styled_table(with_user_names(members, _PAGE, user_col="USER_NAME", display_col="Name"))
     nested = tuple(info.get("nested_roles") or ())
     if nested:
@@ -1267,25 +1272,47 @@ def _access_tab() -> None:
         else:
             if review["status"] == "ok":
                 empty_state("clean", "Exactly the four access roles hold USAGE on the app; no other grantee.")
+            if review["ahead"]:
+                # holistic 4.610 #0/#7: a role roles.sql does not grant yet holds USAGE (a hand-made grant). The
+                # page is right that it may; today's roles.sql is not, so say what its next run will do.
+                ahead = review["ahead"]
+                st.warning(f"{', '.join(ahead)} {'holds' if len(ahead) == 1 else 'hold'} USAGE on the app, but "
+                           "roles.sql does not grant "
+                           f"{'it' if len(ahead) == 1 else 'them'} yet (owner-side change pending): its current "
+                           "proof block raises -20011 on its next run until it is updated.")
             if review["missing"]:
-                # OWNERSHIP implies every privilege: an owning role still opens the app without the explicit
-                # USAGE grant roles.sql requires, so only the non-owners are locked out.
+                # holistic 4.610 #0: the remedy is split on what roles.sql grants today. Re-running roles.sql
+                # restores only its own grants; any other access role is the owner's pending change.
+                # OWNERSHIP implies every privilege: an owning role still opens the app without its explicit
+                # USAGE grant, so only the non-owners are locked out.
                 locked_out = [r for r in review["missing"] if r not in review["owners"]]
                 owning = [r for r in review["missing"] if r in review["owners"]]
-                parts = [f"No explicit USAGE grant for {', '.join(review['missing'])}: roles.sql requires one for "
-                         "each access role. Re-run snowflake/roles.sql's Streamlit grants (a `snow streamlit "
-                         "deploy --replace` or CREATE OR REPLACE STREAMLIT can drop them; the proof block raises "
-                         "-20012)."]
+                parts = []
+                if review["missing_rerun"]:
+                    parts.append(f"No explicit USAGE grant for {', '.join(review['missing_rerun'])}: roles.sql "
+                                 "grants one to each of them. Re-run snowflake/roles.sql's Streamlit grants (a "
+                                 "`snow streamlit deploy --replace` or CREATE OR REPLACE STREAMLIT can drop them; "
+                                 "its proof block raises -20012 meanwhile).")
+                if review["missing_pending"]:
+                    pend = review["missing_pending"]
+                    one = len(pend) == 1
+                    parts.append(f"No explicit USAGE grant for {', '.join(pend)}: not granted by roles.sql yet "
+                                 "(owner-side change pending), so re-running it adds nothing here; roles.sql's "
+                                 "current proof block raises -20011 on its next run once "
+                                 f"{'this role holds' if one else 'these roles hold'} USAGE.")
                 if locked_out:
-                    parts.append(f"Until then, members of {', '.join(locked_out)} cannot open the app.")
+                    parts.append(f"Until they hold it, members of {', '.join(locked_out)} cannot open the app "
+                                 "through those roles.")
                 if owning:
                     parts.append(f"{', '.join(owning)} {'owns' if len(owning) == 1 else 'own'} the app, so "
                                  f"{'its' if len(owning) == 1 else 'their'} members still open it.")
                 st.warning(" ".join(parts))
             if review["unexpected"]:
+                # roles.sql's current block counts only granted_to = ROLE rows, so -20011 is promised for those
+                role_kind = any(u.startswith("ROLE ") for u in review["unexpected"])
                 st.error(f"USAGE granted outside the four access roles: {', '.join(review['unexpected'])}. "
-                         "REVOKE it: anyone holding it can open the app and gets the view-only pages "
-                         "(roles.sql's proof block raises -20011).")
+                         "REVOKE it: anyone holding it can open the app and gets the view-only pages"
+                         + (" (roles.sql's proof block raises -20011 on a ROLE grantee)." if role_kind else "."))
             styled_table(pd.DataFrame(review["table"]))
             if review["owners"]:
                 st.caption(f"OWNERSHIP: {', '.join(review['owners'])}. Every viewer's SQL runs with the owner "
@@ -1295,10 +1322,16 @@ def _access_tab() -> None:
 
     section_header("How access works", "", "admin")
     view_pages = " and ".join(access_review.profile_pages(VIEWER_UNKNOWN_PROFILE)) or "—"
+    managed = ", ".join(ROLES_SQL_APP_GRANTEES)
     st.markdown("\n".join([
-        "- **Opening the app**: only the four roles above hold USAGE on it. `snowflake/roles.sql` grants them, "
-        "and its proof block fails (-20011 / -20012) on any other grantee or a missing one. Re-run roles.sql "
-        "after every `snow streamlit deploy --replace` until a redeploy is confirmed to keep the grants.",
+        "- **Opening the app**: a role that holds USAGE on it opens it; the 2026-10-05 decision names the four "
+        f"roles above. `snowflake/roles.sql` grants and proves {managed} today: its proof block fails on a "
+        "missing one (-20012) and on any other ROLE grantee (-20011). Re-run roles.sql after every "
+        "`snow streamlit deploy --replace` until a redeploy is confirmed to keep the grants."
+        + (f" {', '.join(pending)}: not granted by roles.sql yet (owner-side change pending). Until each of "
+           "them holds USAGE on the database, schema and app, their members open the app only through another "
+           "role that holds it; once they do, roles.sql's current proof block raises -20011 on its next run."
+           if pending else ""),
         "- **Admins** (every page, every in-app change): the named admins in config `OPERATOR_USERS`, and DIRECT "
         f"user members of `{ADMIN_ACCESS_ROLE}`. A role granted `{ADMIN_ACCESS_ROLE}` is not expanded: its "
         "members are not admins.",
@@ -1307,14 +1340,18 @@ def _access_tab() -> None:
         f"{view_pages}. No changes.",
         f"- **Make someone an admin**: `GRANT ROLE {ADMIN_ACCESS_ROLE} TO USER <username>;` It applies to their "
         f"next session, or within {humanize_duration(ACCESS_TTL_S)} in an open one. Whoever can grant this role "
-        "can create an OVERWATCH admin.",
+        "can create an OVERWATCH admin."
+        + (" Membership makes an admin only of someone who can open the app: until roles.sql grants "
+           f"{ADMIN_ACCESS_ROLE} (pending), that means a member who also holds another role with USAGE on it."
+           if ADMIN_ACCESS_ROLE in pending else ""),
         f"- **Remove an admin**: `REVOKE ROLE {ADMIN_ACCESS_ROLE} FROM USER <username>;` Their in-app changes stop "
         f"within {humanize_duration(WRITE_RECHECK_S)} (every change re-verifies); their pages follow within "
         f"{humanize_duration(ACCESS_TTL_S)}. A named admin in config OPERATOR_USERS stays an admin (no lookup) "
         "until removed from that allowlist and redeployed.",
         "- **When the lookup fails or lists nobody**: admins-by-role are read-only until it recovers (it fails "
-        "closed, never open), the sidebar says 'Access check unavailable', and it retries every "
-        f"{humanize_duration(ACCESS_RETRY_S)}. The named admins are unaffected.",
+        "closed, never open), every non-admin's sidebar says 'Admin access check unavailable' (the app cannot "
+        f"tell who is a member meanwhile), and it is retried {access_review.retry_schedule()} while it keeps "
+        "failing. The named admins are unaffected.",
     ]))
 
 
@@ -2629,7 +2666,7 @@ def render() -> None:
     is_operator = _is_operator()
     _context_section()
     section = lazy_sections(
-        ["Settings", "Access", "Migrations & freshness", "Setup progress", "Metrics", "App self-cost",
+        ["Settings", "App access", "Migrations & freshness", "Setup progress", "Metrics", "App self-cost",
          "Performance", "Canary", "Errors & telemetry"], key="adm_section")
     section_filter_contract(
         f,
@@ -2638,7 +2675,7 @@ def render() -> None:
     )
     if section == "Settings":
         _settings_tab(is_operator)
-    elif section == "Access":
+    elif section == "App access":     # holistic 4.610 #12: 'access' is Security's slug; ?section= is shared
         _access_tab()
     elif section == "Migrations & freshness":
         _migrations_tab()

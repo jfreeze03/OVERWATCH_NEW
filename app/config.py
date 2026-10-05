@@ -329,27 +329,54 @@ OPERATOR_USERS: tuple[str, ...] = ("H21427", "E22292", "KEBARR1", "CLROY", "N225
 
 # ---------------------------------------------------------------------------
 # Role-based app access (v4.610.0, owner decision 2026-10-05, superseding the 2026-07-13
-# "SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period"). Exactly four roles hold USAGE on the app
-# (snowflake/roles.sql pins the set): the two SNOW_* roles, ADMIN_ACCESS_ROLE and VIEW_ACCESS_ROLE.
+# "SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period"). The decision names four roles to hold USAGE on the
+# app: the two SNOW_* roles, ADMIN_ACCESS_ROLE and VIEW_ACCESS_ROLE (APP_ACCESS_ROLES, the target set).
+# snowflake/roles.sql grants and proves only ROLES_SQL_APP_GRANTEES today: the DSA/DTI side is a pending
+# owner change (DEPLOYMENT.md section 2; the strict xfail in tests/test_admin_access_tab.py), and until it
+# lands their members can open the app only through another role that holds USAGE.
 #   * ADMIN_ACCESS_ROLE: a DIRECT user grantee is an OVERWATCH admin -- the DBA page set and every
 #     in-app write, exactly like OPERATOR_USERS. A grant to a ROLE is not expanded (direct users only).
-#   * VIEW_ACCESS_ROLE: never looked up. Only the four roles can open the app, so every identified
+#     Being a member does nothing until the member can open the app.
+#   * VIEW_ACCESS_ROLE: never looked up. Only a role holding USAGE opens the app, so every identified
 #     viewer who is not an admin gets VIEWER_UNKNOWN_PROFILE (MONITOR: two pages, read-only).
 # Whoever can GRANT ADMIN_ACCESS_ROLE can mint an OVERWATCH admin; owner-accepted 2026-10-05.
 # ---------------------------------------------------------------------------
 ADMIN_ACCESS_ROLE = "SNOW_PRI_GFR_PRD_ALFA_DSA"
 VIEW_ACCESS_ROLE = "SNOW_PRI_GFR_PRD_ALFA_DTI"
 APP_ACCESS_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", ADMIN_ACCESS_ROLE, VIEW_ACCESS_ROLE)
+# The APP_ACCESS_ROLES that snowflake/roles.sql grants USAGE on the app TODAY, and the only ones its
+# -20011/-20012 proof block accepts. Admin > App access words a missing role from this split: a role here
+# is re-granted by re-running roles.sql (-20012 while it is missing); any other access role is not granted
+# by roles.sql yet, and the current proof block raises -20011 once it holds USAGE.
+# tests/test_admin_access_tab.py parses roles.sql's GRANT USAGE ON STREAMLIT lines and its proof-block
+# IN-lists and pins them to this tuple, so the owner's four-role roles.sql change must add DSA/DTI here in
+# the same change (and delete the strict xfail there); the in-app wording then flips with it.
+ROLES_SQL_APP_GRANTEES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
 # FULL PARITY (owner 2026-10-05): a role-sourced admin also gets the account-level levers -- ALTER USER
 # (disable / re-enable any user) and ALTER ACCOUNT SET -- exactly like OPERATOR_USERS. False would limit
 # those two levers to the allowlist (query._entitlement_refusal reads this at call time).
 ROLE_ADMIN_ACCOUNT_LEVERS: bool = True
 # Session memo timings (session.viewer_access): a resolved answer is re-resolved after ACCESS_TTL_S; a
-# failed or empty lookup (read-only meanwhile) is retried after ACCESS_RETRY_S; a role-sourced write
-# re-verifies membership with a fresh lookup at most WRITE_RECHECK_S old.
+# failed or empty lookup (read-only meanwhile) is retried after access_retry_s(n) -- ACCESS_RETRY_S after
+# the first failure, doubling with each consecutive one up to ACCESS_TTL_S, so a long outage does not have
+# every open session run SHOW every minute; a role-sourced write re-verifies membership with a fresh lookup
+# at most WRITE_RECHECK_S old.
 ACCESS_TTL_S = 300
 ACCESS_RETRY_S = 60
 WRITE_RECHECK_S = 15
+
+
+def access_retry_s(failures: object) -> int:
+    """Seconds before a failed or empty admin-role lookup is retried, after ``failures`` consecutive ones.
+
+    ACCESS_RETRY_S after the first, doubled for each further consecutive failure, never longer than
+    ACCESS_TTL_S (a healthy answer's re-check). A count below 1 or an unreadable one reads as 1. Pure."""
+    try:
+        n = int(failures)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        n = 1
+    n = min(max(n, 1), 32)      # 2**31 x 60 s is far past the cap; bounds the shift
+    return int(min(ACCESS_TTL_S, ACCESS_RETRY_S * 2 ** (n - 1)))
 # The in-app operator caption: who may change things here.
 ADMIN_ACCESS_HINT = (
     "In-app changes are limited to OVERWATCH admins: the named admin allowlist (config OPERATOR_USERS) "
@@ -362,6 +389,8 @@ def is_operator_user(viewer: str) -> bool:
 
     Case-insensitive; a blank viewer is never an operator (the caller falls back
     to role-based gating for that off-SiS case). Pure so it is unit-testable.
+    The folding is intentional for this HAND-TYPED allowlist (and VIEWER_PROFILES);
+    the ADMIN_ACCESS_ROLE route compares exact names instead (session.role_grant_members).
     """
     name = str(viewer or "").strip().upper()
     if not name:

@@ -2711,10 +2711,12 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
     # The verified / estimated / realization ROI headline is owned by Proof ▸ Proof (the former
     # Decision Studio ROI; same ledger_totals() source + the uncapped SQL run-rate). This tab keeps the
     # operational VERIFY workflow only.
-    st.caption("Verified / estimated / realization totals, and what each saving rests on, live on **Proof**.")
-    # v4.610.0: the view-only MONITOR profile has no Proof, so the doorway renders only where it opens
-    if can_open("Proof") and st.button("Open the proof → Proof", key="savings_roi_link"):
-        request_navigation("Proof", "Proof")
+    # v4.610.0: the view-only MONITOR profile has no Proof, so neither the pointer nor the doorway renders
+    # where it cannot open (holistic 4.610 #14: the caption used to name the page regardless)
+    if can_open("Proof"):
+        st.caption("Verified / estimated / realization totals, and what each saving rests on, live on **Proof**.")
+        if st.button("Open the proof → Proof", key="savings_roi_link"):
+            request_navigation("Proof", "Proof")
     if res.empty:
         empty_state("no_data_yet",
                     "Nothing booked yet — the autobook task fills this as warehouse "

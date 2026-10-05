@@ -688,6 +688,14 @@ block still cover only the two SNOW_* roles: the Snowflake side for DSA and
 DTI is an owner change this release does not make, so until it lands their
 members cannot open the app.
 
+**Hazard until roles.sql is updated:** once DSA or DTI holds USAGE on the
+app, re-running the current `roles.sql` (the apply order above, and the
+re-grant after every deploy) stops at its proof block with -20011 ("access
+is two roles only"), and keeps stopping there until `roles.sql` itself is
+updated for the four roles. That block predates the 2026-10-05 decision: for
+DSA and DTI the error means the block is out of date, not that the grant is
+stray. Admin ▸ App access says the same on the role's row.
+
 **OVERWATCH is an owner's-rights service.** Streamlit-in-Snowflake executes
 every query with the app owner's privileges, not the viewer's role. The
 viewer's identity (`st.user`) decides only which navigation profile they see
@@ -700,18 +708,24 @@ identified viewer in this order:
    `SHOW GRANTS OF ROLE` run as the owner (`granted_to = USER` rows; a grant to
    a role is not expanded): DBA pages + admin with full parity, the
    account-level levers included (source `role`).
-3. Anyone else (a non-DBA `VIEWER_PROFILES` pin, of which none remain; DTI
-   members; SNOW_* holders not on the allowlist): **MONITOR** = Cost
-   Intelligence + Operations, read-only (source `default`). An unidentified SiS
-   viewer also gets MONITOR and is never an admin.
+3. Otherwise read-only (source `default`). A non-DBA `VIEWER_PROFILES` pin
+   (none remain) gets its pinned profile; everyone else (DTI members, SNOW_*
+   holders not on the allowlist) gets **MONITOR** = Cost Intelligence +
+   Operations. A failed or empty lookup (below) gives the same profile, with
+   source `lookup_failed` / `unverified`. An unidentified SiS viewer also gets
+   MONITOR and is never an admin.
 
 The lookup runs once per session, is re-checked after 5 minutes, and FAILS
 CLOSED: an error (source `lookup_failed`) or an empty USER set (`unverified`,
 a privilege gap, never "no members") means read-only, retried after 1 minute,
-with one APP_ERROR_LOG row (page 'Access') and the sidebar caption "Access
-check unavailable". Each viewer and source writes one APP_USAGE
-`access_resolved` event per session. Admin ▸ Access shows the answer, the DSA
-lookup status and the app's USAGE grantees. Two consequences the code
+then 2 and 4, then every 5 minutes while it keeps failing (every open session
+runs it), with one APP_ERROR_LOG row (page 'Access') and the sidebar caption
+"Admin access check unavailable". Every viewer not on the allowlist sees that
+caption, since membership is unknown meanwhile. Membership is an exact,
+case-sensitive match of the viewer's username with SHOW's grantee name. Each
+viewer and source writes one APP_USAGE `access_resolved` event per session.
+Admin ▸ App access shows the answer, the DSA lookup status and the app's
+USAGE grantees. Two consequences the code
 accounts for:
 
 - Viewer identity comes from `st.user` (`app/core/identity.py`), because
@@ -756,9 +770,11 @@ accounts for:
 - `roles.sql` ends with a `SHOW GRANTS ON STREAMLIT` proof block: every
   grantee should be one of the allowed roles, and the output says so. As of
   4.610.0 that block still allows the two SNOW_* roles only, while Admin ▸
-  Access ▸ Who can open the app compares the grantees with the four roles the
-  2026-10-05 decision names (so it reports DSA and DTI as missing until the
-  owner's Snowflake-side change lands).
+  App access ▸ Who can open the app compares the grantees with the four roles
+  the 2026-10-05 decision names (so it reports DSA and DTI as missing, "not
+  granted by roles.sql yet", until the owner's Snowflake-side change lands;
+  `config.ROLES_SQL_APP_GRANTEES` is pinned to roles.sql by test and flips the
+  wording in the same change).
 
 ## 3. Streamlit-in-Snowflake (primary target)
 

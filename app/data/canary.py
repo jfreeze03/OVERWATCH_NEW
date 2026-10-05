@@ -98,7 +98,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # v4.610.0: nor is access_sql.show_grants_of_role_sql, the SHOW GRANTS OF ROLE admin-access lookup
     # session.viewer_access runs once per viewer session (a failure is logged to APP_ERROR_LOG and shown in
     # the sidebar instead); tests/test_canary_coverage.py names the exemption. Likewise
-    # access_sql.show_grants_on_app_sql, Admin ▸ Access's read-only SHOW GRANTS ON STREAMLIT (a failure or an
+    # access_sql.show_grants_on_app_sql, Admin ▸ App access's read-only SHOW GRANTS ON STREAMLIT (a failure or an
     # empty answer renders there as unavailable).
     ("ops.warehouse_timeout_tail", lambda: ops_sql.warehouse_timeout_tail(1, "ALFA")),
     # v4.603 (#33 D1): the alert drawer's one-warehouse impact read for the 'Statement timeout 1h' lever.

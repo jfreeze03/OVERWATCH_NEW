@@ -644,7 +644,7 @@ SOC. **Governance drift score** at top (§6). Sections:
 Settings (edit any key the app reads — `config.DEFAULT_SETTINGS`, incl.
 `DEPLOY_ACTORS` — with typed confirm; a SETTINGS row outside that list is
 flagged "no longer read (safe to delete)") ·
-Access (4.610.0, read-only: your resolved access and how it was decided, the
+App access (4.610.0, read-only: your resolved access and how it was decided, the
 SNOW_PRI_GFR_PRD_ALFA_DSA lookup status — "Lookup OK: N direct user members",
 failed, or unverified, which is a privilege gap and never "no members" — its
 direct members and its not-expanded role grantees, the named admins, and
@@ -1219,16 +1219,19 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 **A page shows "not installed yet."** Admin → Migrations: compare
 SCHEMA_VERSION to the expected set (V001 through the repo tip, admin.py `_EXPECTED_MIGRATIONS`); run what's missing, then roles.sql.
 
-**A SNOW_PRI_GFR_PRD_ALFA_DSA member sees only Cost Intelligence + Operations and the sidebar says "Access check
-unavailable".** The app could not confirm DSA membership and failed closed (read-only, retried every minute; the
-named admins on `config.OPERATOR_USERS` are unaffected). Check APP_ERROR_LOG for PAGE = 'Access' and Admin ▸ Access
-(a named admin can open it). Then, read-only, as SNOW_ACCOUNTADMINS with `USE SECONDARY ROLES NONE`, run
-`SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA`: it must list each member as a `granted_to = USER` row. An error
-or an empty result is a privilege gap of the owner role (not "no members"); how the owner role gets to see the
-role's grants is an owner decision (access design D10). A member granted through another role (a `granted_to =
-ROLE` row) is not expanded and stays view-only by design. A revoke takes effect on writes within about 15 seconds
-and on pages within about 5 minutes (at once after 'Refresh data'); a role admin whose membership cannot be
-confirmed at write time (revoked, failed or empty lookup) is refused.
+**A SNOW_PRI_GFR_PRD_ALFA_DSA member sees only Cost Intelligence + Operations and the sidebar says "Admin access
+check unavailable".** The app could not confirm DSA membership and failed closed (read-only, retried after 1
+minute, then 2 and 4, then every 5 minutes while it keeps failing; every viewer not on the allowlist sees the same
+caption meanwhile, and the named admins on `config.OPERATOR_USERS` are unaffected). Check APP_ERROR_LOG for PAGE =
+'Access' and Admin ▸ App access (a named admin can open it). Then, read-only, as SNOW_ACCOUNTADMINS with `USE
+SECONDARY ROLES NONE`, run `SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA`: it must list each member as a
+`granted_to = USER` row. An error or an empty result means the owner role cannot see the role's grants (a
+privilege gap, not "no members"). Letting the owner role see them is an owner-side Snowflake change that this
+release does not make or prescribe; until it is made, only the named admins can change things. A member granted
+through another role (a `granted_to = ROLE` row) is not expanded and stays view-only by design, and the match is
+exact: a username differing from the grantee name only by case is a different user. A revoke takes effect on
+writes within about 15 seconds and on pages within about 5 minutes (at once after 'Refresh data'); a role admin
+whose membership cannot be confirmed at write time (revoked, failed or empty lookup) is refused.
 
 **Everything is stale.** `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` (or Admin ▸ Migrations &
 freshness ▸ Task health) —

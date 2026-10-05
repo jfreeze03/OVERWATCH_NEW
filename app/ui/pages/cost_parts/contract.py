@@ -15,6 +15,7 @@ import streamlit as st
 
 from app.core.query import run
 from app.core.result import QueryResult, is_setup_absence
+from app.core.state import can_open
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, security_sql
 from app.logic import contract_planner, steering
 from app.logic.forecast import contract_pace
@@ -288,8 +289,10 @@ def _year_projection_strip(settings: dict) -> None:
          "help": "Straight-line: YTD billed credits + today's prorated remainder + "
                  f"trailing-30d daily burn x {days_left} days remaining (early in a "
                  "year the burn basis is YTD itself). AI/Cortex credits price at the "
-                 "AI rate, the rest at the compute rate. Seasonality-aware month-end "
-                 "projections live on Overview; contract pacing below is term-aware."
+                 "AI rate, the rest at the compute rate. "
+                 # holistic 4.610 #14: MONITOR has no Overview, so name it only where it opens
+                 + ("Seasonality-aware month-end projections live on Overview; contract pacing below is "
+                    "term-aware." if can_open("Overview") else "Contract pacing below is term-aware.")
                  + _thin_note},
     ])
     if _thin:

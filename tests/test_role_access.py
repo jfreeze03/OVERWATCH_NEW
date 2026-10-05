@@ -10,7 +10,8 @@ Resolution, first match wins, for an identified Streamlit-in-Snowflake viewer:
      operator, source 'role'. A ROLE grantee is not expanded.
   3. otherwise MONITOR (read-only, two pages): source 'default' when the lookup answered, 'lookup_failed'
      when it raised, 'unverified' when it returned no USER grantee (a privilege gap reads as empty).
-DTI is never looked up: only the four granted roles can open the app, so every identified viewer who is not
+DTI is never looked up: only a role holding USAGE opens the app (the decision names four; roles.sql grants the two
+SNOW_* roles until the owner's pending change lands), so every identified viewer who is not
 an admin is a DTI member or a SNOW_* holder, and gets MONITOR. An UNIDENTIFIED SiS viewer gets MONITOR and
 is never an operator.
 
@@ -118,6 +119,14 @@ def test_access_timings():
     assert 0 < cfg.WRITE_RECHECK_S <= 15
 
 
+def test_failed_lookup_retry_backs_off_to_the_ttl():
+    # holistic 4.610 #2/#13: every open session runs the lookup, so a long outage must not cost one SHOW per
+    # session per minute: 60 s after the first failure, doubling, never longer than the healthy re-check
+    assert [cfg.access_retry_s(n) for n in (1, 2, 3, 4, 5, 50)] == [60, 120, 240, 300, 300, 300]
+    for odd in (0, -3, None, "x"):
+        assert cfg.access_retry_s(odd) == cfg.ACCESS_RETRY_S
+
+
 def test_viewer_profiles_hold_no_admin_pin_and_no_etl_pins():
     # OPERATOR_USERS alone means admin; a DBA pin is forbidden (it would be a second, drifting admin list)
     assert not {v for v in cfg.VIEWER_PROFILES.values() if v in cfg.OPERATOR_PROFILES}
@@ -168,19 +177,51 @@ class _Row:
 
 
 def test_role_grant_members_parses_users_and_reports_nested_roles():
+    # names exactly as SHOW stores them: stripped, never case-folded (holistic 4.610 #1)
     rows = _rows(("USER", "alice"), ("ROLE", "nested_r"), ("USER", " BOB "), ("APPLICATION", "app1"))
     users, roles = sess.role_grant_members(rows)
-    assert users == frozenset({"ALICE", "BOB"})
-    assert roles == ("NESTED_R",)
+    assert users == frozenset({"alice", "BOB"})
+    assert roles == ("nested_r",)
 
 
 def test_role_grant_members_accepts_snowpark_rows_and_quoted_keys_and_frames():
-    rows = [_Row({'"granted_to"': "USER", '"grantee_name"': "carol"}),
+    rows = [_Row({'"granted_to"': "user", '"grantee_name"': "carol"}),
             _Row({"GRANTED_TO": "ROLE", "GRANTEE_NAME": "R1"})]
-    assert sess.role_grant_members(rows) == (frozenset({"CAROL"}), ("R1",))
+    assert sess.role_grant_members(rows) == (frozenset({"carol"}), ("R1",))
     df = pd.DataFrame(_rows(("USER", "dave"), ("ROLE", "R2")))
-    assert sess.role_grant_members(df) == (frozenset({"DAVE"}), ("R2",))
+    assert sess.role_grant_members(df) == (frozenset({"dave"}), ("R2",))
     assert sess.role_grant_members([]) == (frozenset(), ())
+
+
+# ---------------------------------------------------------------------------
+# Holistic 4.610 #1: membership is an EXACT name match. Two Snowflake users whose names differ only by case
+# are different users; neither rides the other's DSA grant (the allowlist keeps its intentional folding).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("member, viewer", [("jdoe", "JDOE"), ("JDOE", "jdoe"), ("JDoe", "jdoe")])
+def test_a_case_colliding_user_is_not_a_role_admin(env, member, viewer):
+    env.rows = _rows(("USER", member))
+    env.viewer = viewer
+    a = sess.viewer_access()
+    assert (a["profile"], a["operator"], a["source"]) == ("MONITOR", False, "default")
+    assert sess.is_operator() is False
+    assert sess.reverify_role_admin() is False
+
+
+@pytest.mark.parametrize("name", ["jdoe", "JDOE", "JDoe"])
+def test_the_exact_name_is_a_role_admin(env, name):
+    env.rows = _rows(("USER", name))
+    env.viewer = name
+    a = sess.viewer_access()
+    assert (a["profile"], a["operator"], a["source"]) == ("DBA", True, "role")
+    assert sess.reverify_role_admin() is True
+
+
+def test_the_allowlist_keeps_its_case_folding(env):
+    # OPERATOR_USERS is hand-typed: folding is intentional there, and it never consults the roster
+    env.rows = _rows(("USER", "someone_else"))
+    env.viewer = _ADMIN.lower()
+    assert (sess.viewer_access()["source"], sess.is_operator()) == ("allowlist", True)
+    assert env.shows == 0
 
 
 # ---------------------------------------------------------------------------
@@ -240,10 +281,46 @@ def test_lookup_failure_fails_closed_and_logs_once(env):
     assert env.shows == 2
     assert len(env.errors) == 1 and env.errors[0][0] == "Access"
     assert cfg.ADMIN_ACCESS_ROLE in env.errors[0][2]
-    # recovery: the next retry that answers grants the role again
+    # recovery: the next retry that answers grants the role again (the second failure backed off to 2x)
     env.raise_ = None
-    env.clock.t += cfg.ACCESS_RETRY_S + 1
+    env.clock.t += cfg.access_retry_s(2) + 1
     assert sess.viewer_access()["source"] == "role"
+
+
+@pytest.mark.parametrize("fail", ["raise", "empty"])
+def test_a_persistent_failure_backs_off_then_a_success_resets_it(env, fail):
+    """holistic 4.610 #2/#13: each consecutive failed (or empty) lookup doubles the wait before the next SHOW,
+    up to ACCESS_TTL_S; a good answer resets the streak, so the next outage starts at ACCESS_RETRY_S again."""
+    env.viewer = _DTI_USER                      # a view-only session pays for the lookup too
+    if fail == "raise":
+        env.raise_ = RuntimeError("Insufficient privileges")
+    else:
+        env.rows = _rows(("ROLE", "ONLY_A_ROLE"))
+    sess.viewer_access()
+    assert env.shows == 1
+    for n in (1, 2, 3, 4, 5):
+        wait = cfg.access_retry_s(n)
+        env.clock.t += wait - 1
+        sess.viewer_access()
+        sess.is_operator()
+        assert env.shows == n, (n, env.shows)    # not before the backed-off wait
+        env.clock.t += 2
+        assert sess.viewer_access()["source"] in sess.ACCESS_UNAVAILABLE_SOURCES
+        assert env.shows == n + 1, (n, env.shows)
+    assert st.session_state["_ow_access_roster"]["fails"] == 6
+    assert len(env.errors) == 1                  # still one APP_ERROR_LOG row per session
+    # recovery resets the streak
+    env.raise_, env.rows = None, _rows(("USER", _DSA_USER))
+    env.clock.t += cfg.ACCESS_TTL_S + 1
+    assert sess.viewer_access()["source"] == "default"
+    assert st.session_state["_ow_access_roster"]["fails"] == 0
+    env.raise_ = RuntimeError("down again")
+    env.clock.t += cfg.ACCESS_TTL_S + 1
+    sess.viewer_access()
+    shows = env.shows
+    env.clock.t += cfg.ACCESS_RETRY_S + 1
+    sess.viewer_access()
+    assert env.shows == shows + 1               # the new outage starts at ACCESS_RETRY_S again
 
 
 def test_an_empty_user_set_is_unverified_not_member(env):
@@ -374,7 +451,7 @@ def test_reverify_is_false_without_an_identity(env):
 
 
 # ---------------------------------------------------------------------------
-# Admin ▸ Access API
+# Admin ▸ App access API
 # ---------------------------------------------------------------------------
 def test_access_info_snapshot(env):
     info = sess.access_info()
@@ -809,6 +886,24 @@ def test_app_view_only_viewer_sees_two_pages_without_the_outage_caption(sis_app)
     assert _unavailable_caption() not in captions
 
 
+@pytest.mark.parametrize("outage", ["failed", "unverified"])
+def test_app_view_only_viewer_during_an_outage_is_told_only_what_is_true(sis_app, outage):
+    """holistic 4.610 #2/#13: during an outage the app cannot tell a DTI member from a DSA member, so a view-only
+    viewer sees the caption too. It is deliberate, and its wording must hold for them: it says who is held
+    read-only (admins) and never promises this viewer changes once the lookup recovers."""
+    sis_app["viewer"] = _DTI_USER
+    if outage == "failed":
+        sis_app["raise"] = RuntimeError("Insufficient privileges")
+    else:
+        sis_app["rows"] = _rows(("ROLE", "ONLY_A_ROLE"))
+    _, options, captions = _run_app()
+    assert sorted(options) == ["Cost Intelligence", "Operations"]
+    caption = _unavailable_caption()
+    assert caption in captions
+    assert caption.startswith("Admin access check unavailable") and "admins are read-only" in caption
+    assert caption != "Access check unavailable — read-only until it recovers."
+
+
 def _jump_app_run(monkeypatch):
     """The shell with a seeded Case File and the live jump targets loaded; records the run() keys."""
     from streamlit.testing.v1 import AppTest
@@ -1113,3 +1208,85 @@ def test_monitor_pages_offer_no_doorway_to_a_page_monitor_lacks():
     assert bad == [], bad
     # the Control Room drills (components, operations x2, optimize, optimize_queue x2), Proof, Brief, Alerts
     assert checked >= 9, checked
+
+
+# ---------------------------------------------------------------------------
+# Holistic 4.610 #14: no PROSE on MONITOR's pages points at a page MONITOR cannot open, unless it sits behind the
+# same gate as a doorway (can_open / a membership test). Admin pointers are out of scope: they already say who
+# can act ("an admin can ... on Admin -> ...").
+# ---------------------------------------------------------------------------
+_PAGE_POINTERS: dict[str, tuple[str, ...]] = {
+    "Control Room": ("Control Room ▸", "Control Room →", "on Control Room"),
+    "Proof": ("**Proof**", "Proof ▸", "on Proof"),
+    "Brief": ("Brief ▸", "on Brief"),
+    "Alerts": ("Alerts ▸", "on Alerts"),
+    "Security": ("Security ▸", "on Security"),
+    "Overview": ("Overview ▸", "on Overview"),
+}
+#: Pointers already reachable only where their page opens, by a gate the static walk cannot see (a default
+#: argument used only by a gated caller, or a whole function rendered only behind can_open).
+_PROSE_WAIVED: dict[str, str] = {
+    "Snapshot this evidence into the session Case File (see Brief ▸ Operator Case File).":
+        "add_to_case_button returns before rendering unless can_open('Brief')",
+    "Select a row to open it in Control Room ▸ Entity 360.":
+        "row_select_hint's default; entity_nav_table shows it only behind can_open('Control Room')",
+}
+
+
+def _string_parts(tree: ast.AST):
+    """(node, text) for every string literal and f-string literal part (docstrings excluded)."""
+    docs = {id(n.body[0].value) for n in ast.walk(tree)
+            if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body
+            and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+            yield node, node.value
+
+
+def _ungated_prose(source: str, label: str, monitor: set[str]) -> tuple[list[str], int]:
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    bad, checked = [], 0
+    for node, text in _string_parts(tree):
+        for page, marks in _PAGE_POINTERS.items():
+            if page in monitor or not any(m in text for m in marks):
+                continue
+            checked += 1
+            if text in _PROSE_WAIVED:
+                continue
+            # an f-string part is covered through its JoinedStr parent
+            anchor = parents.get(node) if isinstance(parents.get(node), ast.JoinedStr) else node
+            if not _covered(anchor, page, parents, _gate_names(tree, page)):
+                bad.append(f"{label}:{node.lineno} -> {page}: {text[:60]!r}")
+    return bad, checked
+
+
+def test_the_prose_lock_is_not_vacuous():
+    monitor = set(cfg.PAGES_BY_PROFILE["MONITOR"])
+    src = (
+        "def a():\n"
+        "    st.caption('Totals live on **Proof**.')\n"
+        "def b():\n"
+        "    st.caption('register owners on Control Room ▸ Entity 360' if can_open('Control Room') else 'x')\n"
+        "def c():\n"
+        "    if can_open('Proof'):\n"
+        "        st.caption('Totals live on **Proof**.')\n"
+        "def d():\n"
+        "    st.caption('see Operations ▸ Queries')\n")
+    bad, checked = _ungated_prose(src, "x", monitor)
+    assert checked == 3 and len(bad) == 1 and "x:2 -> Proof" in bad[0], bad
+
+
+def test_monitor_pages_name_no_page_monitor_cannot_open():
+    monitor = set(cfg.PAGES_BY_PROFILE["MONITOR"])
+    bad: list[str] = []
+    checked = 0
+    for rel in _MONITOR_SURFACE:
+        b, c = _ungated_prose((_ROOT / rel).read_text(encoding="utf-8"), rel, monitor)
+        bad += b
+        checked += c
+    assert bad == [], bad
+    # the Savings Proof caption, the three Entity 360 pointers on Operations and the two waived components
+    assert checked >= 6, checked
+    for text in _PROSE_WAIVED:                       # a waiver for a string that is gone must be dropped
+        assert any(text in (_ROOT / rel).read_text(encoding="utf-8") for rel in _MONITOR_SURFACE), text

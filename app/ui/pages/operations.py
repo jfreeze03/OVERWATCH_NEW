@@ -1187,7 +1187,11 @@ def _incident_routing_panel(timeline) -> None:
         "family (classify_task_error) and to an owner/on-call resolved from the catalog "
         "(the task's own TASK entry, else the database it lives in). Cascades are excluded "
         "so only the failure to fix pages someone. ROUTED_TO is unassigned when the task "
-        "isn't in the catalog — register its owner on Control Room ▸ Entity 360. Actually opening a "
+        "isn't in the catalog — "
+        # holistic 4.610 #14: MONITOR has no Control Room, so name who can act instead of the page
+        + ("register its owner on Control Room ▸ Entity 360" if can_open("Control Room")
+           else "an OVERWATCH admin can register its owner in the entity catalog")
+        + ". Actually opening a "
         "routed ACTION_QUEUE item / Teams mention and escalating on an ack timeout from an "
         "on-call rotation are the deferred owner-migration half."
     )
@@ -1215,7 +1219,9 @@ def _incident_routing_panel(timeline) -> None:
          "help": "No owner/on-call in the catalog — register the task to route it."},
     ])
     if cat.ok and cat.empty:
-        st.caption("The entity catalog is empty, so every incident is unassigned — register owners on Control Room ▸ Entity 360 to route them.")
+        st.caption("The entity catalog is empty, so every incident is unassigned — "
+                   + ("register owners on Control Room ▸ Entity 360 to route them." if can_open("Control Room")
+                      else "an OVERWATCH admin can register owners in the entity catalog to route them."))
     styled_table(incidents, height=280, slug="incident-routing",
                  sort_label="most severe, then most failures")
     st.caption("ROUTED_TO is the on-call (else owner) to page; REMEDIATION is the first move for that error family.")
@@ -1382,7 +1388,11 @@ def _dq_row_volume_panel(preloaded=None) -> None:
     rv = preloaded or run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG", max_rows=dq_sql.DQ_MAX_ROWS)
     if rv.ok and rv.empty:
-        empty_state("needs_setup", "No registered-product tables added rows in the window. Register data products in the catalog (Control Room ▸ Entity 360) to monitor their volume here.")
+        empty_state("needs_setup", "No registered-product tables added rows in the window. "
+                    + ("Register data products in the catalog (Control Room ▸ Entity 360) to monitor their volume "
+                       "here." if can_open("Control Room")
+                       else "An OVERWATCH admin can register data products in the entity catalog to monitor "
+                            "their volume here."))
         return
     if not guard(rv, "", setup_hint="Needs TABLE_DML_HISTORY and a populated ENTITY_CATALOG with DATA_PRODUCT."):
         return
