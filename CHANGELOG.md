@@ -28,9 +28,9 @@ on every run until roles.sql itself is updated (DEPLOYMENT.md §2 has the hazard
 - **It fails closed.** If the lookup errors, or lists no users (a privilege gap, never read as "no members"), every
   DSA member is read-only until it recovers. It retries after 1 minute, then 2 and 4, then every 5 minutes while it
   keeps failing (every open session runs it), writes one APP_ERROR_LOG row per session (page 'Access') and shows
-  "Admin access check unavailable — OVERWATCH admins are read-only until it recovers." in the sidebar. Every viewer
-  not on the allowlist sees that caption, since the app cannot tell members apart meanwhile. The named admins are
-  unaffected.
+  "Admin access check unavailable — admins by role (SNOW_PRI_GFR_PRD_ALFA_DSA) are read-only until it recovers; named
+  admins are unaffected." in the sidebar. Every viewer not on the allowlist sees that caption, since the app cannot
+  tell members apart meanwhile.
 - **Revocation timing.** Before every change, an admin by role is re-checked with a fresh lookup (at most 15 seconds
   old), so revoking DSA stops their changes within about 15 seconds. Their admin pages go within 5 minutes. A named
   admin stays one until removed from `config.OPERATOR_USERS` and redeployed.
@@ -52,7 +52,9 @@ on every run until roles.sql itself is updated (DEPLOYMENT.md §2 has the hazard
   (`config.ROLES_SQL_APP_GRANTEES`, pinned to roles.sql's GRANT lines and proof block by test): re-run roles.sql
   (-20012) only for the two SNOW_* roles; DSA and DTI read "not granted by roles.sql yet (owner-side change
   pending)", and a role holding USAGE that roles.sql does not grant warns that its current proof block raises -20011.
-  "How access works" says the same, and that a DSA grant makes an admin only of someone who can open the app.
+  "How access works" says the same, and that a DSA grant makes an admin only of someone who can open the app,
+  worded from the live grant answer (a hand-made DSA grant lets members in through DSA itself; otherwise they need
+  another role that holds USAGE).
   **Re-check now** clears only your own session's answer; it cannot shorten another viewer's wait.
 - **Alerts ▸ Rules: admins change a rule's threshold and Enabled in the app.** Type the RULE_ID to confirm. The
   UPDATE is a compare-and-set judged by Snowflake's row count: if the rule changed since the page read it, nothing
@@ -63,8 +65,10 @@ on every run until roles.sql itself is updated (DEPLOYMENT.md §2 has the hazard
 - **Captions name who can act.** The "who may do this" captions on Alerts, Operations ▸ Emergency, Optimization &
   Savings and Admin ▸ Settings now name the named admins and DSA members, instead of the allowlist alone or a SNOW_*
   role that grants nothing in-app. Captions about running generate-only SQL in a worksheet as SNOW_* are unchanged.
-  On MONITOR's two pages, prose that pointed at Proof or Control Room ▸ Entity 360 renders only where that page opens;
-  a MONITOR viewer reads that an OVERWATCH admin can register owners in the entity catalog instead.
+  On MONITOR's two pages, prose that pointed at Proof, Control Room ▸ Entity 360 or Alerts (where the AI runaway
+  rule is tuned, where the department-budget pace threshold is set) renders only where that page opens; a MONITOR
+  viewer reads that an OVERWATCH admin registers owners, tunes the rule or sets the threshold instead. Prose naming
+  where an admin sets something on Admin stays, since it says who acts.
 - **Security counts DSA as an admin role.** Privileged role holders and both new-network-login panels now include
   direct holders of SNOW_PRI_GFR_PRD_ALFA_DSA; DTI joins no admin tier. These panels are labelled "privileged", not
   "break-glass" (the auditor pack sheet is now privileged_role_holders.csv), and note that GRANTS_TO_USERS lags up to
@@ -85,7 +89,10 @@ on every run until roles.sql itself is updated (DEPLOYMENT.md §2 has the hazard
   (normalize-to-V173 with teeth, both Snowflake-only static locks, an executed harness) and the V174 run docs. A strict
   xfail ties roles.sql's proof block to the app's grant rule, and a plain lock pins `config.ROLES_SQL_APP_GRANTEES` to
   roles.sql; both flip in the owner's roles.sql change. Others lock exact-case membership, the retry backoff, the
-  outage caption for a view-only viewer, one page per section slug, and MONITOR prose that names only pages it opens.
+  outage caption for a view-only viewer, one page per section slug, and that a string on MONITOR's pages naming a
+  page MONITOR cannot open (as 'X ▸', 'X >', 'X →', 'on X', 'in X' or 'on the X page') sits behind can_open. That lock
+  does not see a page named any other way, comments or docstrings, and it allows Admin pointers that say where an
+  admin sets something.
 
 ## 4.609.1 - Hotfix: V173 (the hourly new-admin-network alert compiles again, the nightly idle alert no longer divides by zero) and the escalation email's delivery objects survive a teardown (2026-10-02)
 

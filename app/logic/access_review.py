@@ -52,6 +52,25 @@ def pending_roles(roles: Iterable[str] = EXPECTED_APP_GRANTEES) -> tuple[str, ..
     managed = {str(r).upper() for r in ROLES_SQL_MANAGED}
     return tuple(str(r).upper() for r in roles if str(r).upper() not in managed)
 
+
+def admin_reach_note(holds_usage: bool | None) -> str:
+    """The 'Make someone an admin' caveat on Admin ▸ App access, gated on the live grant review (final review #1).
+
+    ``holds_usage`` is whether SHOW GRANTS ON STREAMLIT lists ADMIN_ACCESS_ROLE with USAGE: True / False, or None
+    when that read failed or came back empty. Membership makes an admin only of someone who can open the app, so
+    while roles.sql does not grant the role yet the guidance must match the grant state: a hand-made grant
+    (True) lets members in through the role itself; otherwise (False, or unknown) the 'until' wording holds
+    whichever way the grants stand. Empty once roles.sql grants the role (the grant review covers a lost grant)."""
+    if ADMIN_ACCESS_ROLE not in pending_roles():
+        return ""
+    lead = " Membership makes an admin only of someone who can open the app"
+    if holds_usage:
+        return (f"{lead}: {ADMIN_ACCESS_ROLE} holds USAGE on the app (above), a grant roles.sql does not make "
+                "yet, so its members open the app through it, provided it also holds USAGE on the database and "
+                "schema.")
+    return (f"{lead}: until {ADMIN_ACCESS_ROLE} holds USAGE on the database, schema and app (roles.sql does not "
+            "grant it yet), that means a member who also holds another role with USAGE on it.")
+
 _VIEW_PAGES = " and ".join(PAGES_BY_PROFILE.get(VIEWER_UNKNOWN_PROFILE, ()))
 
 #: How each viewer-access source reads on the tab (session.ACCESS_SOURCES plus the two unidentified paths).

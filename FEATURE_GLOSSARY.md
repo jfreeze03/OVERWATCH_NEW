@@ -75,8 +75,9 @@ SNOW_* holders not on the allowlist, an unidentified viewer) gets the read-only 
 Intelligence and Operations only, landing on Cost Intelligence; its tables show no row drill, Case File or rule
 jump that would lead to a page it cannot open. The check fails closed: a failed lookup or an empty member list
 means read-only, retried after 1 minute, then 2 and 4, then every 5 minutes while it keeps failing, with the sidebar
-caption **"Admin access check unavailable — OVERWATCH admins are read-only until it recovers."** (every viewer not on
-the allowlist sees it, since membership is unknown meanwhile). Membership is an exact, case-sensitive match of the
+caption **"Admin access check unavailable — admins by role (SNOW_PRI_GFR_PRD_ALFA_DSA) are read-only until it
+recovers; named admins are unaffected."** (every viewer not on the allowlist sees it, since membership is unknown
+meanwhile). Membership is an exact, case-sensitive match of the
 viewer's username with the grantee name. Each viewer and outcome writes one APP_USAGE event **`access_resolved`**
 per session (SECTION = allowlist / role / default / lookup_failed / unverified).
 

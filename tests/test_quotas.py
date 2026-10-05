@@ -506,7 +506,8 @@ def _block_states(seen) -> list[tuple[str, str]]:
     return [(k, m) for k, m in seen["empty"] if not m.startswith(_SUGGEST_NEEDS_LIVE)]
 
 
-def _render(monkeypatch, result=None, *, user_daily=None, bounds=None, now=None, applied=True, days=7):
+def _render(monkeypatch, result=None, *, user_daily=None, bounds=None, now=None, applied=True, days=7,
+            alerts=True):
     """The whole panel with fakes: ONE block read returning ``result`` (default: no rows), then the #37b suggestions
     over ``user_daily``. Clocks pinned: account_today = _T (the suggestions), account_now (the live-block test)."""
     import datetime as dt
@@ -529,6 +530,7 @@ def _render(monkeypatch, result=None, *, user_daily=None, bounds=None, now=None,
         seen["empty"].append((kind, msg)), seen.setdefault("detail", []).append(k.get("detail"))))
     monkeypatch.setattr(cb, "with_user_names", lambda df, *_a, **_k: df)
     monkeypatch.setattr(cb, "has_migration", lambda v, _p: applied and v == 163)
+    monkeypatch.setattr(cb, "can_open", lambda page: alerts or page != "Alerts")    # alerts=False: MONITOR
     monkeypatch.setattr(cb, "account_today", lambda: _T)
     monkeypatch.setattr(cb, "account_now", lambda: now or dt.datetime(2026, 9, 21, 13, 0))
     enriched = pd.DataFrame({"USER_NAME": ["BOB", "CAROL"], "DISPLAY_NAME": ["Bob B", "Carol C"],
@@ -569,9 +571,19 @@ def test_panel_renders_suggestions_with_one_read_and_a_fixed_history_caption(mon
 
 
 def test_panel_before_v163_says_the_rule_is_not_installed_yet(monkeypatch):
-    fake, _ = _render(monkeypatch, user_daily=_frame_for_ui(), applied=False)
+    for alerts in (True, False):
+        fake, _ = _render(monkeypatch, user_daily=_frame_for_ui(), applied=False, alerts=alerts)
+        caps = fake.text("caption")
+        assert "the rule itself arrives with migration V163" in caps and "Alerts > Rules" not in caps
+
+
+def test_panel_for_a_viewer_without_alerts_names_who_tunes_the_rule(monkeypatch):
+    # v4.610.0 final review: MONITOR opens Cost Intelligence but not Alerts, so the caption names who tunes the
+    # rule instead of pointing at a page it cannot open
+    fake, _ = _render(monkeypatch, user_daily=_frame_for_ui(), alerts=False)
     caps = fake.text("caption")
-    assert "the rule itself arrives with migration V163" in caps and "Alerts > Rules" not in caps
+    assert "seed multiple 2x; an OVERWATCH admin may tune the live rule." in caps
+    assert "Alerts" not in caps
 
 
 def test_panel_on_the_fact_fallback_leg_names_the_missing_live_scan(monkeypatch):

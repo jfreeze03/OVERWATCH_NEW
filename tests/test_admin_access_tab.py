@@ -716,6 +716,49 @@ def test_how_access_works_says_what_roles_sql_does_today(access_app):
     assert "exactly four roles may hold it" not in read("app/ui/pages/admin.py")
 
 
+def _make_admin_line(at) -> str:
+    lines = [line for e in at.markdown for line in str(e.value).splitlines() if "**Make someone an admin**" in line]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+def test_make_admin_caveat_follows_the_live_grant_review(access_app):
+    """final review #1: the 'Make someone an admin' caveat is true in BOTH grant states while roles.sql does not
+    grant DSA. With a hand-made DSA grant (the fixture's four-role answer) its members open the app through DSA
+    itself, so the line must not say they need another role; without one (roles.sql's two-role state), or when
+    the grants could not be read, it keeps the 'until DSA holds USAGE' wording."""
+    assert cfg.ADMIN_ACCESS_ROLE in ar.pending_roles()     # the state this release ships in
+    # hand-grant state: DSA holds USAGE on the app
+    line = _make_admin_line(_open_access(access_app))
+    assert line.endswith(ar.admin_reach_note(True)), line
+    assert f"{cfg.ADMIN_ACCESS_ROLE} holds USAGE on the app" in line
+    assert "another role with USAGE" not in line and "until " not in line
+    # roles.sql's state: only the two SNOW_* roles hold it
+    access_app["grants"] = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
+                                        ("USAGE", "ROLE", "SNOW_ACCOUNTADMINS"), ("USAGE", "ROLE", "SNOW_SYSADMINS"))
+    line = _make_admin_line(_open_access(access_app))
+    assert line.endswith(ar.admin_reach_note(False)), line
+    assert f"until {cfg.ADMIN_ACCESS_ROLE} holds USAGE on the database, schema and app" in line
+    assert "another role with USAGE on it" in line
+    # unknown (an empty or failed grants read): the 'until' wording, which holds whichever way the grants stand
+    for grants, error in ((pd.DataFrame(), ""), (_four_roles_frame(), "Insufficient privileges")):
+        access_app["grants"], access_app["grants_error"] = grants, error
+        assert _make_admin_line(_open_access(access_app)).endswith(ar.admin_reach_note(None))
+
+
+def test_admin_reach_note_wording(monkeypatch):
+    held, lacking, unknown = (ar.admin_reach_note(v) for v in (True, False, None))
+    assert unknown == lacking != held
+    for note in (held, lacking):
+        assert note.startswith(" Membership makes an admin only of someone who can open the app: ")
+        assert "roles.sql does not" in note
+    assert "provided it also holds USAGE on the database and schema" in held
+    assert "until" not in held and "another role" not in held
+    # once roles.sql grants the admin role (the owner's change) the caveat goes; the grant review covers a lost grant
+    monkeypatch.setattr(ar, "ROLES_SQL_MANAGED", tuple(cfg.APP_ACCESS_ROLES))
+    assert [ar.admin_reach_note(v) for v in (True, False, None)] == ["", "", ""]
+
+
 def test_remove_an_admin_guidance_names_the_allowlist_exception(access_app):
     at = _open_access(access_app)
     bullets = [line for e in at.markdown for line in str(e.value).splitlines() if "Remove an admin" in line]

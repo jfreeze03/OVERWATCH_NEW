@@ -22,6 +22,7 @@ st.set_page_config(
 
 from app.companies import COMPANIES, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
+    ADMIN_ACCESS_ROLE,
     APP_VERSION,
     DEFAULT_DAY_WINDOW,
     LAST_MONTH_WINDOW,
@@ -79,9 +80,10 @@ from app.ui.pages import (  # noqa: E402
 
 # v4.610.0: the sidebar caption while the admin-role lookup cannot answer (session.viewer_access). Every
 # viewer not on OPERATOR_USERS sees it: without the lookup the app cannot tell a DSA member from a DTI one.
-# So it says who is held read-only (admins) and never promises a view-only viewer changes on recovery
-# (holistic 4.610 #2/#13).
-ACCESS_CHECK_UNAVAILABLE = "Admin access check unavailable — OVERWATCH admins are read-only until it recovers."
+# So it says who is held read-only (the admins by role, never the named admins, who need no lookup) and
+# never promises a view-only viewer changes on recovery (holistic 4.610 #2/#13).
+ACCESS_CHECK_UNAVAILABLE = (f"Admin access check unavailable — admins by role ({ADMIN_ACCESS_ROLE}) are read-only "
+                            "until it recovers; named admins are unaffected.")
 
 _RENDERERS = {
     "Overview": overview.render,

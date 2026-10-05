@@ -1260,10 +1260,13 @@ def _access_tab() -> None:
     section_header("Who can open the app · USAGE on the Streamlit", "", "security")
     res = run(access_sql.show_grants_on_app_sql(), page=_PAGE, key="adm_app_grants", tier="live",
               source="SHOW GRANTS ON STREAMLIT", max_rows=0)
+    admin_role_usage: bool | None = None       # does the live answer list the admin role with USAGE? None = unknown
     if not res.ok:
         guard(res, "")
     else:
         review = access_review.app_grant_review(res.df)
+        if review["status"] != "empty":
+            admin_role_usage = ADMIN_ACCESS_ROLE in review["present"]
         if review["status"] == "empty":
             empty_state("unavailable",
                         "SHOW GRANTS ON STREAMLIT returned no rows: unverified. The owner role always sees its "
@@ -1340,10 +1343,7 @@ def _access_tab() -> None:
         f"{view_pages}. No changes.",
         f"- **Make someone an admin**: `GRANT ROLE {ADMIN_ACCESS_ROLE} TO USER <username>;` It applies to their "
         f"next session, or within {humanize_duration(ACCESS_TTL_S)} in an open one. Whoever can grant this role "
-        "can create an OVERWATCH admin."
-        + (" Membership makes an admin only of someone who can open the app: until roles.sql grants "
-           f"{ADMIN_ACCESS_ROLE} (pending), that means a member who also holds another role with USAGE on it."
-           if ADMIN_ACCESS_ROLE in pending else ""),
+        "can create an OVERWATCH admin." + access_review.admin_reach_note(admin_role_usage),
         f"- **Remove an admin**: `REVOKE ROLE {ADMIN_ACCESS_ROLE} FROM USER <username>;` Their in-app changes stop "
         f"within {humanize_duration(WRITE_RECHECK_S)} (every change re-verifies); their pages follow within "
         f"{humanize_duration(ACCESS_TTL_S)}. A named admin in config OPERATOR_USERS stays an admin (no lookup) "

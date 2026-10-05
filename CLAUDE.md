@@ -184,8 +184,10 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   viewer) gets MONITOR = Cost Intelligence + Operations, read-only; DTI is
   never looked up. Membership is `SHOW GRANTS OF ROLE` run as the owner, once
   per session (re-checked after 300 s; a failure, 'lookup_failed', or an
-  empty USER set, 'unverified', is retried after 60 s) and FAILS CLOSED; a role admin is
-  re-verified at every privileged write (memo at most 15 s). Trust delegation
+  empty USER set, 'unverified', is retried first after 60 s, the wait
+  doubling with each further failure up to the 5-minute TTL) and FAILS
+  CLOSED; a role admin is re-verified at every privileged write (memo at
+  most 15 s). Trust delegation
   accepted: whoever can GRANT the DSA role can mint an OVERWATCH admin with
   account-level levers. SNOW_ACCOUNTADMINS + SNOW_SYSADMINS keep roles.sql's
   object grants; DSA/DTI get no worksheet grants (USAGE on the database,

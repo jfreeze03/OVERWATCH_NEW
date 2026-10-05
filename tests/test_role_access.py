@@ -463,6 +463,28 @@ def test_access_info_snapshot(env):
     assert info["nested_roles"] == ("SOME_NESTED_ROLE",)
     assert tuple(info["allowlist"]) == tuple(cfg.OPERATOR_USERS)
     assert info["age_s"] == 0
+    assert info["ttl_s"] == cfg.ACCESS_TTL_S and info["retry_s"] is None      # a good roster: no retry pending
+
+
+@pytest.mark.parametrize("fail", ["raise", "empty"])
+def test_access_info_retry_is_the_backoff_in_force(env, fail):
+    """retry_s is the wait before the next lookup after the CURRENT failure streak (config.access_retry_s),
+    never the fixed first-retry constant; a recovered roster clears it."""
+    if fail == "raise":
+        env.raise_ = RuntimeError("Insufficient privileges")
+    else:
+        env.rows = _rows(("ROLE", "ONLY_A_ROLE"))
+    assert sess.access_info()["retry_s"] == cfg.access_retry_s(1) == cfg.ACCESS_RETRY_S
+    for n in (2, 3, 4, 5):
+        env.clock.t += cfg.access_retry_s(n - 1) + 1
+        info = sess.access_info()
+        assert env.shows == n
+        assert info["retry_s"] == cfg.access_retry_s(n), (n, info["retry_s"])
+    assert info["retry_s"] == cfg.ACCESS_TTL_S != cfg.ACCESS_RETRY_S             # backed off to the TTL
+    env.raise_, env.rows = None, _rows(("USER", _DSA_USER))
+    env.clock.t += cfg.ACCESS_TTL_S + 1
+    info = sess.access_info()
+    assert info["roster_status"] == "ok" and info["retry_s"] is None
 
 
 def test_access_info_roster_for_an_allowlisted_admin_is_lazy(env):
@@ -900,7 +922,11 @@ def test_app_view_only_viewer_during_an_outage_is_told_only_what_is_true(sis_app
     assert sorted(options) == ["Cost Intelligence", "Operations"]
     caption = _unavailable_caption()
     assert caption in captions
-    assert caption.startswith("Admin access check unavailable") and "admins are read-only" in caption
+    assert caption.startswith("Admin access check unavailable")
+    # only the admins BY ROLE are held read-only; the named admins never wait on the lookup (final review)
+    assert f"admins by role ({cfg.ADMIN_ACCESS_ROLE}) are read-only until it recovers" in caption
+    assert caption.endswith("named admins are unaffected.")
+    assert "OVERWATCH admins are read-only" not in caption
     assert caption != "Access check unavailable — read-only until it recovers."
 
 
@@ -1212,16 +1238,19 @@ def test_monitor_pages_offer_no_doorway_to_a_page_monitor_lacks():
 
 # ---------------------------------------------------------------------------
 # Holistic 4.610 #14: no PROSE on MONITOR's pages points at a page MONITOR cannot open, unless it sits behind the
-# same gate as a doorway (can_open / a membership test). Admin pointers are out of scope: they already say who
-# can act ("an admin can ... on Admin -> ...").
+# same gate as a doorway (can_open / a membership test). What it covers: a string literal or f-string part (not a
+# comment or docstring) in a _MONITOR_SURFACE file that names Control Room, Proof, Brief, Alerts, Security or
+# Overview in one of the _PAGE_POINTER_FORMS ('X ▸', 'X >', 'X →', 'X ->', 'on X', 'in X', 'on the X page',
+# and '**Proof**'); a page named any other way is not seen. Admin is not in the table on purpose: prose naming
+# where an admin sets something ("an admin can check Admin → Migrations & freshness") is allowed, since it says
+# who acts and sends no viewer anywhere.
 # ---------------------------------------------------------------------------
+_PAGE_POINTER_FORMS: tuple[str, ...] = ("{p} ▸", "{p} >", "{p} →", "{p} ->", "on {p}", "in {p}",
+                                        "on the {p} page")
 _PAGE_POINTERS: dict[str, tuple[str, ...]] = {
-    "Control Room": ("Control Room ▸", "Control Room →", "on Control Room"),
-    "Proof": ("**Proof**", "Proof ▸", "on Proof"),
-    "Brief": ("Brief ▸", "on Brief"),
-    "Alerts": ("Alerts ▸", "on Alerts"),
-    "Security": ("Security ▸", "on Security"),
-    "Overview": ("Overview ▸", "on Overview"),
+    page: tuple(form.format(p=page) for form in _PAGE_POINTER_FORMS) + extra
+    for page, extra in (("Control Room", ()), ("Proof", ("**Proof**",)), ("Brief", ()), ("Alerts", ()),
+                        ("Security", ()), ("Overview", ()))
 }
 #: Pointers already reachable only where their page opens, by a gate the static walk cannot see (a default
 #: argument used only by a gated caller, or a whole function rendered only behind can_open).
@@ -1272,9 +1301,14 @@ def test_the_prose_lock_is_not_vacuous():
         "    if can_open('Proof'):\n"
         "        st.caption('Totals live on **Proof**.')\n"
         "def d():\n"
-        "    st.caption('see Operations ▸ Queries')\n")
+        "    st.caption('see Operations ▸ Queries')\n"
+        "def e():\n"
+        "    st.caption('the live rule may be tuned in Alerts > Rules')\n"
+        "def f():\n"
+        "    st.caption('(threshold on the Alerts page)' if can_open('Alerts') else 'an admin sets it')\n")
     bad, checked = _ungated_prose(src, "x", monitor)
-    assert checked == 3 and len(bad) == 1 and "x:2 -> Proof" in bad[0], bad
+    assert checked == 5 and len(bad) == 2, bad
+    assert "x:2 -> Proof" in bad[0] and "x:11 -> Alerts" in bad[1], bad
 
 
 def test_monitor_pages_name_no_page_monitor_cannot_open():
@@ -1286,7 +1320,8 @@ def test_monitor_pages_name_no_page_monitor_cannot_open():
         bad += b
         checked += c
     assert bad == [], bad
-    # the Savings Proof caption, the three Entity 360 pointers on Operations and the two waived components
-    assert checked >= 6, checked
+    # 11 today: the Savings Proof caption, the three Entity 360 pointers on Operations, the two Alerts pointers on
+    # AI chargeback, the Overview pointer on Contract, the shell's Case File pointers and the two waived components
+    assert checked >= 10, checked
     for text in _PROSE_WAIVED:                       # a waiver for a string that is gone must be dropped
         assert any(text in (_ROOT / rel).read_text(encoding="utf-8") for rel in _MONITOR_SURFACE), text

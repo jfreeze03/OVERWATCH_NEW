@@ -217,7 +217,8 @@ savings_rollup, unread_maintenance).
   unidentified SiS viewer, gets the read-only MONITOR profile (Cost
   Intelligence + Operations; source `default`). The lookup is memoized per
   session (re-checked after 300 s; a failure, `lookup_failed`, or an empty USER
-  set, `unverified`, is retried after 60 s) and fails closed. It filters
+  set, `unverified`, is retried first after 60 s, the wait doubling with each
+  further failure up to the 300 s TTL) and fails closed. It filters
   *pages*, not data. Off-SiS, with no viewer identity, it falls back to the
   role → profile map.
 - Admin actions are gated at each call site by `session.is_operator()`. The

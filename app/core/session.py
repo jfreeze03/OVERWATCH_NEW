@@ -655,14 +655,16 @@ def access_info(*, roster: bool = False) -> dict:
     ``roster=True`` also resolves the ADMIN_ACCESS_ROLE roster (one memoized lookup) when this
     session has none — an allowlisted admin's own resolution never runs it. roster_status is
     'not_checked' until a lookup ran, else ok / unverified / lookup_failed (an empty roster is
-    'unverified', never a clean "no members")."""
+    'unverified', never a clean "no members"). ``retry_s`` is the wait before the next lookup while the
+    last one failed or listed no user (config.access_retry_s of its consecutive-failure count), else None:
+    a good or absent roster has no retry pending (``ttl_s`` is its re-check)."""
     from app.config import (
-        ACCESS_RETRY_S,
         ACCESS_TTL_S,
         ADMIN_ACCESS_ROLE,
         OPERATOR_USERS,
         ROLE_ADMIN_ACCOUNT_LEVERS,
         VIEW_ACCESS_ROLE,
+        access_retry_s,
     )
 
     access = viewer_access()
@@ -687,7 +689,9 @@ def access_info(*, roster: bool = False) -> dict:
         "account_levers": bool(ROLE_ADMIN_ACCOUNT_LEVERS),
         "allowlist": tuple(OPERATOR_USERS),
         "ttl_s": ACCESS_TTL_S,
-        "retry_s": ACCESS_RETRY_S,
+        # the backoff actually in force (review: a fixed ACCESS_RETRY_S misstated every retry after the first)
+        "retry_s": (access_retry_s(r.get("fails")) if r and r.get("status") in ACCESS_UNAVAILABLE_SOURCES
+                    else None),
         "roster_status": str(r.get("status")) if r else "not_checked",
         "admin_users": tuple(r.get("users") or ()) if r else (),
         "nested_roles": tuple(r.get("roles") or ()) if r else (),

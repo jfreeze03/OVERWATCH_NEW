@@ -63,7 +63,7 @@ read-only MONITOR view (Cost Intelligence + Operations).
 | Operations | Queries, tasks, warehouses, contention, the Optimize fix queue (a diagnosis and first fix per recurring query family, with one-click Track into Action Center), change impact, and Pipeline SLA with two built-in objectives (nightly cycle done by 07:00, tasks on cadence) — p95, failures, queue, spill, anomalies, post-change regression verdicts. |
 | Proof | Does OVERWATCH pay for itself: verified savings with per-item evidence, and the priced pipeline ahead. |
 | Security | MFA gaps (login-evidence based), failed logins, grants, recent DDL changes. |
-| Admin | Settings, Access (who can open the app and who is an admin), migration status, source freshness, app self-cost, error log, telemetry. |
+| Admin | Settings, App access (who can open the app and who is an admin), migration status, source freshness, app self-cost, error log, telemetry. |
 | Ask | DBA-only grounded Q&A over the app's own data (evidence-cited, no free-text SQL). |
 
 ## Quick start
