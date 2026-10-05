@@ -454,11 +454,7 @@ def _role_list(arm: str) -> list[str]:
 
 def test_v162_role_list_and_off_hours_literals_match_the_app_constants():
     from app.data import security_sql
-    assert tuple(_role_list(_ARM26)) == tuple(_role_list(_ARM27)) == _ROLES
-    # V162's own list is the head of the app constant: V174 (owner decision 2026-10-05) appends
-    # SNOW_PRI_GFR_PRD_ALFA_DSA, and tests/test_security_alert_parity.py locks the whole constant to the
-    # LATEST SP_ALERT_SCAN, so this per-migration lock pins V162's content only.
-    assert security_sql.ALERT_ADMIN_ROLES[:len(_ROLES)] == _ROLES
+    assert tuple(_role_list(_ARM26)) == tuple(_role_list(_ARM27)) == security_sql.ALERT_ADMIN_ROLES == _ROLES
     (lo_hour,) = {int(x) for x in re.findall(r"HOUR\(\w\.\w+\) >= (\d+)", _ARM26 + _ARM27)}
     (hi_hour,) = {int(x) for x in re.findall(r"HOUR\(\w\.\w+\) < (\d+)", _ARM26 + _ARM27)}
     (wk,) = {int(x) for x in re.findall(r"DAYOFWEEKISO\(\w\.\w+\) >= (\d+)", _ARM26 + _ARM27)}

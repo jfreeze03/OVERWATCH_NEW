@@ -119,6 +119,24 @@ from app.ui.security_center import (
 
 _PAGE = "Security"
 
+# v4.610: in-app DSA admin is resolved live each session (SHOW GRANTS OF ROLE), but the holder panel reads
+# the GRANTS_TO_USERS view, which lags up to about 2 hours -- so the list is never the live admin list.
+_HOLDER_LAG_NOTE = ("GRANTS_TO_USERS lags up to about 2 hours. OVERWATCH checks its own admin-role membership live "
+                    "at each session, so someone granted it within that lag can already be an app admin before "
+                    "they appear here.")
+
+
+def _elevated_gap_note() -> str:
+    """KPI-help suffix for the two ELEVATED_ROLES checks (admin password-without-MFA, admin user network policy):
+    names the admin-holder roles they skip (security_sql.ADMIN_HOLDERS_OUTSIDE_ELEVATED -- since 2026-10-05
+    SNOW_PRI_GFR_PRD_ALFA_DSA, whose direct members are OVERWATCH admins), so a clean count never reads as
+    covering every admin. Empty once the tiers agree."""
+    skipped = security_sql.ADMIN_HOLDERS_OUTSIDE_ELEVATED
+    if not skipped:
+        return ""
+    return (" Not checked here: direct holders of " + ", ".join(skipped)
+            + " (OVERWATCH admins); they are listed under Privileged role holders.")
+
 
 _drop_totals = drop_window_totals
 
@@ -256,7 +274,7 @@ def _render_admin_network_policy(company: str) -> None:
     kpi_row([
         {"label": "Admins without a user network policy", "value": f"{uncovered}",
          "delta_color": "inverse" if uncovered else "off",
-         "help": "Directly granted " + ", ".join(security_sql.ELEVATED_ROLES) + "."},
+         "help": "Directly granted " + ", ".join(security_sql.ELEVATED_ROLES) + "." + _elevated_gap_note()},
         {"label": "Admins with one", "value": f"{len(df) - uncovered}"},
     ])
     styled_table(with_user_names(df, _PAGE)[["USER", "USER_NAME", "ADMIN_ROLES", "USER_NETWORK_POLICY"]],
@@ -519,7 +537,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
         _nn_cap = (" The window is capped at the last 90 days so a full 90-day baseline precedes it."
                    if window_was_capped(days, bounds, _nb, 90) else "")
         if nn.ok and nn.empty:
-            empty_state("clean", "No break-glass account logged in from a network unseen in the 90 days "
+            empty_state("clean", "No privileged (admin-role) account logged in from a network unseen in the 90 days "
                                  f"before {_nn_txt}." + _nn_cap)
         elif guard(nn, ""):
             # v4.461 P2: the count folds into the caption; the table is the evidence.
@@ -614,7 +632,8 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             "value": "—" if _adm_total is None else f"{_adm_total}",
             "help": ("Users directly granted " + ", ".join(security_sql.ELEVATED_ROLES)
                      + " who have a password and no MFA enrolled, whether or not they signed in by "
-                       "password recently. Admin rights inherited through another role aren't traced here."),
+                       "password recently. Admin rights inherited through another role aren't traced here."
+                     + _elevated_gap_note()),
             "delta_color": "inverse" if _adm_total else "off",
         }])
         if _adm_total:
@@ -629,11 +648,12 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                   security_sql.admin_role_holders(company), page=_PAGE,
                   key=f"admins_{company}",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
-        if guard(res, "No " + "/".join(security_sql.ADMIN_HOLDER_ROLES) + " grants visible to this role."):
+        if guard(res, "No " + "/".join(security_sql.ADMIN_HOLDER_ROLES) + " grants visible to this role. "
+                 + _HOLDER_LAG_NOTE):
             _admin_frame = res.df
             styled_table(with_user_names(with_user_names(_admin_frame, _PAGE), _PAGE,
                                          user_col="GRANTED_BY", display_col="Granted by"))
-            st.caption("This list should be short and every name should be expected.")
+            st.caption("This list should be short and every name should be expected. " + _HOLDER_LAG_NOTE)
         _render_admin_network_policy(company)
 
         # Moved from Changes (v4.49): entitlement hygiene — who still holds access
@@ -1653,7 +1673,7 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
     sheets = {
         "dormant_users": insights_sql.dormant_users(90, company),
         "mfa_gaps_password_login": security_sql.users_without_mfa(company, limit=_PACK_ROW_CAP),
-        "break_glass_holders": security_sql.admin_role_holders(company),
+        "privileged_role_holders": security_sql.admin_role_holders(company),
         "role_grants_window": security_sql.recent_role_grants(days, bounds=bounds, limit=_PACK_ROW_CAP),
         "failed_logins_window": security_sql.failed_logins(days, company, bounds=bounds, limit=_PACK_ROW_CAP),
         "expiring_credentials_10d": security_sql.expiring_credentials(10, company),   # LIMIT 300: flagged if hit
@@ -1715,7 +1735,9 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
                     f"Window: {window_label} (dormant users fixed at 90d; each windowed sheet states "
                     "the span it covers below)",
                     ("Company-scoped sheets: dormant_users, mfa_gaps_password_login, "
-                     "break_glass_holders, failed_logins_window, expiring_credentials_10d"),
+                     "privileged_role_holders, failed_logins_window, expiring_credentials_10d"),
+                    ("privileged_role_holders: direct holders of " + ", ".join(security_sql.ADMIN_HOLDER_ROLES)
+                     + " (GRANTS_TO_USERS, which lags up to about 2 hours)"),
                     ("Account-wide governance sheets: role_grants_window, role_privilege_matrix, "
                      "unused_roles_90d, direct_role_grants, grant_changes_90d"),
                     *(f"{name}.csv: {rows:,} rows"

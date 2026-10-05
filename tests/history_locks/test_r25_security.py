@@ -91,7 +91,7 @@ def test_egress_section_and_new_network_panel_wired():
     # (audit consolidation); Security keeps the security lenses + a deep-link to Cost.
     assert "sec_egress_cost_link" in sec
     # honest empty states — silence must read as "checked, clean", never blank
-    assert "No break-glass account logged in from a network unseen" in sec
+    assert "No privileged (admin-role) account logged in from a network unseen" in sec  # v4.610: was break-glass
     assert "No unloads to stages in this window" in sec
     # #18: the exfiltration-score subsection is toggle-gated and wired into the egress tab
     assert "sec_exfil_toggle" in sec

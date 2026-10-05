@@ -27,13 +27,18 @@ from app.logic.security import capped_window
 # tests/migrations/test_v075_security_operating_model.py). ----------------------------------
 # v4.610 (owner decision 2026-10-05, D14): SNOW_PRI_GFR_PRD_ALFA_DSA members are OVERWATCH admins (full parity
 # with the named admins, account-level levers included), so a DSA grant is an admin grant: ADMIN_HOLDER_ROLES
-# (the privileged-role-holder panel and both new-network-login readers) and ALERT_ADMIN_ROLES append it.
-# SNOW_PRI_GFR_PRD_ALFA_DTI is view-only and joins no admin tier; the other tiers are unchanged.
+# (the privileged-role-holder panel and both new-network-login readers) appends it, and ALERT_ADMIN_ROLES below
+# gains it together with V174 (its parity test pins it to the LATEST SP_ALERT_SCAN). SNOW_PRI_GFR_PRD_ALFA_DTI is
+# view-only and joins no admin tier; the other tiers are unchanged (owner-scoped D14).
 ADMIN_HOLDER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "SNOW_PRI_GFR_PRD_ALFA_DSA")
 BREAK_GLASS_ROLES: tuple[str, ...] = ("ACCOUNTADMIN", "SNOW_ACCOUNTADMINS")
 ELEVATED_ROLES: tuple[str, ...] = (
     "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN",
 )
+#: The ADMIN_HOLDER_ROLES the two ELEVATED_ROLES checks (admin password-without-MFA, admin user network policy)
+#: do not cover -- since 2026-10-05 SNOW_PRI_GFR_PRD_ALFA_DSA. Widening those checks is a separate owner decision;
+#: until then the Security page's KPI help names these roles, so a clean count never reads as every admin.
+ADMIN_HOLDERS_OUTSIDE_ELEVATED: tuple[str, ...] = tuple(r for r in ADMIN_HOLDER_ROLES if r not in ELEVATED_ROLES)
 REACHES_ADMIN_ROLES: tuple[str, ...] = (
     "SNOW_ACCOUNTADMINS", "ACCOUNTADMIN", "SNOW_SYSADMINS", "SECURITYADMIN",
 )
@@ -43,10 +48,8 @@ REACHES_ADMIN_ROLES: tuple[str, ...] = (
 # window: 20:00-06:00 America/Chicago plus Saturday/Sunday (ISO weekdays 6 and 7). The SQL literals live in arms
 # [26] / [27]; tests/test_security_alert_parity.py locks them to these constants. No builder here reads them (the
 # app's own grant-anomaly helpers keep their older 07-19 business day and 5-role ELEVATED_ROLES on purpose).
-# V174 (owner decision 2026-10-05, D14) appends SNOW_PRI_GFR_PRD_ALFA_DSA after SNOW_SYSADMINS in both arms.
 ALERT_ADMIN_ROLES: tuple[str, ...] = (
     "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN", "USERADMIN", "ORGADMIN", "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS",
-    "SNOW_PRI_GFR_PRD_ALFA_DSA",
 )
 OFF_HOURS_START_HOUR = 20          # Central hour >= this is off-hours
 OFF_HOURS_END_HOUR = 6             # Central hour < this is off-hours
@@ -1693,8 +1696,9 @@ NETWORK_BASELINE_DAYS = 90
 def new_network_logins(days: int = 7, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """r25 #6 (owner pick): privileged logins from never-before-seen networks.
 
-    Baseline = the 90 days of LOGIN_HISTORY BEFORE the triage window starts, for break-glass users
-    (same role list as admin_role_holders); a row surfaces only when a (user, IP) pair FIRST
+    Baseline = the 90 days of LOGIN_HISTORY BEFORE the triage window starts, for direct holders of
+    ADMIN_HOLDER_ROLES (same role list as admin_role_holders: the two SNOW_* roles and, since the owner
+    decision of 2026-10-05, SNOW_PRI_GFR_PRD_ALFA_DSA); a row surfaces only when a (user, IP) pair FIRST
     appears inside the triage window. The history used to be a fixed last-90-days, so a 90-day (or
     wider) window had NO baseline and listed every admin's routine office/VPN IP as new; it now
     reaches back window + 90 days (at most 180, inside LOGIN_HISTORY's 365-day retention). An IP
