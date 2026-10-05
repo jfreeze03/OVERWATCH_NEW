@@ -209,10 +209,12 @@ HEADER = f"""-- {NAME}
 -- FIRST RUN: the next hourly scan raises, for {DSA} only, what a watched role would have raised in
 -- the arms' own windows: one SEC_ADMIN_GRANT (HIGH) per direct grant created in the last 26h (a grant made earlier
 -- never raises), a SEC_NEW_ADMIN_NETWORK for a holder's user + IP pair first seen in the last 24h, and a CRITICAL
--- SEC_LOGIN_TAKEOVER for a holder's episode in the last 24h -- one already raised as the WARN band re-raises as CRIT
--- and the V067 sweep supersedes the WARN row. PREFLIGHT P174.1 lists the direct holders, P174.2-P174.4 what each
--- arm will raise; PART B V174.3 lists what it did raise. SEC_ADMIN_GRANT and SEC_LOGIN_TAKEOVER never auto-declare an
--- incident (V162).
+-- SEC_LOGIN_TAKEOVER for a holder's episode in the last 24h -- one already raised as the WARN band re-raises as CRIT.
+-- The V067 sweep supersedes that WARN only while it is OPEN or ACK: a WARN already resolved or snoozed re-opens as a
+-- fresh CRITICAL that stays OPEN (the snooze does not carry over: the CRIT key is not the WARN key) and routes and
+-- escalates like any CRITICAL, so resolve or snooze it the same way. PREFLIGHT P174.1 lists the direct holders,
+-- P174.2-P174.4 what each arm will raise (P174.3 with each CRIT twin's WARN state); PART B V174.3 lists what it did
+-- raise. SEC_ADMIN_GRANT and SEC_LOGIN_TAKEOVER never auto-declare an incident (V162).
 -- ROLLBACK: re-run V173's SP_ALERT_SCAN (the CREATE PROCEDURE in V173__alert_scan_supported_subquery_and_div0.sql);
 -- the rule NAME refresh is cosmetic and can stay. Prefer disabling a rule in Alerts > Rules.
 -- Apply AFTER V173 (alone, any time; no repairs). Idempotent; safe to re-run.
@@ -336,10 +338,26 @@ ORDER BY NEW_TO_ARM_26 DESC, USER_NAME;
 --        (the other roles' grants were raised by the scans before); each is one HIGH event, reviewed in Alerts.
 {STMT27};
 
--- P174.3 what the next hourly scan raises for SEC_LOGIN_TAKEOVER after V174 (arm [26]'s own statement): the CRIT twin of
---        a holder's episode already raised as WARN in the last 24h (the V067 sweep then supersedes the WARN), and any
---        episode the scan has not raised yet.
-{STMT26};
+-- P174.3 what the next hourly scan raises for SEC_LOGIN_TAKEOVER after V174 (arm [26]'s own statement, wrapped): the CRIT
+--        twin of a holder's episode already raised as WARN in the last 24h, and any episode the scan has not raised
+--        yet. WARN_TWIN_STATUS / WARN_TWIN_RESOLUTION_KIND are that WARN row's: the V067 sweep supersedes it only
+--        while it is OPEN or ACK; one already resolved or snoozed stays as it is and the CRIT re-opens the episode
+--        (it routes and escalates like any CRITICAL): resolve or snooze the CRIT the same way.
+SELECT p.*,
+       w.STATUS AS WARN_TWIN_STATUS,
+       w.RESOLUTION_KIND AS WARN_TWIN_RESOLUTION_KIND,
+       CASE WHEN w.STATUS IS NULL THEN NULL
+            WHEN w.STATUS IN ('OPEN', 'ACK') THEN 'superseded by this CRIT (V067 sweep, OPEN or ACK)'
+            ELSE 'WARN already ' || LOWER(w.STATUS) || ': this CRIT re-opens the episode (resolved or snoozed '
+                 || 'WARNs are not superseded) - resolve or snooze it the same way' END AS WARN_TWIN_NOTE
+FROM (
+{STMT26}
+) p
+LEFT JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS w
+       ON w.RULE_ID = p.RULE_ID
+      AND p.DEDUPE_KEY LIKE '%|CRIT|%'
+      AND w.DEDUPE_KEY = REPLACE(p.DEDUPE_KEY, '|CRIT|', '|WARN|')
+ORDER BY p.DEDUPE_KEY;
 
 -- P174.4 what the next hourly scan raises for SEC_NEW_ADMIN_NETWORK after V174 (arm [18]'s own statement): a holder's
 --        user + IP pairs first seen (against 90 days) in the last 24h, at or over the rule's threshold.

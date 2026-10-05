@@ -24,10 +24,12 @@
 -- FIRST RUN: the next hourly scan raises, for SNOW_PRI_GFR_PRD_ALFA_DSA only, what a watched role would have raised in
 -- the arms' own windows: one SEC_ADMIN_GRANT (HIGH) per direct grant created in the last 26h (a grant made earlier
 -- never raises), a SEC_NEW_ADMIN_NETWORK for a holder's user + IP pair first seen in the last 24h, and a CRITICAL
--- SEC_LOGIN_TAKEOVER for a holder's episode in the last 24h -- one already raised as the WARN band re-raises as CRIT
--- and the V067 sweep supersedes the WARN row. PREFLIGHT P174.1 lists the direct holders, P174.2-P174.4 what each
--- arm will raise; PART B V174.3 lists what it did raise. SEC_ADMIN_GRANT and SEC_LOGIN_TAKEOVER never auto-declare an
--- incident (V162).
+-- SEC_LOGIN_TAKEOVER for a holder's episode in the last 24h -- one already raised as the WARN band re-raises as CRIT.
+-- The V067 sweep supersedes that WARN only while it is OPEN or ACK: a WARN already resolved or snoozed re-opens as a
+-- fresh CRITICAL that stays OPEN (the snooze does not carry over: the CRIT key is not the WARN key) and routes and
+-- escalates like any CRITICAL, so resolve or snooze it the same way. PREFLIGHT P174.1 lists the direct holders,
+-- P174.2-P174.4 what each arm will raise (P174.3 with each CRIT twin's WARN state); PART B V174.3 lists what it did
+-- raise. SEC_ADMIN_GRANT and SEC_LOGIN_TAKEOVER never auto-declare an incident (V162).
 -- ROLLBACK: re-run V173's SP_ALERT_SCAN (the CREATE PROCEDURE in V173__alert_scan_supported_subquery_and_div0.sql);
 -- the rule NAME refresh is cosmetic and can stay. Prefer disabling a rule in Alerts > Rules.
 -- Apply AFTER V173 (alone, any time; no repairs). Idempotent; safe to re-run.

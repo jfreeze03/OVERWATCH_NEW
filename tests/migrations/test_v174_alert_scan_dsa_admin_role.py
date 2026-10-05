@@ -176,6 +176,14 @@ def test_v174_preflight_carries_the_arms_own_text(tmp_path):
                             ("-- P174.4 ", None, _A18)):
         grid = pre[pre.index(head):pre.index(nxt) if nxt else len(pre)]
         assert dedent(_between(_H, *span)) in grid, head
+    # P174.3 wraps arm [26]'s statement verbatim and adds the WARN twin's state (a read of ALERT_EVENTS, no write)
+    p3 = _between(pre, "-- P174.3 ", "-- P174.4 ")
+    assert f"FROM (\n{dedent(_between(_H, *_A26))}\n) p\n" in p3
+    assert "ON w.RULE_ID = p.RULE_ID" in p3 and "w.DEDUPE_KEY = REPLACE(p.DEDUPE_KEY, '|CRIT|', '|WARN|')" in p3
+    assert "p.DEDUPE_KEY LIKE '%|CRIT|%'" in p3
+    for col in ("WARN_TWIN_STATUS", "WARN_TWIN_RESOLUTION_KIND", "WARN_TWIN_NOTE"):
+        assert f"AS {col}" in p3, col
+    assert "OPEN or ACK" in p3 and "resolved or snoozed" in p3
     # P174.1 reads only live DIRECT grants and the V173 lists as "already watched"
     p1 = _between(pre, "-- P174.1 ", "-- P174.2 ")
     assert f"ROLE = '{_DSA}'" in p1 and p1.count("DELETED_ON IS NULL") == 2
@@ -222,8 +230,13 @@ def test_v174_first_line_guard_and_version():
                  "Apply AFTER V173 (alone, any time; no repairs). Idempotent; safe to re-run."):
         assert word in header, word
     flat = " ".join(ln.lstrip("- ") for ln in header.splitlines())
-    for phrase in ("2026-10-05", "last 26h", "PREFLIGHT P174.1", "PART B V174.3", "never auto-declare"):
+    for phrase in ("2026-10-05", "last 26h", "PREFLIGHT P174.1", "PART B V174.3", "never auto-declare",
+                   # the V067 sweep supersedes only an OPEN / ACK WARN: a resolved or snoozed one re-opens as CRIT
+                   "supersedes that WARN only while it is OPEN or ACK",
+                   "a WARN already resolved or snoozed re-opens as a fresh CRITICAL",
+                   "resolve or snooze it the same way", "P174.3 with each CRIT twin's WARN state"):
         assert phrase in flat, phrase
+    assert "and the V067 sweep supersedes the WARN row. PREFLIGHT" not in flat        # the old, unconditional claim
 
 
 def test_v174_file_order_and_only_the_name_refresh_runs_at_apply():
@@ -346,7 +359,10 @@ def test_v174_appends_the_role_to_exactly_the_three_admin_lists():
 def test_v174_alert_list_stays_the_apps_one_list():
     from app.data import security_sql
     assert tuple(_in_list(_between(_H, *_A26))) == tuple(_in_list(_between(_H, *_A27))) == (*_SEVEN, _DSA)
-    assert (*_SEVEN, _DSA) == security_sql.ALERT_ADMIN_ROLES
+    # V174's own list is the head of the app constant (law 5: lock this migration's content, not the tip); the whole
+    # constant's equality with the LATEST arms is tests/test_security_alert_parity.py's, so a later append or a
+    # later re-derivation edits that lock alone
+    assert security_sql.ALERT_ADMIN_ROLES[:len(_SEVEN) + 1] == (*_SEVEN, _DSA)
 
 
 def test_v174_tallies_footprint_and_labels_unchanged():

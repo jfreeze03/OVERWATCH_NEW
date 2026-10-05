@@ -128,6 +128,29 @@ def test_the_crit_twin_of_an_earlier_warn_supersedes_it_after_the_apply():
                      v162h._key26("DSA.USER", "CRIT", s): ("OPEN", None)}
 
 
+@pytest.mark.parametrize(("status", "kind"), [("RESOLVED", "EXPECTED"), ("RESOLVED", "NOISE"), ("SNOOZED", None)])
+def test_a_warn_already_resolved_or_snoozed_re_opens_as_a_crit_nothing_supersedes(status, kind):
+    """FIRST RUN edge (the header's FIRST RUN note and PREFLIGHT P174.3 name it): the V067 sweep supersedes only an
+    OPEN / ACK WARN, so a holder's episode whose WARN was already resolved or snoozed before V174 re-opens as a fresh
+    CRITICAL that stays OPEN (the snooze never carries over: the CRIT key is not the WARN key). The operator resolves
+    it the same way; the body is V173's, only the notes say so."""
+    s = v162h._at(_WED, 10)
+    logins = v162h._episode("DSA.USER", s)
+    grants = [v162h._grant("DSA.USER", _DSA, s - timedelta(days=30))]
+    before = v162h._run(_ARM26_173, s + timedelta(hours=1), logins=logins, grants=grants)
+    events = [dict(e, RESOLUTION_KIND=kind) for e in v162h._raised(before, s + timedelta(hours=1), "w", status)]
+    rows = v162h._run(_ARM26, s + timedelta(hours=2), logins=logins, grants=grants, events=events)
+    assert [(r["DEDUPE_KEY"], r["SEVERITY"]) for r in rows] == [(v162h._key26("DSA.USER", "CRIT", s), "CRITICAL")]
+    con = v162h._connect({"ALERT_CONFIG": v162h._CFG,
+                          "ALERT_EVENTS": [*events, *v162h._raised(rows, s + timedelta(hours=2), "c")]},
+                         v162h._ms(s + timedelta(hours=2)))
+    con.execute(v162h._sq(_SUPERSEDE))
+    state = {e["DEDUPE_KEY"]: (e["STATUS"], e["RESOLUTION_KIND"])
+             for e in v162h._rows(con, "SELECT * FROM ALERT_EVENTS")}
+    assert state == {v162h._key26("DSA.USER", "WARN", s): (status, kind),
+                     v162h._key26("DSA.USER", "CRIT", s): ("OPEN", None)}
+
+
 # ============================================================================================================
 # [18] SEC_NEW_ADMIN_NETWORK: a DSA holder's new network raises (V173: not an admin)
 # ============================================================================================================
@@ -272,7 +295,54 @@ def test_preflight_p174_2_and_3_raise_what_the_arms_raise(tmp_path, head, nxt, a
     def key(r: dict) -> str:
         return r["DEDUPE_KEY"]
 
-    assert sorted(v162h._rows(con, v162h._sq(grid)), key=key) == sorted(want, key=key)
+    got = v162h._rows(con, v162h._sq(grid))
+    twin = ("WARN_TWIN_STATUS", "WARN_TWIN_RESOLUTION_KIND", "WARN_TWIN_NOTE")
+    if arm == "26":                    # P174.3 adds the WARN twin's state (no WARN raised yet here: all NULL)
+        assert all(tuple(r)[-3:] == twin and r[twin[0]] is r[twin[1]] is r[twin[2]] is None for r in got)
+        got = [{k: v for k, v in r.items() if k not in twin} for r in got]
+    assert sorted(got, key=key) == sorted(want, key=key)
+
+
+def test_preflight_p174_3_names_each_crit_twins_warn_state(tmp_path):
+    """P174.3 shows, beside each CRIT twin, the state of the WARN the scans before V174 raised for that episode: an
+    OPEN / ACK one the V067 sweep supersedes, a RESOLVED / SNOOZED one it does not (the CRIT re-opens the episode)."""
+    pf, _ = _gen(tmp_path)
+    grid = _grid(pf, "-- P174.3 ", "-- P174.4 ")
+    s = v162h._at(_WED, 10)
+    states = {"OPEN.W": ("OPEN", None), "ACK.W": ("ACK", None), "DONE.W": ("RESOLVED", "EXPECTED"),
+              "NAP.W": ("SNOOZED", None), "NEW.U": None}
+    grants = [v162h._grant(u, _DSA, s - timedelta(days=30)) for u in states]
+    logins = [login for u in states for login in v162h._episode(u, s)]
+    before = v162h._run(_ARM26_173, s + timedelta(hours=1), logins=logins, grants=grants)
+    events = []
+    for i, row in enumerate(before):
+        user = row["DEDUPE_KEY"].split("|")[1]
+        if states[user] is not None:
+            status, kind = states[user]
+            events.append(dict(row, EVENT_ID=f"w{i}", STATUS=status, RESOLUTION_KIND=kind,
+                               RAISED_AT=v162h._ms(s + timedelta(hours=1)), RESOLVED_AT=None))
+    now = s + timedelta(hours=2)
+    want = v162h._run(_ARM26, now, logins=logins, grants=grants, events=events)
+    con = v162h._connect({"ALERT_CONFIG": v162h._CFG, "GRANTS_TO_USERS": grants, "LOGIN_HISTORY": logins,
+                          "ALERT_EVENTS": events}, v162h._ms(now))
+    got = v162h._rows(con, v162h._sq(grid))
+    twin = ("WARN_TWIN_STATUS", "WARN_TWIN_RESOLUTION_KIND", "WARN_TWIN_NOTE")
+    def key(r: dict) -> str:
+        return r["DEDUPE_KEY"]
+
+    # the wrapped arm raises exactly what the arm raises: one CRIT per holder, the WARN-twin guard untouched
+    assert sorted(({k: v for k, v in r.items() if k not in twin} for r in got), key=key) == sorted(want, key=key)
+    assert {r["DEDUPE_KEY"] for r in got} == {v162h._key26(u, "CRIT", s) for u in states}
+    seen = {r["DEDUPE_KEY"].split("|")[1]: (r[twin[0]], r[twin[1]], r[twin[2]]) for r in got}
+    for user, state in states.items():
+        status, kind, note = seen[user]
+        assert (status, kind) == (state or (None, None)), user
+        if state is None:
+            assert note is None, user
+        elif state[0] in ("OPEN", "ACK"):
+            assert note.startswith("superseded by this CRIT"), (user, note)
+        else:
+            assert note.startswith(f"WARN already {state[0].lower()}: this CRIT re-opens the episode"), (user, note)
 
 
 def test_preflight_p174_4_raises_what_arm_18_raises(tmp_path):

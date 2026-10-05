@@ -37,7 +37,7 @@ def test_admin_role_list_matches_the_app_constant_in_both_arms():
     assert _in_list(grant) == security_sql.ALERT_ADMIN_ROLES
     # the owner's seven (V162, 2026-09-29) + SNOW_PRI_GFR_PRD_ALFA_DSA (V174, owner access decision 2026-10-05: a
     # direct holder is an OVERWATCH admin), no duplicates
-    assert len(set(security_sql.ALERT_ADMIN_ROLES)) == 8
+    assert len(set(security_sql.ALERT_ADMIN_ROLES)) == len(security_sql.ALERT_ADMIN_ROLES) == 8
     assert security_sql.ALERT_ADMIN_ROLES[-1] == "SNOW_PRI_GFR_PRD_ALFA_DSA"
     # the app's older admin tiers are untouched by the alert list (different questions, different lists)
     assert set(security_sql.ELEVATED_ROLES) < set(security_sql.ALERT_ADMIN_ROLES)
@@ -66,6 +66,10 @@ def test_new_admin_network_arm_keeps_its_own_narrower_list():
     arm18 = _arm(scan, "    -- [18] SEC_NEW_ADMIN_NETWORK", "    -- [20] SEC_NEW_EXPOSURE")
     assert _in_list(arm18) == ("ACCOUNTADMIN", "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "SNOW_PRI_GFR_PRD_ALFA_DSA")
     assert set(_in_list(arm18)) < set(security_sql.ALERT_ADMIN_ROLES)
+    # [18] is the SQL twin of the app's admin new-network panels (security_sql.ADMIN_HOLDER_ROLES, which add no
+    # ACCOUNTADMIN): every role those panels count as an admin holder, the alert watches too -- dropping one from the
+    # arm (or adding one to the panels alone) fails here instead of silently diverging the alert from the panel
+    assert set(security_sql.ADMIN_HOLDER_ROLES) <= set(_in_list(arm18)) - {"ACCOUNTADMIN"}
 
 
 def test_the_parity_check_has_teeth():
