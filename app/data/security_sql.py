@@ -25,11 +25,20 @@ from app.logic.security import capped_window
 # BREAK_GLASS on column ROLE inside a plain (non-f) SQL string, and effective_access applies
 # REACHES_ADMIN_ROLES as a genuine two-line SQL list (its parity with this constant is locked in
 # tests/migrations/test_v075_security_operating_model.py). ----------------------------------
-ADMIN_HOLDER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
+# v4.610 (owner decision 2026-10-05, D14): SNOW_PRI_GFR_PRD_ALFA_DSA members are OVERWATCH admins (full parity
+# with the named admins, account-level levers included), so a DSA grant is an admin grant: ADMIN_HOLDER_ROLES
+# (the privileged-role-holder panel and both new-network-login readers) appends it, and ALERT_ADMIN_ROLES below
+# gains it together with V174 (its parity test pins it to the LATEST SP_ALERT_SCAN). SNOW_PRI_GFR_PRD_ALFA_DTI is
+# view-only and joins no admin tier; the other tiers are unchanged (owner-scoped D14).
+ADMIN_HOLDER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "SNOW_PRI_GFR_PRD_ALFA_DSA")
 BREAK_GLASS_ROLES: tuple[str, ...] = ("ACCOUNTADMIN", "SNOW_ACCOUNTADMINS")
 ELEVATED_ROLES: tuple[str, ...] = (
     "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN",
 )
+#: The ADMIN_HOLDER_ROLES the two ELEVATED_ROLES checks (admin password-without-MFA, admin user network policy)
+#: do not cover -- since 2026-10-05 SNOW_PRI_GFR_PRD_ALFA_DSA. Widening those checks is a separate owner decision;
+#: until then the Security page's KPI help names these roles, so a clean count never reads as every admin.
+ADMIN_HOLDERS_OUTSIDE_ELEVATED: tuple[str, ...] = tuple(r for r in ADMIN_HOLDER_ROLES if r not in ELEVATED_ROLES)
 REACHES_ADMIN_ROLES: tuple[str, ...] = (
     "SNOW_ACCOUNTADMINS", "ACCOUNTADMIN", "SNOW_SYSADMINS", "SECURITYADMIN",
 )
@@ -400,8 +409,9 @@ ORDER BY CREATED_ON DESC
 
 
 def admin_role_holders(company: str = "ALL") -> str:
-    """Current holders of the admin roles (owner 2026-07-13: the only roles
-    with access are SNOW_ACCOUNTADMINS / SNOW_SYSADMINS); short, known list."""
+    """Current direct holders of ADMIN_HOLDER_ROLES: SNOW_ACCOUNTADMINS, SNOW_SYSADMINS and, since the
+    owner decision of 2026-10-05, SNOW_PRI_GFR_PRD_ALFA_DSA (whose direct members are OVERWATCH admins).
+    The list should stay short and every name expected."""
     where = and_where(
         "DELETED_ON IS NULL",
         _admin_roles_in("ROLE", ADMIN_HOLDER_ROLES),
@@ -1686,8 +1696,9 @@ NETWORK_BASELINE_DAYS = 90
 def new_network_logins(days: int = 7, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """r25 #6 (owner pick): privileged logins from never-before-seen networks.
 
-    Baseline = the 90 days of LOGIN_HISTORY BEFORE the triage window starts, for break-glass users
-    (same role list as admin_role_holders); a row surfaces only when a (user, IP) pair FIRST
+    Baseline = the 90 days of LOGIN_HISTORY BEFORE the triage window starts, for direct holders of
+    ADMIN_HOLDER_ROLES (same role list as admin_role_holders: the two SNOW_* roles and, since the owner
+    decision of 2026-10-05, SNOW_PRI_GFR_PRD_ALFA_DSA); a row surfaces only when a (user, IP) pair FIRST
     appears inside the triage window. The history used to be a fixed last-90-days, so a 90-day (or
     wider) window had NO baseline and listed every admin's routine office/VPN IP as new; it now
     reaches back window + 90 days (at most 180, inside LOGIN_HISTORY's 365-day retention). An IP
