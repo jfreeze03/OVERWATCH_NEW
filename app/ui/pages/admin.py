@@ -814,6 +814,11 @@ _EXPECTED_MIGRATIONS = {
          "from V169 -- COST_IDLE_OPPORTUNITY's two divisions are NULLIF-guarded (Division by zero on a "
          "zero-credit warehouse, 2026-10-01). Tallies and every other arm unchanged. No task change, no "
          "apply-time run",
+    174: "Owner access decision 2026-10-05: SNOW_PRI_GFR_PRD_ALFA_DSA (a direct holder is an OVERWATCH admin) joins "
+         "the hourly security watch -- SP_ALERT_SCAN re-derived from V173 with the role added to the admin lists of "
+         "SEC_ADMIN_GRANT (a direct grant raises), SEC_LOGIN_TAKEOVER (a holder takeover is CRITICAL) and "
+         "SEC_NEW_ADMIN_NETWORK (a holder new network raises); the SEC_ADMIN_GRANT rule name lists it. Tallies and "
+         "every other arm unchanged. No task change, no apply-time run",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
