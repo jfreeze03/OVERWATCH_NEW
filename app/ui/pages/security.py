@@ -629,7 +629,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                   security_sql.admin_role_holders(company), page=_PAGE,
                   key=f"admins_{company}",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
-        if guard(res, "No SNOW_ACCOUNTADMINS/SNOW_SYSADMINS grants visible to this role."):
+        if guard(res, "No " + "/".join(security_sql.ADMIN_HOLDER_ROLES) + " grants visible to this role."):
             _admin_frame = res.df
             styled_table(with_user_names(with_user_names(_admin_frame, _PAGE), _PAGE,
                                          user_col="GRANTED_BY", display_col="Granted by"))

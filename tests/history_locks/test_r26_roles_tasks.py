@@ -28,8 +28,11 @@ def test_roles_sql_grants_only_the_two_snow_roles():
     assert "CREATE ROLE" not in roles                      # no custom layer returns
 
 
-def test_break_glass_panels_watch_the_two_real_roles():
+def test_break_glass_panels_watch_the_admin_holder_roles():
+    # the two SNOW_* roles, plus SNOW_PRI_GFR_PRD_ALFA_DSA since the owner decision of 2026-10-05 made
+    # its direct members OVERWATCH admins (tests/test_security_admin_tiers.py)
     from app.data import security_sql
     for sql in (security_sql.admin_role_holders(), security_sql.new_network_logins(7)):
-        assert "'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS'" in sql
+        assert "ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', 'SNOW_PRI_GFR_PRD_ALFA_DSA')" in sql
         assert "SECURITYADMIN" not in sql and "ORGADMIN" not in sql
+        assert "SNOW_PRI_GFR_PRD_ALFA_DTI" not in sql

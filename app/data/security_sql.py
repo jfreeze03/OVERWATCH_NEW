@@ -25,7 +25,11 @@ from app.logic.security import capped_window
 # BREAK_GLASS on column ROLE inside a plain (non-f) SQL string, and effective_access applies
 # REACHES_ADMIN_ROLES as a genuine two-line SQL list (its parity with this constant is locked in
 # tests/migrations/test_v075_security_operating_model.py). ----------------------------------
-ADMIN_HOLDER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
+# v4.610 (owner decision 2026-10-05, D14): SNOW_PRI_GFR_PRD_ALFA_DSA members are OVERWATCH admins (full parity
+# with the named admins, account-level levers included), so a DSA grant is an admin grant: ADMIN_HOLDER_ROLES
+# (the privileged-role-holder panel and both new-network-login readers) and ALERT_ADMIN_ROLES append it.
+# SNOW_PRI_GFR_PRD_ALFA_DTI is view-only and joins no admin tier; the other tiers are unchanged.
+ADMIN_HOLDER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "SNOW_PRI_GFR_PRD_ALFA_DSA")
 BREAK_GLASS_ROLES: tuple[str, ...] = ("ACCOUNTADMIN", "SNOW_ACCOUNTADMINS")
 ELEVATED_ROLES: tuple[str, ...] = (
     "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN",
@@ -39,8 +43,10 @@ REACHES_ADMIN_ROLES: tuple[str, ...] = (
 # window: 20:00-06:00 America/Chicago plus Saturday/Sunday (ISO weekdays 6 and 7). The SQL literals live in arms
 # [26] / [27]; tests/test_security_alert_parity.py locks them to these constants. No builder here reads them (the
 # app's own grant-anomaly helpers keep their older 07-19 business day and 5-role ELEVATED_ROLES on purpose).
+# V174 (owner decision 2026-10-05, D14) appends SNOW_PRI_GFR_PRD_ALFA_DSA after SNOW_SYSADMINS in both arms.
 ALERT_ADMIN_ROLES: tuple[str, ...] = (
     "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN", "USERADMIN", "ORGADMIN", "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS",
+    "SNOW_PRI_GFR_PRD_ALFA_DSA",
 )
 OFF_HOURS_START_HOUR = 20          # Central hour >= this is off-hours
 OFF_HOURS_END_HOUR = 6             # Central hour < this is off-hours
@@ -400,8 +406,9 @@ ORDER BY CREATED_ON DESC
 
 
 def admin_role_holders(company: str = "ALL") -> str:
-    """Current holders of the admin roles (owner 2026-07-13: the only roles
-    with access are SNOW_ACCOUNTADMINS / SNOW_SYSADMINS); short, known list."""
+    """Current direct holders of ADMIN_HOLDER_ROLES: SNOW_ACCOUNTADMINS, SNOW_SYSADMINS and, since the
+    owner decision of 2026-10-05, SNOW_PRI_GFR_PRD_ALFA_DSA (whose direct members are OVERWATCH admins).
+    The list should stay short and every name expected."""
     where = and_where(
         "DELETED_ON IS NULL",
         _admin_roles_in("ROLE", ADMIN_HOLDER_ROLES),

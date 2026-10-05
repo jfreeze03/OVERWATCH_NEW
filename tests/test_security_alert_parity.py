@@ -35,7 +35,9 @@ def test_admin_role_list_matches_the_app_constant_in_both_arms():
     takeover, grant = _arms()
     assert _in_list(takeover) == security_sql.ALERT_ADMIN_ROLES
     assert _in_list(grant) == security_sql.ALERT_ADMIN_ROLES
-    assert len(set(security_sql.ALERT_ADMIN_ROLES)) == 7                     # the owner's list, no duplicates
+    # the owner's seven (2026-09-29) plus SNOW_PRI_GFR_PRD_ALFA_DSA (2026-10-05, V174), no duplicates
+    assert len(set(security_sql.ALERT_ADMIN_ROLES)) == len(security_sql.ALERT_ADMIN_ROLES) == 8
+    assert security_sql.ALERT_ADMIN_ROLES[-1] == "SNOW_PRI_GFR_PRD_ALFA_DSA"
     # the app's older admin tiers are untouched by the alert list (different questions, different lists)
     assert set(security_sql.ELEVATED_ROLES) < set(security_sql.ALERT_ADMIN_ROLES)
 
