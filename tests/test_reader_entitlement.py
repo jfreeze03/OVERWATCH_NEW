@@ -1,11 +1,16 @@
-"""Read-only tier (v4.374.0): non-admin viewers see the monitor, change nothing.
+"""Read-only tiers: non-admin viewers see the monitor, change nothing.
 
 Page visibility on owner's-rights Streamlit-in-Snowflake keys on the VIEWER
-(st.user), not CURRENT_ROLE() (which is the app owner's role for everyone). The
-5 admins map to DBA, the 4 ETL users to the read-only READER profile (no
-Admin/Alerts/Ask), and any identified-but-unmapped SiS viewer fails CLOSED to
-READER — never the owner's DBA. Write entitlement (OPERATOR_USERS) stays a
-separate axis: the ETL team is deliberately NOT operators.
+(st.user), not CURRENT_ROLE() (which is the app owner's role for everyone).
+v4.374.0 mapped the 5 admins to DBA and the 4 ETL users to the read-only READER
+profile. v4.610.0 (owner decision 2026-10-05) replaced the per-user pins: the 5
+admins are DBA through OPERATOR_USERS alone (a DBA pin is forbidden), a direct
+SNOW_PRI_GFR_PRD_ALFA_DSA grantee is DBA too, and every other identified viewer --
+the ETL team (SNOW_PRI_GFR_PRD_ALFA_DTI) included -- gets the view-only MONITOR
+profile (Cost Intelligence + Operations). An unidentified SiS viewer fails CLOSED
+to MONITOR, never the owner's DBA. Write entitlement stays a separate axis: the
+ETL team is deliberately NOT operators. tests/test_role_access.py covers the role
+lookup itself.
 """
 
 from __future__ import annotations
@@ -14,6 +19,8 @@ import pandas as pd
 import pytest
 
 from app.config import (
+    NO_IDENTITY_PROFILE,
+    OPERATOR_PROFILES,
     PAGES_BY_PROFILE,
     VIEWER_PROFILES,
     VIEWER_UNKNOWN_PROFILE,
@@ -26,7 +33,8 @@ _ETL = ("GRTHOMP1", "SUDEVAX", "TV5073", "VS4229")
 
 
 # ---------------------------------------------------------------------------
-# The READER page set: everything EXCEPT Admin, Alerts, Ask (owner ask 2026-08-31)
+# The READER page set: everything EXCEPT Admin, Alerts, Ask (owner ask 2026-08-31).
+# Kept for an explicit pin; no viewer lands on it by default since v4.610.0.
 # ---------------------------------------------------------------------------
 def test_reader_profile_excludes_admin_alerts_ask():
     reader = PAGES_BY_PROFILE["READER"]
@@ -35,37 +43,47 @@ def test_reader_profile_excludes_admin_alerts_ask():
     for shown in ("Brief", "Overview", "Control Room", "Cost Intelligence",
                   "Operations", "Proof", "Security"):
         assert shown in reader, shown
-    # ETL explicitly wanted Operations visible; it is (writes there are is_operator-gated)
-    assert "Operations" in reader
-    assert reader[0] == "Brief"                 # lands on Brief like every profile
+    assert reader[0] == "Brief"
 
 
 # ---------------------------------------------------------------------------
-# The pure viewer -> profile map (mirrors is_operator_user's case-insensitivity)
+# The MONITOR page set: exactly Cost Intelligence + Operations (owner 2026-10-05)
 # ---------------------------------------------------------------------------
-def test_resolve_viewer_profile_maps_admins_and_etl():
-    for u in _ADMINS:
-        assert resolve_viewer_profile(u) == "DBA", u
-    for u in _ETL:
-        assert resolve_viewer_profile(u) == "READER", u
+def test_monitor_profile_is_the_two_page_view_surface():
+    monitor = PAGES_BY_PROFILE["MONITOR"]
+    assert monitor == ("Cost Intelligence", "Operations")
+    for hidden in ("Brief", "Overview", "Control Room", "Proof", "Alerts", "Security", "Admin", "Ask"):
+        assert hidden not in monitor, hidden
+    assert monitor[0] == "Cost Intelligence"     # its landing page
 
 
-def test_resolve_viewer_profile_is_case_insensitive():
-    assert resolve_viewer_profile("h21427") == "DBA"
+# ---------------------------------------------------------------------------
+# The pure viewer -> pin map: no admin pins, no ETL pins (v4.610.0)
+# ---------------------------------------------------------------------------
+def test_no_viewer_is_pinned_any_more():
+    for u in (*_ADMINS, *_ETL):
+        assert resolve_viewer_profile(u) is None, u
+
+
+def test_resolve_viewer_profile_is_case_insensitive(monkeypatch):
+    import app.config as cfg
+    monkeypatch.setattr(cfg, "VIEWER_PROFILES", {"GRTHOMP1": "READER"})
     assert resolve_viewer_profile("GrThOmP1") == "READER"
 
 
 def test_resolve_viewer_profile_unmapped_and_blank_return_none():
-    # None means "no explicit mapping" — the caller (active_profile) turns a
-    # non-blank unmapped viewer into READER and a blank one into the role fallback.
+    # None means "no explicit pin" — the caller (viewer_access) turns a non-blank
+    # unpinned viewer into MONITOR and a blank one into the role fallback.
     assert resolve_viewer_profile("SOMEONE_NEW") is None
     assert resolve_viewer_profile("") is None
     assert resolve_viewer_profile("   ") is None
 
 
-def test_unknown_viewer_default_is_least_privilege_not_dba():
-    assert VIEWER_UNKNOWN_PROFILE == "READER"
-    assert "Admin" not in PAGES_BY_PROFILE[VIEWER_UNKNOWN_PROFILE]
+def test_unknown_and_unidentified_viewers_get_least_privilege_not_dba():
+    assert VIEWER_UNKNOWN_PROFILE == NO_IDENTITY_PROFILE == "MONITOR"
+    for profile in (VIEWER_UNKNOWN_PROFILE, NO_IDENTITY_PROFILE):
+        assert "Admin" not in PAGES_BY_PROFILE[profile]
+        assert profile not in OPERATOR_PROFILES
 
 
 # ---------------------------------------------------------------------------
@@ -78,16 +96,22 @@ def test_operator_users_are_the_five_admins_only():
         assert not is_operator_user(u), u
 
 
-def test_viewer_profiles_admins_match_operator_users():
-    # every viewer mapped to DBA is also an operator, and vice-versa — the two
-    # lists are separate but must not silently drift for the admin team
-    dba_viewers = {k.upper() for k, v in VIEWER_PROFILES.items() if v == "DBA"}
-    assert dba_viewers == {u.upper() for u in _ADMINS}
+def test_viewer_profiles_never_pin_an_admin_profile():
+    # OPERATOR_USERS alone means admin (v4.610.0): a DBA pin would be a second, drifting admin list
+    assert not [k for k, v in VIEWER_PROFILES.items() if v in OPERATOR_PROFILES]
 
 
 # ---------------------------------------------------------------------------
 # session.active_profile(): viewer-first, fail-closed on SiS, role fallback off-SiS
 # ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _fresh_session_state():
+    import streamlit as _st
+    _st.session_state.clear()
+    yield
+    _st.session_state.clear()
+
+
 def test_active_profile_admin_viewer_gets_dba(monkeypatch):
     import app.core.identity as ident
     import app.core.session as sess
@@ -95,20 +119,20 @@ def test_active_profile_admin_viewer_gets_dba(monkeypatch):
     assert sess.active_profile("") == "DBA"
 
 
-def test_active_profile_etl_viewer_gets_reader(monkeypatch):
+def test_active_profile_etl_viewer_gets_monitor(monkeypatch):
     import app.core.identity as ident
     import app.core.session as sess
     monkeypatch.setattr(ident, "viewer_name", lambda: "grthomp1")   # case-insensitive
-    assert sess.active_profile("") == "READER"
+    assert sess.active_profile("") == "MONITOR"
 
 
-def test_active_profile_identified_unmapped_fails_closed_to_reader(monkeypatch):
-    # a real person who opens the app but isn't listed must NOT inherit the
+def test_active_profile_identified_unmapped_fails_closed_to_monitor(monkeypatch):
+    # a real person who opens the app but is not an admin must NOT inherit the
     # owner's DBA surface even when the owner-role arg is DBA
     import app.core.identity as ident
     import app.core.session as sess
     monkeypatch.setattr(ident, "viewer_name", lambda: "BRAND_NEW_USER")
-    assert sess.active_profile("SNOW_ACCOUNTADMINS") == "READER"
+    assert sess.active_profile("SNOW_ACCOUNTADMINS") == "MONITOR"
 
 
 def test_active_profile_off_sis_falls_back_to_role(monkeypatch):
@@ -126,7 +150,7 @@ def test_active_profile_sis_without_identity_fails_closed(monkeypatch):
     import app.core.session as sess
     monkeypatch.setattr(ident, "viewer_name", lambda: "")
     monkeypatch.setattr(sess, "is_sis", lambda: True)
-    assert sess.active_profile("SNOW_ACCOUNTADMINS") == "READER"
+    assert sess.active_profile("SNOW_ACCOUNTADMINS") == "MONITOR"
 
 
 def test_is_operator_sis_without_identity_fails_closed(monkeypatch):
@@ -141,17 +165,23 @@ def test_is_operator_sis_without_identity_fails_closed(monkeypatch):
 
 
 def test_is_operator_identified_admin_holds_on_sis(monkeypatch):
-    # An identified operator is entitled by the st.user allowlist regardless of runtime.
+    # An identified allowlisted operator is entitled by st.user regardless of runtime,
+    # and never waits on (or pays for) the admin-role lookup.
     import app.core.identity as ident
     import app.core.session as sess
+
+    def _no_lookup():
+        raise AssertionError("an allowlisted admin must not run the role lookup")
+
     monkeypatch.setattr(ident, "viewer_name", lambda: _ADMINS[0])
     monkeypatch.setattr(sess, "is_sis", lambda: True)
+    monkeypatch.setattr(sess, "_admin_role_rows", _no_lookup)
     assert sess.is_operator() is True
 
 
 # ---------------------------------------------------------------------------
-# End-to-end: a READER viewer's nav hides Admin/Alerts/Ask and a forced
-# _ow_page='Admin' still cannot render Admin (the dispatch hard-block)
+# End-to-end: a MONITOR viewer's nav shows only Cost Intelligence + Operations and a
+# forced _ow_page='Admin' still cannot render Admin (the dispatch hard-block)
 # ---------------------------------------------------------------------------
 st = pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -182,7 +212,7 @@ def _reader_app(monkeypatch):
 
     monkeypatch.setattr(main_mod, "connection_available", lambda: True)
     monkeypatch.setattr(main_mod, "current_role", lambda: "SNOW_ACCOUNTADMINS")
-    # the viewer is an ETL user -> active_profile resolves to READER
+    # the viewer is an ETL user -> active_profile resolves to MONITOR (off-SiS: no role lookup)
     monkeypatch.setattr(ident, "viewer_name", lambda: "GRTHOMP1")
 
     settings = dict(DEFAULT_SETTINGS)
@@ -211,18 +241,17 @@ def _nav_options(at) -> list[str]:
     return opts
 
 
-def test_reader_nav_hides_admin_alerts_ask_but_shows_operations(_reader_app):
+def test_monitor_nav_shows_only_cost_intelligence_and_operations(_reader_app):
     at = AppTest.from_function(_entry, default_timeout=20)
     at.run()
     assert not at.exception, at.exception
     options = _nav_options(at)
-    for hidden in ("Admin", "Alerts", "Ask"):
-        assert hidden not in options, hidden
-    assert "Operations" in options
+    assert sorted(options) == ["Cost Intelligence", "Operations"]
+    assert at.session_state["_ow_page"] == "Cost Intelligence"     # MONITOR's landing page
 
 
-def test_reader_cannot_render_admin_via_stale_page(_reader_app):
-    # simulate a stale/deep-link _ow_page='Admin' for a READER viewer: the
+def test_monitor_cannot_render_admin_via_stale_page(_reader_app):
+    # simulate a stale/deep-link _ow_page='Admin' for a MONITOR viewer: the
     # dispatch hard-block must force it back to an in-profile page
     at = AppTest.from_function(_entry, default_timeout=20)
     at.session_state["_ow_page"] = "Admin"

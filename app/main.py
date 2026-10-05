@@ -29,6 +29,7 @@ from app.config import (  # noqa: E402
     PAGES_BY_PROFILE,
     REQUIRED_SCHEMA_FLOOR,
     TRIAGE_WINDOW_OPTIONS,
+    VIEWER_UNKNOWN_PROFILE,
     nav_groups_for,
 )
 from app.core.identity import identity_sql  # noqa: E402
@@ -75,6 +76,9 @@ from app.ui.pages import (  # noqa: E402
 # active-rail shows position, and each page's header carries its SVG icon.
 # This removes the inconsistent emoji CoCo flagged, cleanly.
 
+# v4.610.0: the sidebar caption while the admin-role lookup cannot answer (session.viewer_access).
+ACCESS_CHECK_UNAVAILABLE = "Access check unavailable — read-only until it recovers."
+
 _RENDERERS = {
     "Overview": overview.render,
     "Control Room": control_room.render,
@@ -103,9 +107,10 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
             '<div class="ow-brand-sub">Snowflake Command Center</div>',
             unsafe_allow_html=True,
         )
-        # Wave 1 #16: a viewer with no operator entitlement (the READER tier, or any
+        # Wave 1 #16: a viewer with no operator entitlement (the MONITOR view tier, or any
         # non-operator) gets a trimmed surface with write controls hidden. Say so
         # explicitly with a persistent badge, rather than leaving apparent feature gaps.
+        from app.core.session import ACCESS_UNAVAILABLE_SOURCES, access_source
         from app.core.session import is_operator as _is_op
         if connected and not _is_op():
             st.markdown(
@@ -113,6 +118,10 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
                 'margin-top:6px;display:inline-block;padding:1px 9px;border-radius:999px;'
                 'color:var(--ow-ink-mute);border:1px solid var(--ow-ink-mute)">'
                 '🔒 Read-only</div>', unsafe_allow_html=True)
+            # v4.610.0: the admin-role lookup failed or listed nobody, so an admin by role is
+            # read-only for now (fail closed). Say why instead of silently hiding their controls.
+            if access_source() in ACCESS_UNAVAILABLE_SOURCES:
+                st.caption(ACCESS_CHECK_UNAVAILABLE)
         if connected:
             from app.ui.components import last_refreshed_note
             st.markdown(
@@ -179,9 +188,12 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
             bump_refresh_salt()
             _reconnect_off_sis()   # c09 R1-006: what the session-expired message tells users to press
             # Re-resolve the role too: a grant/role change mid-session should
-            # be picked up here, not only on a full browser reload.
+            # be picked up here, not only on a full browser reload. v4.610.0: that includes
+            # this viewer's admin-role membership (one fresh lookup next run).
             st.session_state.pop("_ow_current_role", None)
             st.session_state.pop("_ow_current_user", None)
+            from app.core.session import forget_access
+            forget_access()
             mark_refreshed()
             # rec48: acknowledge the click — it clears caches + refetches. The
             # button used to bump the salt and rerun with no feedback at all.
@@ -876,9 +888,12 @@ def main() -> None:
     # Page visibility keys on the VIEWER (st.user), NOT current_role() — under
     # owner's-rights SiS the role is the app owner's for every viewer, so a
     # role-based profile would show every viewer the owner's DBA pages. See
-    # session.active_profile(): admins -> DBA, ETL/unmapped -> read-only READER.
+    # session.active_profile() / viewer_access(): admins (OPERATOR_USERS or a direct
+    # ADMIN_ACCESS_ROLE grant) -> DBA; everyone else -> the view-only MONITOR pair, whose
+    # landing page (pages[0]) is Cost Intelligence. An unknown profile name falls to the
+    # least-privileged surface, never a wider one.
     profile = active_profile(role)
-    pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE["ANALYST"])
+    pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE[VIEWER_UNKNOWN_PROFILE])
 
     page = _sidebar(pages, connected)
     if connected:

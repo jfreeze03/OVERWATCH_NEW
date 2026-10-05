@@ -98,6 +98,18 @@ def apply_filters(**kwargs) -> None:
         st.session_state[key] = value
 
 
+def clamp_page(page: str, allowed: tuple[str, ...] | list[str]) -> str:
+    """Where a navigation to ``page`` may land for a profile offering ``allowed`` (B8).
+
+    ``page`` itself when the profile offers it -- or when no page was asked or the profile is
+    unreadable (main.py's last-line deny still holds then). Otherwise Overview when the profile has
+    it (every profile but MONITOR), else the profile's own landing page (v4.610.0: MONITOR offers
+    only Cost Intelligence and Operations, so a jump to Alerts lands on Cost Intelligence)."""
+    if not page or not allowed or page in allowed:
+        return page
+    return "Overview" if "Overview" in allowed else allowed[0]
+
+
 def request_navigation(page: str, section: str = "", filters: dict | None = None,
                        context: dict | None = None, *,
                        capture_origin: bool = True) -> None:
@@ -121,8 +133,11 @@ def request_navigation(page: str, section: str = "", filters: dict | None = None
         from app.config import PAGES_BY_PROFILE
         from app.core.session import active_profile, current_role
         allowed = PAGES_BY_PROFILE.get(active_profile(current_role()), ())
-        if allowed and page not in allowed:
-            page = "Overview"  # offered by every profile
+        clamped = clamp_page(page, allowed)
+        if clamped != page:
+            # the off-profile target's section and drill context belong to a page this viewer never
+            # reaches; dropping them also lets the no-op below catch a clamp back onto the current page
+            page, section, context = clamped, "", None
     if page == st.session_state.get("_ow_page") and not section and not filters and not context:
         return
     # C9: origin only for a genuine page change — a section-only hop within the
@@ -166,8 +181,9 @@ def consume_pending_navigation() -> None:
         from app.config import PAGES_BY_PROFILE
         from app.core.session import active_profile, current_role
         allowed = PAGES_BY_PROFILE.get(active_profile(current_role()), ())
-        if allowed and page not in allowed:
-            page = "Overview"  # offered by every profile
+        clamped = clamp_page(page, allowed)
+        if clamped != page:   # as in request_navigation: the target's section / context do not travel
+            page, pending = clamped, {**pending, "section": "", "context": {}}
     if page:
         st.session_state["_ow_page"] = page
         # rec14: the grouped-nav radios re-derive their selection from _ow_page, so
