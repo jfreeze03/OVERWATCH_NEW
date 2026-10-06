@@ -1,3 +1,4 @@
+-- >>> SUPERSEDED 2026-10-06: run snowflake/run/SYSADMINS_OWNER_PREFLIGHT_v2_2026-10-06.sql instead (it adds the checks this one missed).
 -- =====================================================================
 --  OVERWATCH -- SYSADMINS_OWNER_PREFLIGHT_2026-10-06.sql   (READ-ONLY)
 --  Question: if SNOW_SYSADMINS owned and drove the OVERWATCH app instead of SNOW_ACCOUNTADMINS, what could it
