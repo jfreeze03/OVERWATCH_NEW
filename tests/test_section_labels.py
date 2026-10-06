@@ -53,3 +53,21 @@ def test_page_lazy_sections_match_central_labels():
             f"{page}: lazy_sections labels {got} != central map "
             f"{PAGE_SECTION_LABELS[page]} — update navigate.PAGE_SECTION_LABELS "
             "and the page together")
+
+
+def test_no_section_slug_is_shared_by_two_pages():
+    """holistic 4.610 #12: lazy_sections seeds a page's section from the ?section= query param the first time
+    that page renders, and changing page never clears the param. A slug on two pages (Admin's former
+    "Access" beside Security's) therefore opened one page's tab on the other: a first visit to Admin after
+    Security ▸ Access landed on Admin's access tab (and ran its SHOW reads). One page per slug."""
+    from app.logic.navigate import _slug
+    from app.ui.components import _section_slug
+
+    owners: dict[str, list[str]] = {}
+    for page, labels in PAGE_SECTION_LABELS.items():
+        for label in labels:
+            assert _slug(label) == _section_slug(label), label     # the two slug helpers agree
+            owners.setdefault(_slug(label), []).append(page)
+    shared = {slug: pages for slug, pages in owners.items() if len(pages) > 1}
+    assert shared == {}, shared
+    assert "App access" in PAGE_SECTION_LABELS["Admin"] and "Access" in PAGE_SECTION_LABELS["Security"]

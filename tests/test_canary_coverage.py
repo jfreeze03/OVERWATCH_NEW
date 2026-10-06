@@ -51,6 +51,12 @@ _TWIN = "reads only columns a registered canary already compiles (R2-062/R2-064 
 # Names should only LEAVE this map (when they gain a canary). A new builder needs a canary, or a reason here a
 # reviewer accepts; a _TWIN reason is checked mechanically (test_twins_read_only_columns_a_canary_compiles).
 CANARY_EXEMPT: dict[str, dict[str, str]] = {
+    "access_sql": {
+        "show_grants_of_role_sql": ("SHOW GRANTS OF ROLE (the 2026-10-05 admin-access lookup): EXPLAIN cannot "
+                                    "compile a SHOW; a failure is logged and shown in the sidebar instead"),
+        "show_grants_on_app_sql": ("SHOW GRANTS ON STREAMLIT (Admin ▸ App access, 2026-10-05): EXPLAIN cannot compile "
+                                   "a SHOW; a failed or empty answer renders on the tab as unavailable"),
+    },
     "cost_sql": {
         "hourly_credits": _TWIN,
         "contract_consumed_credits": _TWIN,

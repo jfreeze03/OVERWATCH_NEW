@@ -132,7 +132,7 @@ _ACCESS_REVIEW_RECOMMEND = {
     "dormant_users": "REVIEW / disable — no activity in 90d",
     "mfa_gaps_password_login": "ENABLE MFA — password login without MFA",
     "expiring_credentials_10d": "ROTATE — credential expires within 10 days",
-    "break_glass_holders": "REVIEW — standing privileged access",
+    "privileged_role_holders": "REVIEW — standing privileged access",
 }
 
 

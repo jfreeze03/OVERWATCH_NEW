@@ -36,7 +36,9 @@ PAGE_SECTION_LABELS = {
     "Proof": ["Proof", "Pipeline"],
     "Alerts": ["Open events", "Rules", "History", "Native delivery"],
     "Security": ["Decision queue", "Access", "AI guardrails", "Changes", "Clients", "Egress", "Exposure", "Least privilege", "Trust Center"],
-    "Admin": ["Settings", "Migrations & freshness", "Setup progress", "Metrics",
+    # holistic 4.610 #12: Admin's tab is "App access" (slug app-access), never a second "access" -- the
+    # ?section= deep link is shared across pages, so a slug on two pages opened one page's tab on the other.
+    "Admin": ["Settings", "App access", "Migrations & freshness", "Setup progress", "Metrics",
               "App self-cost", "Performance", "Canary", "Errors & telemetry"],
 }
 

@@ -96,10 +96,12 @@ def test_proof_cross_links_are_profile_gated():
     # the Entity 360 row drill only for a profile with Control Room; others get a plain table
     assert 'if can_open("Control Room"):' in pipe and "styled_table(display," in pipe
     # every request_navigation target in the body is either gated, the page itself, or a page every
-    # profile offers (Cost Intelligence) — never a silent clamp to Overview
+    # profile offers (Cost Intelligence) — never a silent clamp to Overview. v4.610.0: the view-only
+    # MONITOR profile has no Proof, so "the page itself" is now an explicit case (only a profile that
+    # can open Proof ever renders its in-page hop)
     for page in re.findall(r'request_navigation\(\s*"([^"]+)"', body):
         everyone = all(page in pages for pages in PAGES_BY_PROFILE.values())
-        assert everyone or f'can_open("{page}")' in body, page
+        assert page == "Proof" or everyone or f'can_open("{page}")' in body, page
     # the shared gate is the state helper (the Optimize stand-in was retired for it)
     assert "from app.core.state import can_open, request_navigation" in body
     opt = _src("app/ui/pages/ops_parts/optimize_queue.py")

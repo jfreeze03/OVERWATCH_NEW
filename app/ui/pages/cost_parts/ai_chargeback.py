@@ -19,6 +19,7 @@ from app.core.identity import identity_sql
 from app.core.query import execute_statement, run, run_batch_mixed
 from app.core.result import QueryResult, is_setup_absence
 from app.core.sqlsafe import sql_literal, sql_number
+from app.core.state import can_open
 from app.data import chargeback_sql, cortex_sql, cost_sql, mart27_sql, mart_sql
 from app.logic import showback
 from app.logic.cortex import (
@@ -643,7 +644,9 @@ def _suggested_quota_table(rec: pd.DataFrame | None, enriched: pd.DataFrame,
     styled_table(display, slug="ai-quota-suggestions", size_note=False)
     # The rule (COST_AI_USER_RUNAWAY) ships with V163; until then the replay is still exact, but there is
     # no rule row to tune yet. The shared schema gate answers from the startup read (no new statement).
-    _tune = ("the live rule may be tuned in Alerts > Rules" if has_migration(163, _PAGE)
+    # v4.610.0: MONITOR (this page, no Alerts) reads who tunes it, never a page it cannot open.
+    _tune = ("the live rule may be tuned in Alerts > Rules" if has_migration(163, _PAGE) and can_open("Alerts")
+             else "an OVERWATCH admin may tune the live rule" if has_migration(163, _PAGE)
              else "the rule itself arrives with migration V163")
     st.caption(md_dollars(
         f"Method: a fixed {QUOTA_LOOKBACK_DAYS}-day history (the last {QUOTA_LOOKBACK_DAYS} complete "
@@ -1050,8 +1053,10 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
     st.markdown("**Department budgets & pace**")
     panel_help(
         "Budgets live in DEPT_BUDGETS; the hourly scan raises COST_DEPT_BUDGET_PACE when a "
-        "department runs ahead of pace (threshold on the Alerts page). Spend is the "
-        "department's warehouses — exact billing, same as the table above."
+        "department runs ahead of pace "
+        # v4.610.0: MONITOR (this page, no Alerts) reads who sets the threshold, never a page it cannot open
+        + ("(threshold on the Alerts page)" if can_open("Alerts") else "(an OVERWATCH admin sets its threshold)")
+        + ". Spend is the department's warehouses — exact billing, same as the table above."
     )
     bud = _pf.get("bud") or run(mart_sql.dept_budgets(), page=_PAGE, key="dept_budgets", tier="live",
               source="DEPT_BUDGETS")

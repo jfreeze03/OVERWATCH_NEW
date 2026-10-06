@@ -20,7 +20,7 @@ decision here traces to a finding in the hostile panel review of the old app
 | 4 copies of SQL-safety primitives | One module: `app/core/sqlsafe.py`. |
 | 6,134-line setup SQL, no versioning | Numbered migrations in `snowflake/migrations/` + `SCHEMA_VERSION` table + status check on the Admin page. |
 | 92k lines, two apps, 30 zombie section modules | One app, 10 pages, pure-logic layer with tests. No dead routes. |
-| Anyone could change the $/credit execs see | Rates live in `DBA_MAINT_DB.OVERWATCH.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). The only in-app editor is Admin ▸ Settings: in-app operators only (`config.OPERATOR_USERS`), type-to-confirm, and UPDATED_BY is stamped. There is no sidebar or per-session rate override. |
+| Anyone could change the $/credit execs see | Rates live in `DBA_MAINT_DB.OVERWATCH.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). The only in-app editor is Admin ▸ Settings: OVERWATCH admins only (`config.OPERATOR_USERS` or direct members of SNOW_PRI_GFR_PRD_ALFA_DSA), type-to-confirm, and UPDATED_BY is stamped. There is no sidebar or per-session rate override. |
 | Cloud-services adjustment hardcoded to 0 | Billed dollars come from `METERING_DAILY_HISTORY` **with** `CREDITS_ADJUSTMENT_CLOUD_SERVICES` applied. |
 | Silent LIMIT injection | Row caps fetch `n+1`, set a `truncated` flag, and the UI shows a truncation banner. |
 | No deep links | Page navigation syncs to `?page=` query params where the runtime supports it. |
@@ -41,10 +41,15 @@ seed, with a unit test that keeps the two in sync).
   as **ALFA** by explicit override.
 
 This is a convenience scope for a shared account, not a security boundary. Who
-can open the app is USAGE on the Streamlit object (SNOW_ACCOUNTADMINS +
-SNOW_SYSADMINS); inside it every query runs with the owner's rights, so page
-visibility (`config.VIEWER_PROFILES`; unmapped viewers = READER) and writes
-(`config.OPERATOR_USERS`) are keyed on the viewer.
+can open the app is USAGE on the Streamlit object (the owner decision of
+2026-10-05 names four roles: SNOW_ACCOUNTADMINS, SNOW_SYSADMINS,
+SNOW_PRI_GFR_PRD_ALFA_DSA and SNOW_PRI_GFR_PRD_ALFA_DTI; `roles.sql` still
+grants the first two only, see DEPLOYMENT.md §2). Inside it every query runs
+with the owner's rights, so page visibility and writes are keyed on the viewer:
+the named admins (`config.OPERATOR_USERS`) and direct user members of
+SNOW_PRI_GFR_PRD_ALFA_DSA (checked live with `SHOW GRANTS OF ROLE`, fail
+closed) get every page and can change things; everyone else gets the
+read-only MONITOR view (Cost Intelligence + Operations).
 
 ## Pages
 
@@ -58,7 +63,7 @@ visibility (`config.VIEWER_PROFILES`; unmapped viewers = READER) and writes
 | Operations | Queries, tasks, warehouses, contention, the Optimize fix queue (a diagnosis and first fix per recurring query family, with one-click Track into Action Center), change impact, and Pipeline SLA with two built-in objectives (nightly cycle done by 07:00, tasks on cadence) — p95, failures, queue, spill, anomalies, post-change regression verdicts. |
 | Proof | Does OVERWATCH pay for itself: verified savings with per-item evidence, and the priced pipeline ahead. |
 | Security | MFA gaps (login-evidence based), failed logins, grants, recent DDL changes. |
-| Admin | Settings, migration status, source freshness, app self-cost, error log, telemetry. |
+| Admin | Settings, App access (who can open the app and who is an admin), migration status, source freshness, app self-cost, error log, telemetry. |
 | Ask | DBA-only grounded Q&A over the app's own data (evidence-cited, no free-text SQL). |
 
 ## Quick start
@@ -246,6 +251,7 @@ snowflake/migrations/V170__incident_declare_actor_and_proposals.sql -- Incident 
 snowflake/migrations/V171__ops_selfwatch_digest_refgaps_seed.sql -- Ops self-watch, digest window, ref-gap isolation, override seed (round 2). SETTINGS CREDIT_PRICE_OVERRIDE seeded FALSE (WHEN NOT MATCHED). SP_CANARY_SENTINEL re-derived from V017: the OPS_CANARY_FAIL detail no longer blames column drift; the render-SLA handler logs the real error; the OPS_SLOW_RENDER title shows the p95 in Hr/Min/Sec (METRIC_VALUE stays seconds). SP_DAILY_DIGEST re-derived from V165: facts = the 7 complete days ending yesterday (board ALL 7-day DAILY_SPEND rows, FACT_QUERY_DAILY, FACT_TASK_DAILY), keys WAREHOUSE_SPEND_USD / WAREHOUSE_CREDITS, prompt and template say warehouse compute only; CORTEX_MODEL read like the app. SP_SCAN_REF_GAPS re-derived from V129: both MINUS operands TO_VARCHAR; one statement per check in its own EXCEPTION block (ref_gap_check_failed; raises only when every check failed). No task change, no new object, no tail CALL. Owner applies after V170.
 snowflake/migrations/V172__detection_scans_company_and_accuracy.sql -- Detection scans (R2-021/022/023/024/025, R1-124, R1-227, R2-095, CORTEX-NULLIF): SP_CHANGE_IMPACT_SCAN re-derived from V140 (COMPANY_FOR_DATABASE in both registration arms; procedure calls matched as CALL<name>( or .<name>( over a whitespace-class strip, the Operations drill rule; TASK runs, fails and p95 on the terminal attempt per scheduled run; AFTER credits/call over settled (>8h) runs per scheduled run, LEFT JOIN + HAVING; VERDICT_DETAIL p95 in Hr/Min/Sec); SP_WAREHOUSE_CHANGE_SCAN from V109 (p95 + queue in Hr/Min/Sec); SP_SCAN_SCHEMA_DRIFT from V133 and SP_ANOMALY_SWEEP from V150 (PIPE_DT_FAILURES / PIPE_VOLUME_DROP / DQ_BREACH / DQ_SCHEMA_DRIFT COMPANY via COMPANY_FOR_DATABASE; COST_ANOMALY_SWEEP books only while enabled; normalized CORTEX_MODEL; COST_ORG_ACCOUNT_CREEP -> Cost Intelligence > Contract & Forecast; RETURN stays v3); SP_SCAN_CLOUD_SVC_ANOMALY from V150 (disabled-rule guard counts ENABLED rows). One-time: OBJECT_CHANGE_REGISTRY.COMPANY + live unlinked events of the five rules re-stamped from the database in their object FQN; tracking TASK baselines re-frozen on the terminal attempt; last, right before the version row it is gated on, a first-apply null of suffix-collided tracking PROCEDURE baselines. The five rules now route by that company, so an unmapped database's alerts (UNKNOWN) stop posting to the ALFA-only Teams route (map it, or add an ALL or UNKNOWN route). Rollback nulls the still-tracking baselines after re-running V140 (RUNBOOK §12). No task change, no new object, no tail CALL. Owner applies after V171.
 snowflake/migrations/V173__alert_scan_supported_subquery_and_div0.sql -- Hotfix for two production failures of the V162-V172 apply: SP_ALERT_SCAN re-derived from V168, only arm [18] SEC_NEW_ADMIN_NETWORK's dedupe guard changed (one OR-correlated NOT EXISTS Snowflake rejects with 'Unsupported subquery type cannot be evaluated', every hourly run from 2026-10-02 07:08 -> a 48h recent CTE and three AND-ed NOT EXISTS with plain-equality keys, the same R2-036 / R2-039 outcomes); SP_ALERT_SCAN_DAILY re-derived from V169, only arm [24] COST_IDLE_OPPORTUNITY's two divisions NULLIF-guarded ('Division by zero', 2026-10-01). RETURN labels and tallies unchanged. No task change, no new object, no repair, no tail CALL. Owner applies after V172, alone, any time.
+snowflake/migrations/V174__alert_scan_dsa_admin_role.sql -- Owner access decision 2026-10-05: SP_ALERT_SCAN re-derived from V173, SNOW_PRI_GFR_PRD_ALFA_DSA appended to the admin lists of [18] SEC_NEW_ADMIN_NETWORK, [26] SEC_LOGIN_TAKEOVER and [27] SEC_ADMIN_GRANT (a direct grant raises, a holder takeover is CRITICAL, a holder's new network raises); SEC_ADMIN_GRANT rule NAME refreshed (guarded on the V162 seed). Tallies, labels and SP_ALERT_SCAN_DAILY unchanged. No task change, no tail CALL. Owner applies after V173, alone, any time.
 snowflake/roles.sql                      -- direct grants to SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (monitor/operator layer retired v4.42)
 snowflake/validate.sql                   -- post-install checks
 ```
@@ -256,7 +262,7 @@ Streamlit-in-Snowflake: see `DEPLOYMENT.md` (uses `snowflake.yml`, `environment.
 
 Defaults seeded in `SETTINGS` and mirrored in `app/config.py`:
 compute **$3.68/credit**, Cortex **$2.20/credit**, storage **$23/TB/mo**.
-Change them on Admin ▸ Settings (in-app operators only: `config.OPERATOR_USERS`), not in code.
+Change them on Admin ▸ Settings (OVERWATCH admins only: `config.OPERATOR_USERS` or direct SNOW_PRI_GFR_PRD_ALFA_DSA members), not in code.
 
 ## Development
 

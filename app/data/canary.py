@@ -95,6 +95,11 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("ops.warehouse_pressure", lambda: ops_sql.warehouse_pressure(1, "ALFA")),
     # Next-Fifty #33: the statement-timeout runtime tail. Its two SHOW PARAMETERS twins are not
     # canaries (SHOW cannot be EXPLAINed).
+    # v4.610.0: nor is access_sql.show_grants_of_role_sql, the SHOW GRANTS OF ROLE admin-access lookup
+    # session.viewer_access runs once per viewer session (a failure is logged to APP_ERROR_LOG and shown in
+    # the sidebar instead); tests/test_canary_coverage.py names the exemption. Likewise
+    # access_sql.show_grants_on_app_sql, Admin ▸ App access's read-only SHOW GRANTS ON STREAMLIT (a failure or an
+    # empty answer renders there as unavailable).
     ("ops.warehouse_timeout_tail", lambda: ops_sql.warehouse_timeout_tail(1, "ALFA")),
     # v4.603 (#33 D1): the alert drawer's one-warehouse impact read for the 'Statement timeout 1h' lever.
     ("ops.warehouse_timeout_impact", lambda: ops_sql.warehouse_timeout_impact("WH_ALFA_ADMIN", 3600, 1)),
@@ -346,6 +351,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.alert_event_history", lambda: mart_sql.alert_event_history(2)),
     ("mart.alert_mttr", lambda: mart_sql.alert_mttr(7)),
     ("mart.alert_rules", mart_sql.alert_rules),
+    # v4.610.0: the Alerts > Rules 'Recent rule changes' read (ALERT_AUDIT RULE_EDIT rows; a core object)
+    ("mart.alert_rule_edits", lambda: mart_sql.alert_rule_edits(1)),
     ("mart.action_queue", lambda: mart_sql.action_queue(1)),
     ("workbench.action_center", lambda: workbench_sql.action_center(limit=1)),
     ("workbench.action_activity", lambda: workbench_sql.action_activity("canary-probe", 1)),

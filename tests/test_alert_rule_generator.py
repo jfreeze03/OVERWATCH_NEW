@@ -25,18 +25,20 @@ def test_toggling_enabled_never_rewrites_the_threshold() -> None:
     sql = _rule_change_sql("SEC_TRUST_REGRESSION", 1.0, True, 1.0, False)
     assert "THRESHOLD_NUM" not in sql
     assert "SET ENABLED = FALSE, UPDATED_AT = CURRENT_TIMESTAMP()" in sql
-    assert "WHERE RULE_ID = 'SEC_TRUST_REGRESSION';" in sql and "ALERT_CONFIG" in sql
+    # v4.610.0: a compare-and-set on the changed column only (tests/test_alert_rule_edit.py)
+    assert "WHERE RULE_ID = 'SEC_TRUST_REGRESSION' AND ENABLED = TRUE;" in sql and "ALERT_CONFIG" in sql
 
 
 def test_only_changed_columns_are_written() -> None:
     from app.ui.pages.alerts import _rule_change_sql
     assert _rule_change_sql("COST_X", 30.0, True, 30.0, True) == ""                 # nothing changed
-    assert "SET THRESHOLD_NUM = 45.0, UPDATED_AT" in _rule_change_sql("COST_X", 30.0, True, 45.0, True)
+    # v4.610.0 review r1: the threshold is the fixed-point literal of the value NUMBER(18,4) stores
+    assert "SET THRESHOLD_NUM = 45.0000, UPDATED_AT" in _rule_change_sql("COST_X", 30.0, True, 45.0, True)
     both = _rule_change_sql("COST_X", 30.0, False, 45.0, True)
-    assert "SET THRESHOLD_NUM = 45.0, ENABLED = TRUE, UPDATED_AT" in both
+    assert "SET THRESHOLD_NUM = 45.0000, ENABLED = TRUE, UPDATED_AT" in both
     # an empty box (None) leaves the threshold alone; an unread current threshold is never assumed 0
     assert "THRESHOLD_NUM" not in _rule_change_sql("COST_X", None, True, None, False)
-    assert "SET THRESHOLD_NUM = 5.0" in _rule_change_sql("COST_X", None, True, 5.0, True)
+    assert "SET THRESHOLD_NUM = 5.0000" in _rule_change_sql("COST_X", None, True, 5.0, True)
     assert "'x''y'" in _rule_change_sql("x'y", 1.0, True, 2.0, True)               # literal-quoted
 
 
@@ -51,7 +53,10 @@ def test_current_values_read_from_the_config_frame() -> None:
 
 def test_generator_seeds_from_the_picked_rule() -> None:
     src = read("app/ui/pages/alerts.py")
-    block = src.split('with st.expander("Generate a threshold change"):', 1)[1].split('elif section == "History":', 1)[0]
+    # v4.610.0: the same expander, titled for an admin's in-app apply or a non-admin's generate-only preview
+    block = src.split("with st.expander(\"Change a rule's threshold or Enabled\" if is_operator", 1)[1].split(
+        'elif section == "History":', 1)[0]
+    assert '"Generate a threshold change"' in block
     assert "_cur_thr, _cur_en = _rule_current(rules.df, rule_id)" in block
     assert "value=_cur_thr if _cur_thr is not None and _cur_thr >= 0 else None" in block
     assert 'key=f"rule_thresh:{rule_id}"' in block and 'key=f"rule_enabled:{rule_id}"' in block

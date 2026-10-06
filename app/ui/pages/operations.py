@@ -7,7 +7,7 @@ from datetime import timedelta
 
 import streamlit as st
 
-from app.config import MAX_LIVE_WINDOW_DAYS, core_object
+from app.config import ADMIN_ACCESS_HINT, MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
 from app.core.query import (
@@ -21,7 +21,7 @@ from app.core.query import (
 from app.core.result import QueryResult, is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
-from app.core.state import filters, navigation_context, request_navigation
+from app.core.state import can_open, filters, navigation_context, request_navigation
 from app.data import (
     change_impact_sql,
     chatter_sql,
@@ -1187,7 +1187,11 @@ def _incident_routing_panel(timeline) -> None:
         "family (classify_task_error) and to an owner/on-call resolved from the catalog "
         "(the task's own TASK entry, else the database it lives in). Cascades are excluded "
         "so only the failure to fix pages someone. ROUTED_TO is unassigned when the task "
-        "isn't in the catalog — register its owner on Control Room ▸ Entity 360. Actually opening a "
+        "isn't in the catalog — "
+        # holistic 4.610 #14: MONITOR has no Control Room, so name who can act instead of the page
+        + ("register its owner on Control Room ▸ Entity 360" if can_open("Control Room")
+           else "an OVERWATCH admin can register its owner in the entity catalog")
+        + ". Actually opening a "
         "routed ACTION_QUEUE item / Teams mention and escalating on an ack timeout from an "
         "on-call rotation are the deferred owner-migration half."
     )
@@ -1215,7 +1219,9 @@ def _incident_routing_panel(timeline) -> None:
          "help": "No owner/on-call in the catalog — register the task to route it."},
     ])
     if cat.ok and cat.empty:
-        st.caption("The entity catalog is empty, so every incident is unassigned — register owners on Control Room ▸ Entity 360 to route them.")
+        st.caption("The entity catalog is empty, so every incident is unassigned — "
+                   + ("register owners on Control Room ▸ Entity 360 to route them." if can_open("Control Room")
+                      else "an OVERWATCH admin can register owners in the entity catalog to route them."))
     styled_table(incidents, height=280, slug="incident-routing",
                  sort_label="most severe, then most failures")
     st.caption("ROUTED_TO is the on-call (else owner) to page; REMEDIATION is the first move for that error family.")
@@ -1382,7 +1388,11 @@ def _dq_row_volume_panel(preloaded=None) -> None:
     rv = preloaded or run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG", max_rows=dq_sql.DQ_MAX_ROWS)
     if rv.ok and rv.empty:
-        empty_state("needs_setup", "No registered-product tables added rows in the window. Register data products in the catalog (Control Room ▸ Entity 360) to monitor their volume here.")
+        empty_state("needs_setup", "No registered-product tables added rows in the window. "
+                    + ("Register data products in the catalog (Control Room ▸ Entity 360) to monitor their volume "
+                       "here." if can_open("Control Room")
+                       else "An OVERWATCH admin can register data products in the entity catalog to monitor "
+                            "their volume here."))
         return
     if not guard(rv, "", setup_hint="Needs TABLE_DML_HISTORY and a populated ENTITY_CATALOG with DATA_PRODUCT."):
         return
@@ -3434,11 +3444,17 @@ def _task_run_analyzer(root_id: str, topology, shape) -> None:
             context={"entity_type": "TASK", "entity_key": task},
         )
 
-    selectable_nav_table(
-        profiled[columns], key=f"task_run_nodes_table_{root_id}_{run_key}",
-        on_select=_open_task, height=340, column_config=profile_config,
-        sort_label="critical path, bottleneck score, then duration",
-    )
+    # v4.610.0: the row drill opens Control Room; a profile without it (MONITOR) gets a plain table, since
+    # the clamp would otherwise send the click to its landing page (AGENTS.md: gate the affordance)
+    if can_open("Control Room"):
+        selectable_nav_table(
+            profiled[columns], key=f"task_run_nodes_table_{root_id}_{run_key}",
+            on_select=_open_task, height=340, column_config=profile_config,
+            sort_label="critical path, bottleneck score, then duration",
+        )
+    else:
+        styled_table(profiled[columns], height=340, column_config=profile_config,
+                     sort_label="critical path, bottleneck score, then duration")
     # v4.461 P3 (§8 disclosure): name what the composite orders by — its inputs
     # (RUN_SEC, DOWNSTREAM_TASKS) are columns in the same table.
     st.caption("Bottleneck score = node runtime weighted by downstream fan-out "
@@ -3509,11 +3525,14 @@ def _task_version_compare(root_id: str) -> None:
             context={"entity_type": "TASK", "entity_key": task},
         )
 
-    selectable_nav_table(
-        changes, key=f"task_graph_diff_{root_id}_{before_version}_{after_version}",
-        on_select=_open_changed_task, height=360,
-        sort_label="task name within changed nodes",
-    )
+    if can_open("Control Room"):     # v4.610.0: as the node table above
+        selectable_nav_table(
+            changes, key=f"task_graph_diff_{root_id}_{before_version}_{after_version}",
+            on_select=_open_changed_task, height=360,
+            sort_label="task name within changed nodes",
+        )
+    else:
+        styled_table(changes, height=360, sort_label="task name within changed nodes")
 
 
 def _task_graph_view() -> None:
@@ -4757,7 +4776,8 @@ def _emergency_tab(is_operator: bool) -> None:
 
         if not is_operator:
             _emg_preview()
-            st.caption("Copy the SQL; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+            st.caption(f"{ADMIN_ACCESS_HINT} Anyone can copy the SQL; a worksheet run needs "
+                       "SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (SNOW_ACCOUNTADMINS for an ACCOUNT-level lever).")
         elif hasattr(st, "dialog"):
             # rec44: this is the highest-blast-radius single-shot lever, so gate it
             # behind a modal (same hasattr degrade pattern as the Wave 2/3 widgets).

@@ -38,20 +38,29 @@ labels and generates (never silently executes) the SQL to fix what it finds.
   timezone still hydrate at startup from USER_PREFS (the in-strip Views
   editors were dropped in v4.157.0); the sidebar **Audit detail** toggle
   saves the presentation mode.
-- Roles: access is **SNOW_ACCOUNTADMINS** and **SNOW_SYSADMINS**, nothing
-  else (owner decision 2026-07-13; the old monitor/operator layer is
-  retired). Under SiS the navigation profile follows the viewer (`st.user`
-  mapped through `config.VIEWER_PROFILES`; an unmapped viewer gets the
-  read-only READER profile). Operator actions (viewers on
-  `config.OPERATOR_USERS`; account-object ALTERs are re-checked in the
-  executor) always show the SQL first. Reversible saves to OVERWATCH's own
-  tables (alert ACK and snooze, action create/save, ownership and watchlist
-  edits) are one click; classifying or account-touching writes (alert
-  resolve and bulk actions, incident declare / mitigate / close, warehouse
-  and emergency levers, SETTINGS edits) need a typed confirmation. Alert
-  lifecycle actions write ALERT_AUDIT and levers write REMEDIATION_LOG (both
-  append-only). The app itself runs with owner's rights — see DEPLOYMENT.md
-  §2.
+- Roles: the owner decision of 2026-10-05 (superseding 2026-07-13's "two
+  roles") names four roles: **SNOW_ACCOUNTADMINS**, **SNOW_SYSADMINS**,
+  **SNOW_PRI_GFR_PRD_ALFA_DSA** and **SNOW_PRI_GFR_PRD_ALFA_DTI** (the old
+  monitor/operator layer stays retired). `roles.sql` still grants the two
+  SNOW_* roles only; the Snowflake side for DSA and DTI is an owner change not
+  made in 4.610.0 (DEPLOYMENT.md §2). Under SiS the navigation profile and
+  the admin gate follow the viewer (`st.user`): the named admins
+  (`config.OPERATOR_USERS`, no lookup) and direct user members of
+  SNOW_PRI_GFR_PRD_ALFA_DSA (checked live with `SHOW GRANTS OF ROLE`, fail
+  closed, re-checked every 5 minutes and at every write) are OVERWATCH admins
+  with every page and every action, the account-level levers included.
+  Everyone else, an unidentified viewer too, gets the read-only **MONITOR**
+  view: Cost Intelligence and Operations. Admin actions always show the SQL
+  first, and the executor re-checks admin itself for every lever and every
+  OVERWATCH write except a viewer's own preferences, watchlist and usage rows.
+  Reversible saves to OVERWATCH's own tables (alert ACK and snooze, action
+  create/save, ownership and watchlist edits) are one click; classifying or
+  account-touching writes (alert resolve and bulk actions, incident declare /
+  mitigate / close, warehouse and emergency levers, SETTINGS edits, alert rule
+  threshold / Enabled edits, where you type the RULE_ID) need a typed
+  confirmation. Alert lifecycle actions and rule edits write ALERT_AUDIT and
+  levers write REMEDIATION_LOG (both append-only). The app itself runs with
+  owner's rights — see DEPLOYMENT.md §2.
 
 ## 2. Architecture
 
@@ -86,10 +95,11 @@ on Cost Intelligence → Spend & Attribution (Unmapped entities) until a
 `COMPANY_SCOPE` row maps it, so nothing silently bills ALFA. User `KEBARR1`
 holds both companies' roles and is classified **ALFA** by explicit
 override. This is a convenience scope on a shared account, not a security
-boundary. Who can open the app is USAGE on the Streamlit object
-(SNOW_ACCOUNTADMINS + SNOW_SYSADMINS); inside it every query runs with the
-owner's rights, so page visibility (`config.VIEWER_PROFILES`) and writes
-(`config.OPERATOR_USERS`) are keyed on the viewer.
+boundary. Who can open the app is USAGE on the Streamlit object (today the
+two SNOW_* roles roles.sql grants; the 2026-10-05 decision names four, §1);
+inside it every query runs with the owner's rights, so page visibility and
+writes are keyed on the viewer (`session.viewer_access`: `config.OPERATOR_USERS`,
+then a direct SNOW_PRI_GFR_PRD_ALFA_DSA grant, else MONITOR).
 
 **Honesty contracts** enforced by tests: no synthetic data anywhere; empty
 states say why and what would fill them; estimated vs verified savings
@@ -99,7 +109,8 @@ labels its source and lag.
 **Streamlit-in-Snowflake specifics:** OVERWATCH is an owner's-rights app:
 every query runs with the app owner's privileges (`CURRENT_USER()` /
 `CURRENT_ROLE()` are the owner's). The viewer's identity (`st.user`, mapped
-through `config.VIEWER_PROFILES`; an unresolved viewer fails closed to the
+through `session.viewer_access`: the named admins, then direct
+SNOW_PRI_GFR_PRD_ALFA_DSA members, else MONITOR; an unresolved viewer fails closed to the
 least-privilege profile) selects only the navigation profile and the
 operator gate. `ALTER SESSION` is not available to the app (capability
 detected at connect). Streamlit-in-Snowflake stamps every statement the app runs with its own
@@ -594,11 +605,26 @@ SOC. **Governance drift score** at top (§6). Sections:
   the owning page/section with filters applied), ack/resolve with note
   (audited). Bulk ack/resolve
   below. The tiles above the queue are Open critical / high / total.
-- **Rules** — ALERT_CONFIG: enable/disable, thresholds (SQL generated,
-  operator executes). The generator opens on the picked rule's current
-  threshold and Enabled and its UPDATE sets only what you changed (toggling
-  Enabled leaves THRESHOLD_NUM alone); a new threshold of 0 warns that most
-  rules would then fire on every row.
+- **Rules** — ALERT_CONFIG: enable/disable and thresholds. Since 4.610.0
+  OVERWATCH admins apply a rule's threshold (THRESHOLD_NUM) and Enabled in the
+  app ("Change a rule's threshold or Enabled"; type the RULE_ID to confirm).
+  The change is a compare-and-set UPDATE: it sets only what you changed
+  (toggling Enabled leaves THRESHOLD_NUM alone) and changes nothing if the
+  rule moved since the page read it, and the receipt then says "Nothing
+  changed (edited elsewhere)". Each applied change appends an ALERT_AUDIT
+  RULE_EDIT row (viewer, old -> new, the UPDATE as PROOF_SQL), listed under
+  **Recent rule changes**; "partial" means the change is live but its audit
+  row did not land. Thresholds are validated: no negative, NaN or infinity,
+  no more than 4 decimals (THRESHOLD_NUM is NUMBER(18,4)), nothing above
+  1,000,000; a new threshold of 0 warns that most rules would then fire on
+  every row. Rules whose scan never reads THRESHOLD_NUM (DQ_SCHEMA_DRIFT,
+  OPS_CANARY_FAIL, OPS_PIPELINE_DEGRADED, OPS_SCAN_DEGRADED, PERF_SLO_BREACH,
+  SEC_ADMIN_GRANT) offer Enabled only. Switching a SECURITY rule off or
+  re-tuning it warns before the confirm; any admin (named or DSA, full
+  parity) can do it, so review Recent rule changes periodically. Everyone
+  else gets the same UPDATE as generate-only SQL to run in a worksheet as
+  SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (a worksheet UPDATE leaves no
+  ALERT_AUDIT row).
 - **History** — events by day (30d), colored by severity. **Response
   performance**: alert-grain MTTA (RAISED→ACK) and MTTR (RAISED→RESOLVED),
   event-weighted over the last 4 active weeks of a 90-day read, with
@@ -618,6 +644,13 @@ SOC. **Governance drift score** at top (§6). Sections:
 Settings (edit any key the app reads — `config.DEFAULT_SETTINGS`, incl.
 `DEPLOY_ACTORS` — with typed confirm; a SETTINGS row outside that list is
 flagged "no longer read (safe to delete)") ·
+App access (4.610.0, read-only: your resolved access and how it was decided, the
+SNOW_PRI_GFR_PRD_ALFA_DSA lookup status — "Lookup OK: N direct user members",
+failed, or unverified, which is a privilege gap and never "no members" — its
+direct members and its not-expanded role grantees, the named admins, and
+"Who can open the app": the app's USAGE grantees from SHOW GRANTS ON
+STREAMLIT compared with the four access roles; "Re-check now" clears only
+your own session's answer) ·
 Migrations & freshness (SCHEMA_VERSION vs the expected V001-to-tip set — admin.py
 `_EXPECTED_MIGRATIONS` — with a drift warning, and the on-demand Task health check) ·
 Setup progress (one onboarding checklist: migrations applied, marts
@@ -1066,6 +1099,8 @@ Nothing runs at apply time.
 
 **Rolling back V173 (hotfix).** It brings both production failures back, so prefer disabling a rule in Alerts > Rules. Otherwise re-run V168's SP_ALERT_SCAN (the CREATE PROCEDURE in V168__alert_scan_hourly_keys_and_sweeps.sql; arm [18] SEC_NEW_ADMIN_NETWORK fails every hourly run again with 'Unsupported subquery type cannot be evaluated') and V169's SP_ALERT_SCAN_DAILY (the CREATE PROCEDURE in V169__alert_scan_daily_windows_and_keys.sql; arm [24] COST_IDLE_OPPORTUNITY fails again on a zero-credit warehouse). Each base CREATE only, never the whole file. The two halves are independent CREATEs (V173 re-derives each proc on its own): to undo one scan's fix only, re-run only that proc's CREATE and leave the other on V173. Nothing ran at apply time and no data changed; the version row stays.
 
+**Rolling back V174.** Prefer disabling a rule in Alerts > Rules. Otherwise re-run V173's SP_ALERT_SCAN (the CREATE PROCEDURE in V173__alert_scan_supported_subquery_and_div0.sql that creates SP_ALERT_SCAN, that CREATE only, never the whole file, which would also re-create SP_ALERT_SCAN_DAILY). A DSA grant, a DSA holder's takeover or new network is then watched as a regular user's again. SP_ALERT_SCAN_DAILY was not touched. The SEC_ADMIN_GRANT NAME refresh is cosmetic and can stay. Nothing ran at apply time; the version row stays. On a V174 schema, the V173 / V168 / V162 rollbacks above start from this one: roll V174 back first.
+
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
 | COST_DAILY_CREDITS | COST | account credits/day over threshold | daily key |
@@ -1099,9 +1134,9 @@ Nothing runs at apply time.
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold on one day (nightly; yesterday and today are read, and today's row is the partial ~06:45 load and says 'so far'); since V163 the title and detail say whether the day also had a successful login — none reads as a lockout or a stale secret, a burst that ended in a success is SEC_LOGIN_TAKEOVER (hourly, V162, while enabled); Account-takeover candidates either way | daily per user |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired); checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central), so an event — EXPIRED included — can arrive up to ~4h late | once per band per expiry date (EXPIRING, then EXPIRED); a rotated credential's next expiry re-alerts even after a human resolve, however late (V157: a closed event blocks only its own expiry date, read from its DETAIL; a live one always blocks) |
 | SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central); a grant revoked before the next check is never raised | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
-| SEC_LOGIN_TAKEOVER | SECURITY | ≥ threshold (5) failed logins by one user within 15 min, then a successful login within 60 min of that burst (every failed login counts); CRITICAL when the login is off-hours (20:00-06:00 Central, or a weekend) or the user directly held ACCOUNTADMIN / SECURITYADMIN / SYSADMIN / USERADMIN / ORGADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS at that moment, else HIGH; company ALL — hourly [26], V162; never auto-declares an incident (SP_INCIDENT_AUTODECLARE skips it: declare by hand) | one event per episode (key ends in the anchor login's UTC millisecond time); a later WARN→CRIT crossing supersedes the WARN, a CRIT is never re-minted as WARN; a snooze never carries to the next episode |
-| SEC_ADMIN_GRANT | SECURITY | a direct grant of one of those seven admin-tier roles to a user (GRANTS_TO_USERS, 26h lookback), raised even when already revoked; flat HIGH; the title flags off-hours and first-time grants; company ALL — hourly [27], V162; never auto-declares an incident | one event per grant (grantee, role, CREATED_ON) |
-| SEC_NEW_ADMIN_NETWORK | SECURITY | a user with a direct ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS grant has login attempts (successful or not) from a CLIENT_IP first seen in the last 24h of a 90-day window, with ≥ threshold (1) attempts from it; the title says 'logged in' only if one succeeded (failures-only keys carry FAILED); HIGH, company ALL — hourly [18], V043 / V168 | once per user, IP and first-seen Central day (a network quiet 90+ days alerts again); a failures-only pair that later succeeds raises once more and the failed event is superseded |
+| SEC_LOGIN_TAKEOVER | SECURITY | ≥ threshold (5) failed logins by one user within 15 min, then a successful login within 60 min of that burst (every failed login counts); CRITICAL when the login is off-hours (20:00-06:00 Central, or a weekend) or the user directly held ACCOUNTADMIN / SECURITYADMIN / SYSADMIN / USERADMIN / ORGADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (since V174 also SNOW_PRI_GFR_PRD_ALFA_DSA: eight roles) at that moment, else HIGH; company ALL — hourly [26], V162; never auto-declares an incident (SP_INCIDENT_AUTODECLARE skips it: declare by hand) | one event per episode (key ends in the anchor login's UTC millisecond time); a later WARN→CRIT crossing supersedes the WARN, a CRIT is never re-minted as WARN; a snooze never carries to the next episode |
+| SEC_ADMIN_GRANT | SECURITY | a direct grant of one of those eight admin-tier roles (SNOW_PRI_GFR_PRD_ALFA_DSA since V174) to a user (GRANTS_TO_USERS, 26h lookback), raised even when already revoked; flat HIGH; the title flags off-hours and first-time grants; company ALL — hourly [27], V162; never auto-declares an incident | one event per grant (grantee, role, CREATED_ON) |
+| SEC_NEW_ADMIN_NETWORK | SECURITY | a user with a direct ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS grant (since V174 also SNOW_PRI_GFR_PRD_ALFA_DSA: four roles) has login attempts (successful or not) from a CLIENT_IP first seen in the last 24h of a 90-day window, with ≥ threshold (1) attempts from it; the title says 'logged in' only if one succeeded (failures-only keys carry FAILED); HIGH, company ALL — hourly [18], V043 / V168 / V174 | once per user, IP and first-seen Central day (a network quiet 90+ days alerts again); a failures-only pair that later succeeds raises once more and the failed event is superseded |
 | `SEC_POSTURE_<METRIC>` | SECURITY | an operator-created posture monitor (Security's generate-upsert; not seeded; severity chosen when it is created): the newest MART_SECURITY_POSTURE_DAILY value of its METRIC_NAME is ≥ threshold and at most 2 days old — hourly [21], V087 | per rule, company and posture day |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
 | SEC_TRUST_REGRESSION | SECURITY | a CRITICAL or HIGH Trust Center scanner's at-risk count rose ≥ threshold (1; a threshold below 1 reads as 1, V169) against its previous snapshot day (today's and yesterday's rows checked each morning; a scanner's first snapshot never raises; quiet without TRUST_CENTER_VIEWER); HIGH, company ALL — daily [29], V163 | per scanner per snapshot day (the counts of the scan that raised it; a further rise the same day is not pushed again); no self-clear |
@@ -1183,6 +1218,20 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 
 **A page shows "not installed yet."** Admin → Migrations: compare
 SCHEMA_VERSION to the expected set (V001 through the repo tip, admin.py `_EXPECTED_MIGRATIONS`); run what's missing, then roles.sql.
+
+**A SNOW_PRI_GFR_PRD_ALFA_DSA member sees only Cost Intelligence + Operations and the sidebar says "Admin access
+check unavailable".** The app could not confirm DSA membership and failed closed (read-only, retried after 1
+minute, then 2 and 4, then every 5 minutes while it keeps failing; every viewer not on the allowlist sees the same
+caption meanwhile, and the named admins on `config.OPERATOR_USERS` are unaffected). Check APP_ERROR_LOG for PAGE =
+'Access' and Admin ▸ App access (a named admin can open it). Then, read-only, as SNOW_ACCOUNTADMINS with `USE
+SECONDARY ROLES NONE`, run `SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA`: it must list each member as a
+`granted_to = USER` row. An error or an empty result means the owner role cannot see the role's grants (a
+privilege gap, not "no members"). Letting the owner role see them is an owner-side Snowflake change that this
+release does not make or prescribe; until it is made, only the named admins can change things. A member granted
+through another role (a `granted_to = ROLE` row) is not expanded and stays view-only by design, and the match is
+exact: a username differing from the grantee name only by case is a different user. A revoke takes effect on
+writes within about 15 seconds and on pages within about 5 minutes (at once after 'Refresh data'); a role admin
+whose membership cannot be confirmed at write time (revoked, failed or empty lookup) is refused.
 
 **Everything is stale.** `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` (or Admin ▸ Migrations &
 freshness ▸ Task health) —

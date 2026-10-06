@@ -830,10 +830,15 @@ def add_to_case_button(section: str, result: QueryResult, *, summary: str,
     ``preview_rows`` of ``result.df``; only summary/next_action/as_of/title are
     authored per call site. Dedup-guarded (re-adding the same evidence is a no-op);
     the button is disabled when the result is not usable. Uses a callback-free
-    button + toast, mutating session_state before the natural rerun."""
-    from app.core.state import filters  # local import: avoid module cycle
+    button + toast, mutating session_state before the natural rerun.
+
+    v4.610.0: renders only for a profile that can open Brief, where the Case File
+    is reviewed and exported (MONITOR cannot: it would fill a file it never sees)."""
+    from app.core.state import can_open, filters  # local import: avoid module cycle
     from app.logic import case_file
 
+    if not can_open("Brief"):
+        return False
     usable = bool(getattr(result, "usable", lambda: False)())
     clicked = st.button("Add to Case", key=key, disabled=not usable, width="content",
                         icon=":material/add:",
@@ -2514,12 +2519,18 @@ def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
     WAREHOUSE, USER, TASK, ...); pass ``type_col`` when rows carry their own
     ENTITY_TYPE (it takes precedence per row, falling back to ``entity_type``).
     Degrades to a plain ``styled_table`` when ``key_col`` is absent or the
-    runtime has no row selection.
+    runtime has no row selection — and (v4.610.0) when this viewer's profile
+    cannot open Control Room: the navigation clamp would send the click to the
+    profile's landing page instead (MONITOR on Operations -> Cost Intelligence),
+    so there is no hint and no selection there (AGENTS.md: gate the affordance).
     """
     import pandas as pd
 
+    from app.core.state import can_open
+
     frame = df.reset_index(drop=True) if df is not None else pd.DataFrame()
-    if getattr(frame, "empty", True) or key_col not in getattr(frame, "columns", []):
+    if (getattr(frame, "empty", True) or key_col not in getattr(frame, "columns", [])
+            or not can_open("Control Room")):
         styled_table(frame, height=height, column_config=column_config, slug=slug,
                      days=days, size_note=size_note, sort_label=sort_label)
         return

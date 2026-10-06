@@ -26,7 +26,7 @@ def _src(rel: str) -> str:
 LATCHED_FILES = {
     "app/ui/pages/cost_parts/optimize.py": 7,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject); +1 Next-Fifty #30 unread-maintenance ESTIMATED booking; -1 the 2026-09-30 hygiene release review: the storage-waste retention control is review only (the allow-list refuses ALTER TABLE, so its write never succeeded); +1 R1-086: the off-hours schedule is review only (the allow-list refuses its multi-statement CREATE TASK script), and its ESTIMATED saving books from its own one-click button
     "app/ui/pages/operations.py": 5,
-    "app/ui/pages/alerts.py": 6,
+    "app/ui/pages/alerts.py": 7,   # +1 v4.610.0: an admin's in-app rule threshold / Enabled apply (Rules)
     "app/ui/workbench.py": 5,   # v4.597: -1 the retired Action Center experiment-start expander
     "app/ui/pages/cost_parts/ai_chargeback.py": 3,
     "app/ui/security_center.py": 2,
@@ -133,7 +133,10 @@ def test_every_write_click_block_is_latched():
 
 def test_query_layer_writes_paint_the_inflight_state():
     q = _src("app/core/query.py")
-    stmt = q.split("def execute_statement(sql: str", 1)[1].split("\ndef ", 1)[0]
+    # v4.610.0: execute_statement returns execute_statement_count without the row count (one write body)
+    wrapper = q.split("def execute_statement(sql: str", 1)[1].split("\ndef ", 1)[0]
+    assert "execute_statement_count(sql, page=page)" in wrapper
+    stmt = q.split("def execute_statement_count(sql: str", 1)[1].split("\ndef ", 1)[0]
     act = q.split("def execute_action(", 1)[1].split("\ndef ", 1)[0]
     cancel = q.split("def execute_cancel_query(", 1)[1].split("\ndef ", 1)[0]
     assert 'st.spinner("Executing write…")' in stmt

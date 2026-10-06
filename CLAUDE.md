@@ -51,7 +51,9 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    growing that set is the honest version of raising a budget.
 4. **Every SQL builder gets a canary** (`app/data/canary.py`, default args,
    sqlglot-parses) and **every created object a teardown mention**
-   (`tests/test_teardown_coverage.py`). Teardown keeps ALL destructive lines
+   (`tests/test_teardown_coverage.py`); a SHOW builder (EXPLAIN cannot compile
+   one, e.g. `app/data/access_sql.py`) is exempted BY NAME with its reason in
+   `tests/test_canary_coverage.py`. Teardown keeps ALL destructive lines
    commented; operator data survives; never DROP SCHEMA/DATABASE. The
    account-level delivery objects (OVERWATCH_* notification integrations,
    webhook secrets, the four NATIVE_ALERT_* email alerts) drop only inside its
@@ -109,8 +111,16 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    identity via `app/core/identity.py` (`st.user`, CURRENT_USER() fallback)
    for prefs/usage/audit. Executor allow-list: one statement, DML/CALL on
    DBA_MAINT_DB.OVERWATCH objects or an Emergency lever (ALTER WAREHOUSE /
-   PIPE / TASK / USER, ALTER ACCOUNT SET) only. Cache invalidation is
-   domain-scoped.
+   PIPE / TASK / USER, ALTER ACCOUNT SET) only. Since v4.610.0 the executor
+   itself requires admin entitlement for every lever AND every
+   INSERT/UPDATE/DELETE/MERGE/CALL on OVERWATCH except the viewer's own
+   self-service rows (USER_PREFS, USER_WATCHLIST, APP_USAGE,
+   APP_QUERY_TELEMETRY, matched as the exact object token after the prefix).
+   Admin = `config.OPERATOR_USERS` (allowlist, no lookup) or a direct USER
+   member of SNOW_PRI_GFR_PRD_ALFA_DSA (`session.viewer_access`, live
+   `SHOW GRANTS OF ROLE`, fail closed, re-verified at write time in
+   `query._entitlement_refusal`; keep calling `_session.is_operator()` there,
+   it is the tests' monkeypatch seam). Cache invalidation is domain-scoped.
 10. **Formulas:** `app/logic/formulas.py` is the only place credits become
     dollars; `app/logic/metric_registry.py` is the semantic contract
     (BILLED/METERED/MEASURED/ALLOCATED/ESTIMATED + grain + lag). SQL builders
@@ -122,7 +132,9 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
     work-item create+save, ownership + watchlist edits, budget / SLO /
     experiment saves. TYPE-TO-CONFIRM (`confirm_gate`) for a CLASSIFYING or
     account-touching write — alert RESOLVE (feeds per-rule precision),
-    incident declare/close, warehouse levers. `st.form` stays declined (it
+    incident declare/close, warehouse levers, alert rule threshold /
+    Enabled edits (type the RULE_ID; a compare-and-set UPDATE plus an
+    ALERT_AUDIT RULE_EDIT row, v4.610.0). `st.form` stays declined (it
     hides the preview). `notify()` is the receipt: toast on success,
     persistent inline error on failure (rec48). EVERY write click block also
     pairs the C48 latch: `write_gate_open(<key>)` as the click gate's LAST
@@ -158,9 +170,34 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 
 ## Owner decisions (do not relitigate)
 
-- **Access = SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period** (2026-07-13). The
-  monitor/operator role layer is retired; roles.sql grants direct + drops it.
-  Audit tables keep append-only REVOKEs (accident-proofing).
+- **Access = four roles** (2026-10-05; supersedes 2026-07-13's "Access =
+  SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period"). The owner asked for
+  SNOW_PRI_GFR_PRD_ALFA_DSA to have "admin and full rights" and for
+  SNOW_PRI_GFR_PRD_ALFA_DTI to have "view access to all things that don't
+  require admin", then approved the v4.610.0 spec (DTI = two pages). Direct
+  USER grantees of DSA are OVERWATCH admins with FULL PARITY: the DBA page set
+  (Admin and Ask), every in-app write and the account-level levers ALTER USER /
+  ALTER ACCOUNT SET (`config.ROLE_ADMIN_ACCOUNT_LEVERS = True`); a grant to a
+  role is not expanded. OPERATOR_USERS stay admins with no lookup, and
+  VIEWER_PROFILES can never pin DBA. Every other viewer who can open the app
+  (DTI members, SNOW_* holders not on the allowlist, an unidentified SiS
+  viewer) gets MONITOR = Cost Intelligence + Operations, read-only; DTI is
+  never looked up. Membership is `SHOW GRANTS OF ROLE` run as the owner, once
+  per session (re-checked after 300 s; a failure, 'lookup_failed', or an
+  empty USER set, 'unverified', is retried first after 60 s, the wait
+  doubling with each further failure up to the 5-minute TTL) and FAILS
+  CLOSED; a role admin is re-verified at every privileged write (memo at
+  most 15 s). Trust delegation
+  accepted: whoever can GRANT the DSA role can mint an OVERWATCH admin with
+  account-level levers. SNOW_ACCOUNTADMINS + SNOW_SYSADMINS keep roles.sql's
+  object grants; DSA/DTI get no worksheet grants (USAGE on the database,
+  schema and Streamlit only). The monitor/operator role layer stays retired;
+  audit tables keep append-only REVOKEs (accident-proofing). **Pending owner:**
+  roles.sql's six DSA/DTI USAGE grants and four-role -20011/-20012 proof block
+  were not made in v4.610.0 (the xfail(strict) lock in
+  `tests/test_admin_access_tab.py` flips when they land); until then DSA/DTI
+  cannot open the app, and a hand-made grant trips -20011 on the next
+  roles.sql run.
 - **Task monitoring STAYS** (2026-07-13 correction: "i meant getting rid of
   resource monitor, not task monitoring"). V045 restored it end-to-end.
 - **Resource monitors are GONE** (same correction). OVERWATCH_RM was
@@ -182,7 +219,10 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   [19], [22], [24] COST_IDLE_OPPORTUNITY, [25] COST_SLEEP_POLLING -- a counting CALL arm;
   SP_SCAN_SLEEP_POLLING gates itself weekly, V160; [28] COST_AI_USER_RUNAWAY and [29]
   SEC_TRUST_REGRESSION, V163) + the [17]/[18] add-ons. Arm numbers are unique across BOTH scans from
-  [26] on (the next free is [30]; [17], [18] and [22] already collide). SP_INCIDENT_AUTODECLARE never
+  [26] on (the next free is [30]; [17], [18] and [22] already collide). Since V174 the [26]/[27] admin list is
+  eight roles (`security_sql.ALERT_ADMIN_ROLES`: V162's seven + SNOW_PRI_GFR_PRD_ALFA_DSA, last) and [18] watches
+  ACCOUNTADMIN + `security_sql.ADMIN_HOLDER_ROLES` (SNOW_ACCOUNTADMINS, SNOW_SYSADMINS, SNOW_PRI_GFR_PRD_ALFA_DSA);
+  `tests/test_security_alert_parity.py` binds both lists to the latest SP_ALERT_SCAN. SP_INCIDENT_AUTODECLARE never
   declares for SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT (a hard-coded crit-CTE exclusion, V162 owner
   decision), and its [attach] links them only to an incident that already holds the same user (V162
   review fix). Add-ons, sweeps and the [hb] heartbeats never increment `fails`
@@ -191,7 +231,8 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   MOD(ct_hour, 4) = 1, the hourly [22] only when MOD(ct_hour, 3) = 2; a gate wraps an UNCHANGED arm
   and a gated-off arm counts as ok. `app/logic/quotas.runaway_days` is the app twin of daily arm [28]:
   re-derive either side only with `tests/test_ai_runaway_parity.py` green (or change both together).
-- Current definers (re-derive forward from THESE): SP_ALERT_SCAN = V173, SP_ALERT_SCAN_DAILY = V173
+- Current definers (re-derive forward from THESE): SP_ALERT_SCAN = V174 (V174 changed only the admin-role
+  lists of hourly [18], [26] and [27], appending SNOW_PRI_GFR_PRD_ALFA_DSA), SP_ALERT_SCAN_DAILY = V173
   (arm numbers unchanged; the next free is still [30]; V173 changed only hourly [18]'s dedupe guard and daily
   [24]'s two divisions), SP_INCIDENT_AUTODECLARE = V162, SP_NOTIFY_WEBHOOK =
   V164 (its escalation SETTINGS expressions are pinned to `mart_sql.ESCALATE_*` by

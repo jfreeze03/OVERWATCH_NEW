@@ -7,7 +7,7 @@ page, not in code.
 
 from __future__ import annotations
 
-APP_VERSION = "4.609.1"
+APP_VERSION = "4.610.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -236,14 +236,16 @@ ACCOUNT_USAGE_LAG_NOTE = "Account telemetry can lag up to ~45 min (metering-dail
 
 # ---------------------------------------------------------------------------
 # Role -> navigation profile (page FILTERING only). The off-SiS fallback: under
-# owner's-rights Streamlit-in-Snowflake every viewer runs as the owner, so RBAC
-# only decides who can open the app; pages key on the viewer (VIEWER_PROFILES
-# below) and writes on OPERATOR_USERS, the app's authorization boundary.
+# owner's-rights Streamlit-in-Snowflake every viewer runs as the owner, so
+# CURRENT_ROLE() never differentiates viewers; RBAC decides who can open the app
+# (APP_ACCESS_ROLES), and pages + writes key on the viewer (session.viewer_access:
+# OPERATOR_USERS, a direct ADMIN_ACCESS_ROLE grant, else VIEWER_UNKNOWN_PROFILE).
 # ---------------------------------------------------------------------------
 ROLE_PROFILE_OVERRIDES = {
-    # r27 #8: the SNOW_PRI_* viewer-role overrides were traces of roles
-    # with no app access (owner 2026-07-13). Only the two real roles map;
-    # the profile machinery stays for operator-UI gating.
+    # r27 #8: the SNOW_PRI_* viewer-role overrides were traces of roles with no app
+    # access (owner 2026-07-13). This map (and the suffix rules below) is OFF-SiS only
+    # (local dev runs as SNOW_SYSADMINS); on SiS the DSA/DTI roles are resolved per
+    # viewer by session.viewer_access (v4.610.0), never through CURRENT_ROLE().
     "SNOW_ACCOUNTADMINS": "DBA",
     "SNOW_SYSADMINS": "DBA",
 }
@@ -259,12 +261,15 @@ PAGES_BY_PROFILE = {
     # Brief is FIRST so the default landing (pages[0], when no saved view / deep link)
     # opens on Brief, not Ask — matching the nav display order (Ask trails last).
     "DBA": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Proof", "Alerts", "Security", "Admin", "Ask"),
-    # Read-only tier (owner ask 2026-08-31): the ETL team + any SiS viewer not
-    # explicitly mapped. Everything EXCEPT Admin, Alerts, and Ask. Operations is
-    # deliberately IN — ETL want its warehouse/task/pipeline health — but every
-    # write control there (emergency levers, scans) is is_operator-gated, so a
-    # READER sees it fully and can change nothing.
+    # Read-only tier (owner ask 2026-08-31): everything EXCEPT Admin, Alerts, and Ask. Since v4.610.0 no
+    # viewer lands here by default (the ETL pins are gone; MONITOR is the default); it stays for an explicit
+    # VIEWER_PROFILES pin. Every write control on its pages is is_operator-gated.
     "READER": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Proof", "Security"),
+    # View-only tier (owner decision 2026-10-05): SNOW_PRI_GFR_PRD_ALFA_DTI members -- and every other
+    # identified viewer who is not an admin, plus an unidentified SiS viewer -- see EXACTLY these two pages
+    # and change nothing. No Brief/Overview, so this profile lands on Cost Intelligence (pages[0]) and the
+    # navigation clamp (state.clamp_page) falls back to it.
+    "MONITOR": ("Cost Intelligence", "Operations"),
 }
 DEFAULT_PROFILE = "ANALYST"
 
@@ -311,12 +316,72 @@ OPERATOR_PROFILES = ("DBA",)  # profiles allowed to execute state-changing SQL i
 # instead (session.is_operator()). Under owner's-rights SiS, Snowflake RBAC is NOT a
 # backstop (every viewer runs as the owner) — this allowlist is the app's authorization
 # boundary, re-checked inside the query executors for owner-privileged statements
-# (query._PRIVILEGED_PREFIXES, Next-Fifty #23). Store bare Snowflake usernames; matching is
-# case-insensitive.
-# Empty tuple = no viewer is an in-app operator (secure default); the owner adds
-# the specific usernames who may operate. Off-SiS (local dev/tests) there is no
-# viewer identity, so session.is_operator() falls back to the role->profile check.
+# (query._is_privileged, Next-Fifty #23 widened in v4.610.0). Store bare Snowflake usernames;
+# matching is case-insensitive.
+# v4.610.0 (owner decision 2026-10-05): the allowlist is ONE of two admin routes. The other is a
+# DIRECT user grant of ADMIN_ACCESS_ROLE (SNOW_PRI_GFR_PRD_ALFA_DSA), resolved live in-app by
+# session.viewer_access() and re-verified at write time. An allowlisted viewer is an admin with no
+# lookup at all (break-glass: a failed role lookup never locks the named admins out).
+# Empty tuple = no viewer is an allowlisted operator; the owner adds the specific usernames. Off-SiS
+# (local dev/tests) there is no viewer identity, so session.is_operator() falls back to the
+# role->profile check.
 OPERATOR_USERS: tuple[str, ...] = ("H21427", "E22292", "KEBARR1", "CLROY", "N22514")  # the DBA/admin team
+
+# ---------------------------------------------------------------------------
+# Role-based app access (v4.610.0, owner decision 2026-10-05, superseding the 2026-07-13
+# "SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period"). The decision names four roles to hold USAGE on the
+# app: the two SNOW_* roles, ADMIN_ACCESS_ROLE and VIEW_ACCESS_ROLE (APP_ACCESS_ROLES, the target set).
+# snowflake/roles.sql grants and proves only ROLES_SQL_APP_GRANTEES today: the DSA/DTI side is a pending
+# owner change (DEPLOYMENT.md section 2; the strict xfail in tests/test_admin_access_tab.py), and until it
+# lands their members can open the app only through another role that holds USAGE.
+#   * ADMIN_ACCESS_ROLE: a DIRECT user grantee is an OVERWATCH admin -- the DBA page set and every
+#     in-app write, exactly like OPERATOR_USERS. A grant to a ROLE is not expanded (direct users only).
+#     Being a member does nothing until the member can open the app.
+#   * VIEW_ACCESS_ROLE: never looked up. Only a role holding USAGE opens the app, so every identified
+#     viewer who is not an admin gets VIEWER_UNKNOWN_PROFILE (MONITOR: two pages, read-only).
+# Whoever can GRANT ADMIN_ACCESS_ROLE can mint an OVERWATCH admin; owner-accepted 2026-10-05.
+# ---------------------------------------------------------------------------
+ADMIN_ACCESS_ROLE = "SNOW_PRI_GFR_PRD_ALFA_DSA"
+VIEW_ACCESS_ROLE = "SNOW_PRI_GFR_PRD_ALFA_DTI"
+APP_ACCESS_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", ADMIN_ACCESS_ROLE, VIEW_ACCESS_ROLE)
+# The APP_ACCESS_ROLES that snowflake/roles.sql grants USAGE on the app TODAY, and the only ones its
+# -20011/-20012 proof block accepts. Admin > App access words a missing role from this split: a role here
+# is re-granted by re-running roles.sql (-20012 while it is missing); any other access role is not granted
+# by roles.sql yet, and the current proof block raises -20011 once it holds USAGE.
+# tests/test_admin_access_tab.py parses roles.sql's GRANT USAGE ON STREAMLIT lines and its proof-block
+# IN-lists and pins them to this tuple, so the owner's four-role roles.sql change must add DSA/DTI here in
+# the same change (and delete the strict xfail there); the in-app wording then flips with it.
+ROLES_SQL_APP_GRANTEES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
+# FULL PARITY (owner 2026-10-05): a role-sourced admin also gets the account-level levers -- ALTER USER
+# (disable / re-enable any user) and ALTER ACCOUNT SET -- exactly like OPERATOR_USERS. False would limit
+# those two levers to the allowlist (query._entitlement_refusal reads this at call time).
+ROLE_ADMIN_ACCOUNT_LEVERS: bool = True
+# Session memo timings (session.viewer_access): a resolved answer is re-resolved after ACCESS_TTL_S; a
+# failed or empty lookup (read-only meanwhile) is retried after access_retry_s(n) -- ACCESS_RETRY_S after
+# the first failure, doubling with each consecutive one up to ACCESS_TTL_S, so a long outage does not have
+# every open session run SHOW every minute; a role-sourced write re-verifies membership with a fresh lookup
+# at most WRITE_RECHECK_S old.
+ACCESS_TTL_S = 300
+ACCESS_RETRY_S = 60
+WRITE_RECHECK_S = 15
+
+
+def access_retry_s(failures: object) -> int:
+    """Seconds before a failed or empty admin-role lookup is retried, after ``failures`` consecutive ones.
+
+    ACCESS_RETRY_S after the first, doubled for each further consecutive failure, never longer than
+    ACCESS_TTL_S (a healthy answer's re-check). A count below 1 or an unreadable one reads as 1. Pure."""
+    try:
+        n = int(failures)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        n = 1
+    n = min(max(n, 1), 32)      # 2**31 x 60 s is far past the cap; bounds the shift
+    return int(min(ACCESS_TTL_S, ACCESS_RETRY_S * 2 ** (n - 1)))
+# The in-app operator caption: who may change things here.
+ADMIN_ACCESS_HINT = (
+    "In-app changes are limited to OVERWATCH admins: the named admin allowlist (config OPERATOR_USERS) "
+    f"or direct members of {ADMIN_ACCESS_ROLE}."
+)
 
 
 def is_operator_user(viewer: str) -> bool:
@@ -324,6 +389,8 @@ def is_operator_user(viewer: str) -> bool:
 
     Case-insensitive; a blank viewer is never an operator (the caller falls back
     to role-based gating for that off-SiS case). Pure so it is unit-testable.
+    The folding is intentional for this HAND-TYPED allowlist (and VIEWER_PROFILES);
+    the ADMIN_ACCESS_ROLE route compares exact names instead (session.role_grant_members).
     """
     name = str(viewer or "").strip().upper()
     if not name:
@@ -336,35 +403,39 @@ def is_operator_user(viewer: str) -> bool:
 # OPERATOR_USERS. Under owner's-rights SiS, CURRENT_ROLE() is the app OWNER's
 # role for EVERY viewer, so resolve_role_profile(current_role()) (the off-SiS
 # path) cannot scope who sees which pages. Key page visibility on the VIEWER
-# (st.user) instead: the DBA/admin team sees the full DBA surface; the ETL team
-# gets the read-only READER profile (no Admin/Alerts/Ask). Bare usernames,
-# matched case-insensitively (same grain as OPERATOR_USERS). This decides only
-# what the app OFFERS; writes remain independently gated by OPERATOR_USERS.
+# (st.user) instead. Bare usernames, matched case-insensitively (same grain as
+# OPERATOR_USERS). This decides only what the app OFFERS a NON-admin; it can
+# never make an admin: a pin to an OPERATOR_PROFILES profile (DBA) is ignored
+# (resolve_viewer_profile) and forbidden by test -- OPERATOR_USERS and a direct
+# ADMIN_ACCESS_ROLE grant are the only admin routes. v4.610.0 removed the 5 DBA
+# pins (redundant with OPERATOR_USERS) and the 4 ETL READER pins (owner decision
+# 2026-10-05: the ETL team is VIEW_ACCESS_ROLE and gets the MONITOR default).
 # ---------------------------------------------------------------------------
-VIEWER_PROFILES: dict[str, str] = {
-    # DBA/admin team — full surface incl. Admin + Ask (also in OPERATOR_USERS for write)
-    "H21427": "DBA", "E22292": "DBA", "KEBARR1": "DBA", "CLROY": "DBA", "N22514": "DBA",
-    # ETL team (_DTI_ roles) — read-only, no Admin/Alerts/Ask
-    "GRTHOMP1": "READER", "SUDEVAX": "READER", "TV5073": "READER", "VS4229": "READER",
-}
-# Any identified SiS viewer NOT in VIEWER_PROFILES falls to this least-privilege
-# read tier — NEVER the owner's DBA. Owner policy 2026-08-31: an unmapped viewer
-# gets the same read-only surface as the ETL team.
-VIEWER_UNKNOWN_PROFILE = "READER"
+VIEWER_PROFILES: dict[str, str] = {}
+# Any identified SiS viewer who is not an admin and not pinned gets this view-only
+# tier -- NEVER the owner's DBA. Owner decision 2026-10-05: that is the DTI surface
+# (Cost Intelligence + Operations), which keeps the 2026-08-31 policy "an unmapped
+# viewer gets the same read-only surface as the ETL team".
+VIEWER_UNKNOWN_PROFILE = "MONITOR"
+# An unidentified viewer on SiS (no st.user) fails closed to the same view-only
+# tier and is never an operator (least privilege).
+NO_IDENTITY_PROFILE = "MONITOR"
 
 
 def resolve_viewer_profile(viewer: str) -> str | None:
-    """Navigation profile for a VIEWER username, or None when unmapped/blank.
+    """Explicit (non-admin) navigation pin for a VIEWER username, or None.
 
-    Pure and case-insensitive (mirrors is_operator_user). The caller owns the
-    unmapped policy: on SiS an identified-but-unmapped viewer maps to
-    VIEWER_UNKNOWN_PROFILE (read-only); a blank viewer means off-SiS, where the
-    caller falls back to the role->profile map instead.
+    Pure and case-insensitive (mirrors is_operator_user). None for a blank,
+    unpinned, or ADMIN-profile pin: a VIEWER_PROFILES entry can narrow or shape a
+    non-admin's surface but can never grant the DBA set (OPERATOR_USERS and a
+    direct ADMIN_ACCESS_ROLE grant are the admin routes, session.viewer_access).
+    The caller owns the unmapped policy (VIEWER_UNKNOWN_PROFILE on SiS).
     """
     name = str(viewer or "").strip().upper()
     if not name:
         return None
-    return {str(k).strip().upper(): v for k, v in VIEWER_PROFILES.items()}.get(name)
+    pinned = {str(k).strip().upper(): v for k, v in VIEWER_PROFILES.items()}.get(name)
+    return None if pinned in OPERATOR_PROFILES else pinned
 
 
 def resolve_role_profile(role: str) -> str:

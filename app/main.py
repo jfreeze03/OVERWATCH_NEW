@@ -22,6 +22,7 @@ st.set_page_config(
 
 from app.companies import COMPANIES, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
+    ADMIN_ACCESS_ROLE,
     APP_VERSION,
     DEFAULT_DAY_WINDOW,
     LAST_MONTH_WINDOW,
@@ -29,6 +30,7 @@ from app.config import (  # noqa: E402
     PAGES_BY_PROFILE,
     REQUIRED_SCHEMA_FLOOR,
     TRIAGE_WINDOW_OPTIONS,
+    VIEWER_UNKNOWN_PROFILE,
     nav_groups_for,
 )
 from app.core.identity import identity_sql  # noqa: E402
@@ -42,6 +44,7 @@ from app.core.query import (  # noqa: E402
 from app.core.session import active_profile, connection_available, current_role  # noqa: E402
 from app.core.sqlsafe import sql_literal  # noqa: E402
 from app.core.state import (  # noqa: E402
+    can_open,
     consume_pending_navigation,
     init_filters,
     remember_page,
@@ -75,6 +78,13 @@ from app.ui.pages import (  # noqa: E402
 # active-rail shows position, and each page's header carries its SVG icon.
 # This removes the inconsistent emoji CoCo flagged, cleanly.
 
+# v4.610.0: the sidebar caption while the admin-role lookup cannot answer (session.viewer_access). Every
+# viewer not on OPERATOR_USERS sees it: without the lookup the app cannot tell a DSA member from a DTI one.
+# So it says who is held read-only (the admins by role, never the named admins, who need no lookup) and
+# never promises a view-only viewer changes on recovery (holistic 4.610 #2/#13).
+ACCESS_CHECK_UNAVAILABLE = (f"Admin access check unavailable — admins by role ({ADMIN_ACCESS_ROLE}) are read-only "
+                            "until it recovers; named admins are unaffected.")
+
 _RENDERERS = {
     "Overview": overview.render,
     "Control Room": control_room.render,
@@ -103,9 +113,10 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
             '<div class="ow-brand-sub">Snowflake Command Center</div>',
             unsafe_allow_html=True,
         )
-        # Wave 1 #16: a viewer with no operator entitlement (the READER tier, or any
+        # Wave 1 #16: a viewer with no operator entitlement (the MONITOR view tier, or any
         # non-operator) gets a trimmed surface with write controls hidden. Say so
         # explicitly with a persistent badge, rather than leaving apparent feature gaps.
+        from app.core.session import ACCESS_UNAVAILABLE_SOURCES, access_source
         from app.core.session import is_operator as _is_op
         if connected and not _is_op():
             st.markdown(
@@ -113,6 +124,11 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
                 'margin-top:6px;display:inline-block;padding:1px 9px;border-radius:999px;'
                 'color:var(--ow-ink-mute);border:1px solid var(--ow-ink-mute)">'
                 '🔒 Read-only</div>', unsafe_allow_html=True)
+            # v4.610.0: the admin-role lookup failed or listed nobody, so an admin by role is
+            # read-only for now (fail closed). Say why instead of silently hiding their controls. A
+            # view-only viewer sees it too (membership is unknown meanwhile); the wording holds for both.
+            if access_source() in ACCESS_UNAVAILABLE_SOURCES:
+                st.caption(ACCESS_CHECK_UNAVAILABLE)
         if connected:
             from app.ui.components import last_refreshed_note
             st.markdown(
@@ -179,9 +195,12 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
             bump_refresh_salt()
             _reconnect_off_sis()   # c09 R1-006: what the session-expired message tells users to press
             # Re-resolve the role too: a grant/role change mid-session should
-            # be picked up here, not only on a full browser reload.
+            # be picked up here, not only on a full browser reload. v4.610.0: that includes
+            # this viewer's admin-role membership (one fresh lookup next run).
             st.session_state.pop("_ow_current_role", None)
             st.session_state.pop("_ow_current_user", None)
+            from app.core.session import forget_access
+            forget_access()
             mark_refreshed()
             # rec48: acknowledge the click — it clears caches + refetches. The
             # button used to bump the salt and rerun with no feedback at all.
@@ -191,9 +210,11 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
         # Wave 1 #9: a persistent Case File presence in the shell. Additions used to
         # vanish into a bottom-of-Brief expander; the running count now rides every
         # page (session-only, so no query), with a one-click jump to open it on Brief.
+        # v4.610.0: only for a profile that offers Brief (MONITOR does not: the clamp would
+        # send the click to its landing page, and the file could never be opened there).
         from app.logic.case_file import CASE_STATE_KEY as _CASE_KEY
         _case_items = st.session_state.get(_CASE_KEY) or []
-        if _case_items:
+        if _case_items and "Brief" in pages:
             _latest = str((_case_items[-1] or {}).get("title") or "").strip()
             if st.button(f"🗂️ Case File · {len(_case_items)}",
                          width="stretch", key="_ow_case_shell",
@@ -427,10 +448,13 @@ def _global_jump(pages: tuple) -> None:
             if "name" in wdf.columns:
                 wh_names = sorted(set(wdf["name"].astype(str)))
         options += [f"WH · {w}" for w in wh_names]
-        rules = run(mart_sql.alert_rules(), page="Sidebar", key="jump_rules", tier="recent",
-                    source="ALERT_CONFIG")
-        if rules.usable() and "RULE_ID" in rules.df.columns:
-            options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
+        # a rule opens on Alerts: no rule options (and no ALERT_CONFIG read) for a profile without
+        # it (v4.610.0 MONITOR), whose clamp would land the pick on its own landing page
+        if "Alerts" in pages:
+            rules = run(mart_sql.alert_rules(), page="Sidebar", key="jump_rules", tier="recent",
+                        source="ALERT_CONFIG")
+            if rules.usable() and "RULE_ID" in rules.df.columns:
+                options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
     else:
         options += [f"WH · {w}" for w in TREXIS_WAREHOUSES]
     # C3: recents strip — the destinations this session jumped to, as one-click
@@ -465,7 +489,8 @@ def _global_jump(pages: tuple) -> None:
     # when "selected" (surprising, and invisible unless you opened the list). The
     # `and` short-circuits so the button only RENDERS while not yet loaded.
     if not st.session_state.get("_ow_jump_loaded") and st.button(
-            "Load all warehouses & alert rules", key="_ow_jump_loadall",
+            "Load all warehouses & alert rules" if "Alerts" in pages else "Load all warehouses",
+            key="_ow_jump_loadall",
             type="tertiary", width="stretch"):
         st.session_state["_ow_jump_loaded"] = True
         st.rerun()
@@ -554,10 +579,11 @@ def _dispatch_jump(pick: str) -> None:
         request_navigation("Operations", "Queries",
                            {"company": _wco if _wco in ("ALFA", "Trexis") else "ALL",
                             "warehouse_contains": name})
-    elif kind == "Rule":
+    elif kind == "Rule" and can_open("Alerts"):
         # r-ux: carry the searched rule's identity so Alerts ▸ Rules lands ON that rule (its
         # precision drill + threshold generator preselect it), like every other palette target —
-        # not the full rules wall with nothing selected.
+        # not the full rules wall with nothing selected. v4.610.0: never for a profile without
+        # Alerts (the options are not offered there; this also stops a stale recent).
         request_navigation("Alerts", "Rules", context={"rule_id": name})
 
 
@@ -876,9 +902,12 @@ def main() -> None:
     # Page visibility keys on the VIEWER (st.user), NOT current_role() — under
     # owner's-rights SiS the role is the app owner's for every viewer, so a
     # role-based profile would show every viewer the owner's DBA pages. See
-    # session.active_profile(): admins -> DBA, ETL/unmapped -> read-only READER.
+    # session.active_profile() / viewer_access(): admins (OPERATOR_USERS or a direct
+    # ADMIN_ACCESS_ROLE grant) -> DBA; everyone else -> the view-only MONITOR pair, whose
+    # landing page (pages[0]) is Cost Intelligence. An unknown profile name falls to the
+    # least-privileged surface, never a wider one.
     profile = active_profile(role)
-    pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE["ANALYST"])
+    pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE[VIEWER_UNKNOWN_PROFILE])
 
     page = _sidebar(pages, connected)
     if connected:
@@ -902,6 +931,10 @@ def main() -> None:
         if st.button("Retry connection"):
             st.cache_resource.clear()
             st.session_state.pop("_ow_current_role", None)
+            # v4.610.0: a lookup that failed during the outage must not hold an admin-by-role read-only
+            # for its retry window once the connection is back (this viewer's memo only).
+            from app.core.session import forget_access
+            forget_access()
             st.rerun()
         return
 

@@ -64,7 +64,7 @@ def test_the_sweep_left_no_raw_absence_regression_hotspots():
         "app/ui/pages/security.py": 0,
         "app/ui/pages/control_room.py": 0,   # R1-205: the triage-inputs note now goes through empty_state
         "app/ui/pages/cost_parts/optimize.py": 4,   # simulate/engine verdicts + no-reads note
-        "app/ui/pages/alerts.py": 9,         # F51 receipt + F50 verdict renders + r34 A3 tighten guard (info)
+        "app/ui/pages/alerts.py": 10,        # F51 receipt + F50 verdict renders + r34 A3 tighten guard (info) + v4.610.0 rule-edit receipt
         "app/ui/pages/brief.py": 0,
         "app/ui/pages/overview.py": 0,
         "app/ui/pages/admin.py": 0,

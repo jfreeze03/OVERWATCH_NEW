@@ -9,6 +9,8 @@ connection can never inherit stale session_state flags (old-app finding M4).
 from __future__ import annotations
 
 import re
+import time
+from collections.abc import Mapping
 
 import streamlit as st
 
@@ -272,31 +274,28 @@ def is_operator() -> bool:
     OWNER's role for EVERY viewer, so gating operator UI/actions on
     ``resolve_role_profile(current_role()) in OPERATOR_PROFILES`` never
     differentiates people — one accidental app grant would expose DBA actions to
-    any viewer. Entitle from st.user (the actual viewer) checked against the
-    explicit config.OPERATOR_USERS allowlist instead.
+    any viewer. Entitle from st.user (the actual viewer) instead, through
+    viewer_access(): the config.OPERATOR_USERS allowlist, or (v4.610.0, owner
+    decision 2026-10-05) a DIRECT user grant of config.ADMIN_ACCESS_ROLE looked up
+    live as the owner.
 
     Snowflake RBAC is NOT a backstop here: because every viewer executes with the
     app OWNER's privileges, an operator write does NOT fail server-side for an
-    under-privileged viewer — it runs as the owner. OPERATOR_USERS is therefore
-    the SOLE application authorization boundary for in-app operator actions, not
-    merely "what the app offers". Guard it accordingly.
-
-    TODO(L, tracked): the real hardening is an audited entitlements table (or a
-    restricted CALLER'S-RIGHTS stored proc that re-checks the viewer identity
-    server-side) so authorization does not rest on an in-app allowlist alone. Until
-    that lands, OPERATOR_USERS + this check are the only thing standing between a
-    viewer and an owner-privileged write.
+    under-privileged viewer — it runs as the owner. This resolution is therefore
+    the application authorization boundary, not merely "what the app offers". The
+    query executors re-check it for every privileged statement
+    (query._entitlement_refusal), and a role-sourced admin's write re-verifies the
+    membership live (reverify_role_admin), so a revoke stops writes within
+    config.WRITE_RECHECK_S even while the session's page memo still lists DBA pages.
 
     Off-SiS (local dev, tests, older runtimes) st.user is absent so
     viewer_name() == "": fall back to the role->profile check there, so local
     development and AppTest keep working exactly as before.
     """
-    from app.config import OPERATOR_PROFILES, is_operator_user, resolve_role_profile
-    from app.core.identity import viewer_name
+    from app.config import OPERATOR_PROFILES, resolve_role_profile
 
-    viewer = viewer_name()
-    if viewer:
-        return is_operator_user(viewer)
+    if _viewer():
+        return bool(viewer_access()["operator"])
     # On SiS with NO resolvable viewer identity, FAIL CLOSED (mirrors active_profile()):
     # every viewer executes with the owner's role, so the role check below would treat an
     # unidentified SiS viewer as the owner-operator — a write escalation. Off-SiS (local
@@ -324,24 +323,385 @@ def active_profile(role: str = "") -> str:
 
     Under owner's-rights SiS, SQL CURRENT_ROLE() is the app OWNER's role for
     EVERY viewer, so page visibility must key on the viewer identity (st.user),
-    not the role. An identified viewer maps through config.VIEWER_PROFILES (the
-    admin team -> DBA, the ETL team -> READER); an identified viewer NOT in the
-    map falls to the least-privilege VIEWER_UNKNOWN_PROFILE, NEVER the owner's
-    DBA. When no viewer identity is available, distinguish SiS (fail CLOSED to
-    VIEWER_UNKNOWN_PROFILE — an unresolved SiS viewer must never inherit the
-    owner's DBA surface) from off-SiS (local dev/tests: fall back to the
-    role->profile map, preserving today's behavior exactly).
+    not the role. An identified viewer resolves through viewer_access(): an admin
+    (OPERATOR_USERS or a direct ADMIN_ACCESS_ROLE grant) gets DBA; anyone else an
+    explicit non-admin VIEWER_PROFILES pin or the view-only
+    VIEWER_UNKNOWN_PROFILE (MONITOR), NEVER the owner's DBA. When no viewer
+    identity is available, distinguish SiS (fail CLOSED to NO_IDENTITY_PROFILE —
+    an unresolved SiS viewer must never inherit the owner's DBA surface) from
+    off-SiS (local dev/tests: fall back to the role->profile map, preserving
+    today's behavior exactly).
     """
+    from app.config import NO_IDENTITY_PROFILE, resolve_role_profile
+
+    if _viewer():
+        return str(viewer_access()["profile"])
+    if is_sis():
+        return NO_IDENTITY_PROFILE
+    return resolve_role_profile(role or current_role())
+
+
+# ---------------------------------------------------------------------------
+# Viewer access resolution (v4.610.0, owner decision 2026-10-05).
+#
+# For an identified viewer, first match wins:
+#   1. config.OPERATOR_USERS            -> DBA + operator, source 'allowlist' (no SQL at all)
+#   2. a DIRECT user grantee of config.ADMIN_ACCESS_ROLE (SHOW GRANTS OF ROLE, run as the owner)
+#                                        -> DBA + operator, source 'role'
+#   3. otherwise                         -> a non-admin VIEWER_PROFILES pin or VIEWER_UNKNOWN_PROFILE
+#      (MONITOR), read-only; source 'default' when the lookup answered, 'lookup_failed' when it raised,
+#      'unverified' when it listed no USER grantee (SHOW shows only what the owner can see, so an empty
+#      answer is a privilege gap, never proof of "no members").
+# FAIL CLOSED: no error, empty answer or revoke ever grants admin. VIEW_ACCESS_ROLE is never looked up:
+# only a role holding USAGE on the app can open it (the decision names the four config.APP_ACCESS_ROLES;
+# roles.sql grants config.ROLES_SQL_APP_GRANTEES today), so every identified non-admin is a DTI member or
+# a SNOW_* holder and gets the view-only default.
+#
+# MEMBERSHIP IS EXACT: the viewer's st.user name is compared with SHOW's grantee_name as stored, with no
+# case folding (holistic 4.610 #1: a user named "jdoe" must never ride a DSA grant to user JDOE). The
+# upper-cased _viewer() form keys the memos and the hand-typed OPERATOR_USERS / VIEWER_PROFILES lookups.
+#
+# One st.session_state memo per viewer session (the warehouse runtime gives each viewer a personal app
+# instance, so nothing is shared between viewers): a resolved answer is re-resolved after
+# ACCESS_TTL_S; a failed / empty lookup is retried after config.access_retry_s(n), ACCESS_RETRY_S after
+# the first consecutive failure and doubling up to ACCESS_TTL_S (every open session runs the lookup, so a
+# long outage must not cost one SHOW per session per minute). A failure writes ONE APP_ERROR_LOG row per
+# session, and every distinct (viewer, source) writes one APP_USAGE 'access_resolved' event naming the
+# source (the audit of who held admin through the role).
+# ---------------------------------------------------------------------------
+_ACCESS_KEY = "_ow_access"             # {viewer, profile, operator, source, at, error}
+_ROSTER_KEY = "_ow_access_roster"      # {status, users, roles, at, error} — the last admin-role lookup
+_RECHECK_KEY = "_ow_access_recheck"    # {viewer, at} — the last POSITIVE write-time re-verification
+_ACCESS_ERR_LOGGED_KEY = "_ow_access_err_logged"
+_ACCESS_EVENTS_KEY = "_ow_access_events"
+#: The sources an identified viewer's resolution carries. An unidentified viewer reads 'no_identity'
+#: on SiS and 'off_sis' elsewhere (no memo, no lookup).
+ACCESS_SOURCES: tuple[str, ...] = ("allowlist", "role", "default", "lookup_failed", "unverified")
+#: Sources that mean the admin-role lookup could not answer: read-only until it recovers (sidebar caption).
+ACCESS_UNAVAILABLE_SOURCES: tuple[str, ...] = ("lookup_failed", "unverified")
+_USAGE_PREFIX = ("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE "
+                 "(PAGE, SECTION, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) ")
+
+
+def _clock() -> float:
+    """Wall-clock seconds for the access memos (a seam: tests drive the TTLs)."""
+    return time.time()
+
+
+def _viewer() -> str:
+    """The viewer's username, upper-cased ('' when unidentified): the memo key and the form the hand-typed
+    OPERATOR_USERS / VIEWER_PROFILES lookups fold to. Module-attribute lookup on identity is the seam the
+    tests monkeypatch."""
+    return _viewer_exact().upper()
+
+
+def _viewer_exact() -> str:
+    """The viewer's username exactly as st.user gives it (stripped, never case-folded): the only form the
+    admin-role membership check compares with SHOW GRANTS OF ROLE's grantee_name."""
+    from app.core import identity as _identity
+
+    return str(_identity.viewer_name() or "").strip()
+
+
+def _fresh(memo: object, ttl: float) -> bool:
+    if not isinstance(memo, dict):
+        return False
+    try:
+        age = _clock() - float(memo.get("at") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age < ttl          # a clock that stepped backwards re-resolves
+
+
+def _row_mapping(row: object) -> dict:
+    if isinstance(row, Mapping):
+        raw = dict(row)
+    elif hasattr(row, "asDict"):
+        raw = row.asDict()
+    else:
+        raw = dict(row)  # type: ignore[call-overload]
+    return {str(k).strip().strip('"').lower(): v for k, v in raw.items()}
+
+
+def role_grant_members(rows: object) -> tuple[frozenset[str], tuple[str, ...]]:
+    """(direct USER grantees, ROLE grantees) of a SHOW GRANTS OF ROLE answer, names exactly as stored.
+
+    Accepts Snowpark Rows, mappings, or a DataFrame (a run(..., max_rows=0) read on Admin ▸ App access).
+    Only granted_to = 'USER' rows are members; a ROLE grantee is reported (nested, NOT expanded) and any
+    other grantee kind is ignored. Names are stripped, never case-folded: membership is an exact match with
+    the viewer's st.user name (two users whose names differ only by case are different users). Pure."""
+    if hasattr(rows, "to_dict"):
+        rows = rows.to_dict("records")
+    users: set[str] = set()
+    roles: set[str] = set()
+    for row in rows or ():  # type: ignore[attr-defined]
+        m = _row_mapping(row)
+        name = str(m.get("grantee_name") or "").strip()
+        kind = str(m.get("granted_to") or "").strip().upper()
+        if not name:
+            continue
+        if kind == "USER":
+            users.add(name)
+        elif kind == "ROLE":
+            roles.add(name)
+    return frozenset(users), tuple(sorted(roles))
+
+
+def _admin_role_rows() -> list:
+    """The live SHOW GRANTS OF ROLE <ADMIN_ACCESS_ROLE> answer, run as the app owner. Raises on any
+    failure (the callers fail closed). Not through run(): its tier cache would outlive the access TTLs
+    and the write-time re-check must be fresh."""
+    from app.config import ADMIN_ACCESS_ROLE
+    from app.data.access_sql import show_grants_of_role_sql
+
+    s = get_session()
+    return list(submit_collect(s, s.sql(show_grants_of_role_sql(ADMIN_ACCESS_ROLE)),
+                               statement_params(s, page="session", tier="metadata")) or [])
+
+
+def _log_access_failure(exc: BaseException) -> None:
+    """ONE APP_ERROR_LOG row per session for a failed or empty admin-role lookup (the sidebar and
+    Admin ▸ App access say so on every run; the log needs it once). Never raises."""
+    if st.session_state.get(_ACCESS_ERR_LOGGED_KEY):
+        return
+    st.session_state[_ACCESS_ERR_LOGGED_KEY] = True
+    try:
+        from app.config import ADMIN_ACCESS_ROLE
+        from app.core import errors as _errors
+
+        _errors.record_error("Access", exc, context=(
+            f"admin-access lookup (SHOW GRANTS OF ROLE {ADMIN_ACCESS_ROLE}) failed or listed no user: "
+            "viewers not on OPERATOR_USERS resolve read-only until it recovers"))
+    except Exception:
+        pass
+
+
+def _admin_roster(*, fresh: bool = False) -> dict:
+    """The memoized admin-role lookup: {status: ok | unverified | lookup_failed, users, roles, at, error,
+    fails}. ``fails`` counts consecutive failed / empty lookups (0 after a good one) and sets the retry
+    backoff (config.access_retry_s). ``fresh`` bypasses the memo (the write-time re-check). Never raises."""
+    from app.config import ACCESS_TTL_S, ADMIN_ACCESS_ROLE, access_retry_s
+
+    memo = st.session_state.get(_ROSTER_KEY)
+    if not fresh and isinstance(memo, dict) and _fresh(
+            memo, ACCESS_TTL_S if memo.get("status") == "ok" else access_retry_s(memo.get("fails"))):
+        return memo
+    prior = memo if isinstance(memo, dict) else {}
+    try:
+        streak = int(prior.get("fails") or 0) if prior.get("status") in ("lookup_failed", "unverified") else 0
+    except (TypeError, ValueError):
+        streak = 0
+    now = _clock()
+    try:
+        users, roles = role_grant_members(_admin_role_rows())
+    except Exception as exc:   # fail CLOSED: a failed lookup never makes an admin
+        try:
+            detail = str(exc)[:300]
+        except Exception:
+            detail = type(exc).__name__
+        memo = {"status": "lookup_failed", "users": (), "roles": (), "at": now, "error": detail,
+                "fails": streak + 1}
+        _log_access_failure(exc)
+    else:
+        if users:
+            memo = {"status": "ok", "users": tuple(sorted(users)), "roles": roles, "at": now, "error": "",
+                    "fails": 0}
+        else:
+            msg = (f"SHOW GRANTS OF ROLE {ADMIN_ACCESS_ROLE} listed no USER grantee: a privilege gap or an "
+                   "empty role, treated as unverified (read-only), never as 'no members'")
+            memo = {"status": "unverified", "users": (), "roles": roles, "at": now, "error": msg,
+                    "fails": streak + 1}
+            _log_access_failure(RuntimeError(msg))
+    st.session_state[_ROSTER_KEY] = memo
+    return memo
+
+
+def _log_access_event(access: dict) -> None:
+    """One APP_USAGE 'access_resolved' row per (viewer, source) per session, SECTION = the source. The
+    prefix is byte-identical to components.log_ui_event's, so it rides the same buffered INSERT; it
+    honours the usage off / old-shape switches. Never raises."""
+    try:
+        seen = st.session_state.setdefault(_ACCESS_EVENTS_KEY, [])
+        key = f"{access.get('viewer')}|{access.get('source')}"
+        if key in seen:
+            return
+        seen.append(key)
+        if st.session_state.get("_ow_usage_off") or st.session_state.get("_ow_usage_oldshape"):
+            return
+        from app.core.identity import identity_sql
+        from app.core.query import _buffer_write
+        from app.core.sqlsafe import sql_literal
+
+        _buffer_write(
+            _USAGE_PREFIX,
+            f"SELECT {sql_literal('Access')}, {sql_literal(str(access.get('source') or '')[:80])}, NULL, "
+            f"{sql_literal('access_resolved')}, FALSE, {identity_sql()}",
+            off_flag="_ow_usage_off", downgrade_flag="_ow_usage_oldshape")
+    except Exception:
+        pass
+
+
+def _resolve_identified(name: str, exact: str = "") -> tuple[dict, bool]:
+    """(access, memoize). ``name`` is the upper-cased viewer (allowlist / pin lookups, memo key); ``exact``
+    is the st.user name as given, the only form compared with the admin-role roster (default: ``name``).
+    The off-SiS answer is never memoized: is_sis() is also False on a DISCONNECTED SiS run
+    (get_cached_session() is None), and that pure 'default' must not outlive the outage."""
     from app.config import (
+        OPERATOR_PROFILES,
         VIEWER_UNKNOWN_PROFILE,
-        resolve_role_profile,
+        access_retry_s,
+        is_operator_user,
         resolve_viewer_profile,
     )
-    from app.core.identity import viewer_name
 
-    viewer = viewer_name()
-    if viewer:
-        return resolve_viewer_profile(viewer) or VIEWER_UNKNOWN_PROFILE
-    if is_sis():
-        return VIEWER_UNKNOWN_PROFILE
-    return resolve_role_profile(role or current_role())
+    admin = OPERATOR_PROFILES[0]
+    base = {"viewer": name, "at": _clock(), "error": ""}
+    if is_operator_user(name):           # break-glass: the named admins never wait on a lookup
+        return {**base, "profile": admin, "operator": True, "source": "allowlist"}, True
+    view_profile = resolve_viewer_profile(name) or VIEWER_UNKNOWN_PROFILE
+    if not is_sis():
+        # Off-SiS (local dev, tests) there is no owner's-rights session to look the role up as.
+        return {**base, "profile": view_profile, "operator": False, "source": "default"}, False
+    roster = _admin_roster()
+    # the answer is as old as the lookup behind it, so the memo expires with the data
+    base["at"] = roster["at"]
+    if roster["status"] == "ok":
+        if (exact or name) in roster["users"]:     # exact, case-sensitive (holistic 4.610 #1)
+            return {**base, "profile": admin, "operator": True, "source": "role"}, True
+        return {**base, "profile": view_profile, "operator": False, "source": "default"}, True
+    # the page memo waits out the same backoff as the roster memo behind it
+    return {**base, "profile": view_profile, "operator": False, "source": roster["status"],
+            "error": roster["error"], "retry_s": access_retry_s(roster.get("fails"))}, True
+
+
+def viewer_access() -> dict:
+    """This viewer's resolved access: {viewer, profile, operator, source, at, error} (a copy).
+
+    Identified viewers are memoized per session (see the block comment above), except the off-SiS answer
+    (no lookup ran; see _resolve_identified). An unidentified viewer is never memoized: SiS ->
+    NO_IDENTITY_PROFILE, not an operator, source 'no_identity'; off-SiS -> the role->profile map, source
+    'off_sis'."""
+    from app.config import (
+        ACCESS_TTL_S,
+        NO_IDENTITY_PROFILE,
+        OPERATOR_PROFILES,
+        access_retry_s,
+        resolve_role_profile,
+    )
+
+    name = _viewer()
+    if not name:
+        if is_sis():
+            return {"viewer": "", "profile": NO_IDENTITY_PROFILE, "operator": False,
+                    "source": "no_identity", "at": _clock(), "error": ""}
+        profile = resolve_role_profile(current_role())
+        return {"viewer": "", "profile": profile, "operator": profile in OPERATOR_PROFILES,
+                "source": "off_sis", "at": _clock(), "error": ""}
+    memo = st.session_state.get(_ACCESS_KEY)
+    if isinstance(memo, dict) and memo.get("viewer") == name and _fresh(
+            memo, (memo.get("retry_s") or access_retry_s(1))
+            if memo.get("source") in ACCESS_UNAVAILABLE_SOURCES else ACCESS_TTL_S):
+        return dict(memo)
+    memo, keep = _resolve_identified(name, _viewer_exact())
+    if keep:
+        st.session_state[_ACCESS_KEY] = memo
+    else:
+        st.session_state.pop(_ACCESS_KEY, None)
+    _log_access_event(memo)
+    return dict(memo)
+
+
+def access_source() -> str:
+    """How this viewer's access was decided: one of ACCESS_SOURCES, or 'no_identity' / 'off_sis'."""
+    if _viewer():
+        return str(viewer_access()["source"])
+    return "no_identity" if is_sis() else "off_sis"
+
+
+def reverify_role_admin() -> bool:
+    """Write-time re-verification for a ROLE-sourced admin (query._entitlement_refusal calls it on
+    every privileged write when access_source() == 'role').
+
+    A FRESH admin-role lookup, memoized only when positive and for at most config.WRITE_RECHECK_S.
+    False on a revoke, an empty answer or a failed lookup — and then this session's page memo is
+    dropped, so the next call re-resolves (read-only) instead of waiting out ACCESS_TTL_S."""
+    from app.config import WRITE_RECHECK_S
+
+    name = _viewer()
+    if not name:
+        return False
+    memo = st.session_state.get(_RECHECK_KEY)
+    if isinstance(memo, dict) and memo.get("viewer") == name and _fresh(memo, WRITE_RECHECK_S):
+        return True
+    st.session_state.pop(_RECHECK_KEY, None)
+    roster = _admin_roster(fresh=True)
+    if roster["status"] == "ok" and _viewer_exact() in roster["users"]:   # exact, as in _resolve_identified
+        st.session_state[_RECHECK_KEY] = {"viewer": name, "at": roster["at"]}
+        return True
+    st.session_state.pop(_ACCESS_KEY, None)
+    return False
+
+
+def forget_access() -> None:
+    """Drop THIS session's access memos (the next call re-resolves with one fresh lookup). The
+    warehouse runtime gives every viewer their own session, so this never touches another viewer."""
+    for key in (_ACCESS_KEY, _ROSTER_KEY, _RECHECK_KEY):
+        st.session_state.pop(key, None)
+
+
+def access_info(*, roster: bool = False) -> dict:
+    """Snapshot for Admin ▸ App access: the viewer's resolved access plus the admin-role roster.
+
+    ``roster=True`` also resolves the ADMIN_ACCESS_ROLE roster (one memoized lookup) when this
+    session has none — an allowlisted admin's own resolution never runs it. roster_status is
+    'not_checked' until a lookup ran, else ok / unverified / lookup_failed (an empty roster is
+    'unverified', never a clean "no members"). ``retry_s`` is the wait before the next lookup while the
+    last one failed or listed no user (config.access_retry_s of its consecutive-failure count), else None:
+    a good or absent roster has no retry pending (``ttl_s`` is its re-check)."""
+    from app.config import (
+        ACCESS_TTL_S,
+        ADMIN_ACCESS_ROLE,
+        OPERATOR_USERS,
+        ROLE_ADMIN_ACCOUNT_LEVERS,
+        VIEW_ACCESS_ROLE,
+        access_retry_s,
+    )
+
+    access = viewer_access()
+    if roster:
+        _admin_roster()
+    r = st.session_state.get(_ROSTER_KEY)
+    r = r if isinstance(r, dict) else None
+    try:
+        age = max(0.0, _clock() - float(access.get("at") or 0.0))
+    except (TypeError, ValueError):
+        age = 0.0
+    return {
+        "viewer": access.get("viewer", ""),
+        "profile": access.get("profile", ""),
+        "operator": bool(access.get("operator")),
+        "source": access.get("source", ""),
+        "error": access.get("error", ""),
+        "resolved_at": access.get("at"),
+        "age_s": age,
+        "admin_role": ADMIN_ACCESS_ROLE,
+        "view_role": VIEW_ACCESS_ROLE,
+        "account_levers": bool(ROLE_ADMIN_ACCOUNT_LEVERS),
+        "allowlist": tuple(OPERATOR_USERS),
+        "ttl_s": ACCESS_TTL_S,
+        # the backoff actually in force (review: a fixed ACCESS_RETRY_S misstated every retry after the first)
+        "retry_s": (access_retry_s(r.get("fails")) if r and r.get("status") in ACCESS_UNAVAILABLE_SOURCES
+                    else None),
+        "roster_status": str(r.get("status")) if r else "not_checked",
+        "admin_users": tuple(r.get("users") or ()) if r else (),
+        "nested_roles": tuple(r.get("roles") or ()) if r else (),
+        "roster_at": r.get("at") if r else None,
+        "roster_error": str(r.get("error") or "") if r else "",
+    }
+
+
+def recheck_access() -> dict:
+    """Admin ▸ App access 'Re-check now': forget THIS session's memos and resolve again (one fresh lookup);
+    returns the new access_info(roster=True). Only the clicking viewer's session is affected."""
+    forget_access()
+    return access_info(roster=True)

@@ -18,7 +18,8 @@ def test_new_network_logins_contract():
     # R1-025: the 90-day baseline sits BEFORE the window (history reaches window + 90 days); the old
     # fixed last-90-days history left a 90d+ window with no baseline at all
     assert "L.EVENT_TIMESTAMP >= DATEADD('day', -97, CURRENT_TIMESTAMP())" in sql
-    assert "'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS'" in sql  # same list as admin_role_holders (owner 2026-07-13)
+    # same list as admin_role_holders (owner 2026-07-13; + DSA, owner 2026-10-05)
+    assert "'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', 'SNOW_PRI_GFR_PRD_ALFA_DSA'" in sql
     assert "FIRST_SEEN >= DATEADD('day', -7," in sql         # only window-new pairs surface
     assert "FIRST_AUTHENTICATION_FACTOR" in sql              # password vs SSO visible per row
     assert "COALESCE(L.CLIENT_IP, '(none)')" in sql          # null IPs group honestly
@@ -90,7 +91,7 @@ def test_egress_section_and_new_network_panel_wired():
     # (audit consolidation); Security keeps the security lenses + a deep-link to Cost.
     assert "sec_egress_cost_link" in sec
     # honest empty states — silence must read as "checked, clean", never blank
-    assert "No break-glass account logged in from a network unseen" in sec
+    assert "No privileged (admin-role) account logged in from a network unseen" in sec  # v4.610: was break-glass
     assert "No unloads to stages in this window" in sec
     # #18: the exfiltration-score subsection is toggle-gated and wired into the egress tab
     assert "sec_exfil_toggle" in sec
