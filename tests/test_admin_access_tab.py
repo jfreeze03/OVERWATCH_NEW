@@ -6,9 +6,11 @@ The tab answers "who can open OVERWATCH, and who can change things in it":
     answer is a privilege gap and never renders as a clean "no members");
   * 'Re-check now', which clears only the clicking viewer's own session memo (and says so);
   * the DSA direct user members, and its ROLE grantees flagged 'not expanded' (they are NOT admins);
-  * the app's USAGE grantees (SHOW GRANTS ON STREAMLIT, read-only) against the four expected roles: the
-    target rule (roles.sql's proof block once the owner's pending change lands), with every remedy split on
-    config.ROLES_SQL_APP_GRANTEES, which a plain lock below pins to what roles.sql grants today;
+  * the app's USAGE grantees (SHOW GRANTS ON STREAMLIT, read-only) against the four expected roles: the rule
+    roles.sql's proof block applies (it grants all four since 4.610.1), with every remedy split on
+    config.ROLES_SQL_APP_GRANTEES, which a plain lock below pins to what roles.sql grants. With the real config
+    nothing is pending; the pending / held-ahead wording for a role roles.sql does not grant is still covered,
+    by pinning the managed set to the two SNOW_* roles (_manage_only_snow);
   * plain guidance.
 Read-only apart from the memo clear: the tab issues no write.
 """
@@ -53,6 +55,32 @@ def _grant_frame(*rows: tuple[str, str, str]) -> pd.DataFrame:
 def _four_roles_frame() -> pd.DataFrame:
     return _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
                         *[("USAGE", "ROLE", r) for r in cfg.APP_ACCESS_ROLES])
+
+
+def _snow_only_frame() -> pd.DataFrame:
+    """The app's grants when only the two SNOW_* roles hold USAGE (DSA/DTI lost theirs, or never got them)."""
+    return _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
+                        ("USAGE", "ROLE", "SNOW_ACCOUNTADMINS"), ("USAGE", "ROLE", "SNOW_SYSADMINS"))
+
+
+_SNOW_ONLY = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
+# Wording only a role roles.sql does not grant may carry. Since 4.610.1 roles.sql grants all four, so none of it
+# may appear for the real config.
+_PENDING_WORDS = ("not granted by roles.sql yet", "owner-side change", "pending", "does not grant")
+
+
+def _manage_only_snow(monkeypatch) -> None:
+    """Pin roles.sql's managed set to the two SNOW_* roles (its pre-4.610.1 state). The real config manages all
+    four, so the pending / held-ahead branch is reachable only this way; the tests whose subject is that branch
+    use it to keep the wording covered for a role the decision ever adds ahead of roles.sql."""
+    from app.ui.pages import admin
+    monkeypatch.setattr(ar, "ROLES_SQL_MANAGED", _SNOW_ONLY)
+    monkeypatch.setattr(admin, "ROLES_SQL_APP_GRANTEES", _SNOW_ONLY)
+    assert ar.pending_roles() == (cfg.ADMIN_ACCESS_ROLE, cfg.VIEW_ACCESS_ROLE)
+
+
+def _pending_words_in(text: str) -> list[str]:
+    return [w for w in _PENDING_WORDS if w in text]
 
 
 # ---------------------------------------------------------------------------
@@ -172,11 +200,39 @@ def test_an_owner_without_explicit_usage_is_missing_but_still_opens_the_app():
 # ---------------------------------------------------------------------------
 # Holistic 4.610 #0/#3/#5/#6/#11: every remedy follows what roles.sql grants TODAY
 # ---------------------------------------------------------------------------
-def test_missing_wording_is_split_on_what_roles_sql_grants():
-    # the grant state roles.sql produces today: the two SNOW_* roles, DSA/DTI not granted
-    frame = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
-                         ("USAGE", "ROLE", "SNOW_ACCOUNTADMINS"), ("USAGE", "ROLE", "SNOW_SYSADMINS"))
+def test_roles_sql_manages_every_access_role_so_nothing_is_pending():
+    # owner change 2026-10-06 (4.610.1): roles.sql grants all four, so no role takes the pending wording
+    assert set(ar.ROLES_SQL_MANAGED) == set(cfg.APP_ACCESS_ROLES) == set(ar.EXPECTED_APP_GRANTEES)
+    assert ar.pending_roles() == ()
+    for frame in (_four_roles_frame(), _snow_only_frame(), _grant_frame(("OWNERSHIP", "ROLE", "SNOW_SYSADMINS"))):
+        r = ar.app_grant_review(frame)
+        assert r["missing_pending"] == () and r["ahead"] == ()
+        assert not _pending_words_in(" ".join(row["STATUS"] for row in r["table"])), r["table"]
+
+
+def test_missing_wording_is_split_on_what_roles_sql_grants(monkeypatch):
+    # today: DSA/DTI lost their USAGE (a deploy re-created the app, and only the SNOW_* grants are back); roles.sql
+    # grants both, so the remedy is the re-run (-20012), never the pending wording
+    r = ar.app_grant_review(_snow_only_frame())
+    assert r["missing_rerun"] == (cfg.ADMIN_ACCESS_ROLE, cfg.VIEW_ACCESS_ROLE)
+    assert r["missing_pending"] == () and r["ahead"] == ()
+    by = {row["GRANTEE"]: row for row in r["table"]}
+    for role in (cfg.ADMIN_ACCESS_ROLE, cfg.VIEW_ACCESS_ROLE):
+        status = by[role]["STATUS"]
+        assert status == ar.MISSING_RERUN, (role, status)
+        assert "re-run snowflake/roles.sql's Streamlit block" in status and "-20012" in status
+        assert "-20011" not in status and not _pending_words_in(status), status
+    # a SNOW_* role takes the same re-run remedy
+    frame = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"), ("USAGE", "ROLE", "SNOW_ACCOUNTADMINS"),
+                         ("USAGE", "ROLE", cfg.ADMIN_ACCESS_ROLE), ("USAGE", "ROLE", cfg.VIEW_ACCESS_ROLE))
     r = ar.app_grant_review(frame)
+    assert r["missing_rerun"] == ("SNOW_SYSADMINS",) and r["missing_pending"] == ()
+    by = {row["GRANTEE"]: row for row in r["table"]}
+    assert by["SNOW_SYSADMINS"]["STATUS"] == ar.MISSING_RERUN and "-20012" in ar.MISSING_RERUN
+
+    # the branch for a role roles.sql does not grant (its pre-4.610.1 state, pinned here)
+    _manage_only_snow(monkeypatch)
+    r = ar.app_grant_review(_snow_only_frame())
     pending = ar.pending_roles()
     assert r["missing_pending"] == pending and r["missing_rerun"] == () and r["ahead"] == ()
     by = {row["GRANTEE"]: row for row in r["table"]}
@@ -187,32 +243,41 @@ def test_missing_wording_is_split_on_what_roles_sql_grants():
         assert "re-run" not in status.lower() and "-20012" not in status
         assert "not granted by roles.sql yet" in status and "-20011" in status
     # a role roles.sql grants keeps the re-run remedy
-    frame = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"), ("USAGE", "ROLE", "SNOW_ACCOUNTADMINS"),
-                         *[("USAGE", "ROLE", p) for p in pending])
     r = ar.app_grant_review(frame)
     assert r["missing_rerun"] == ("SNOW_SYSADMINS",) and r["missing_pending"] == ()
     by = {row["GRANTEE"]: row for row in r["table"]}
-    assert by["SNOW_SYSADMINS"]["STATUS"] == ar.MISSING_RERUN and "-20012" in ar.MISSING_RERUN
+    assert by["SNOW_SYSADMINS"]["STATUS"] == ar.MISSING_RERUN
 
 
-def test_a_role_held_ahead_of_roles_sql_is_flagged_not_silently_ok():
-    # a hand-made DSA/DTI grant: the four-role target is met, but today's roles.sql raises -20011 on it
+def test_a_role_held_ahead_of_roles_sql_is_flagged_not_silently_ok(monkeypatch):
+    # today: roles.sql grants all four, so the four-role answer is plain OK on every row
     r = ar.app_grant_review(_four_roles_frame())
-    assert r["status"] == "ok" and r["ahead"] == ar.pending_roles()
+    assert r["status"] == "ok" and r["ahead"] == ()
+    assert [row["STATUS"] for row in r["table"]] == ["OK"] * len(cfg.APP_ACCESS_ROLES)
+    # a role roles.sql does not grant (pinned) that holds USAGE anyway: the target is met, but roles.sql's
+    # proof block raises -20011 on it, so the row says so instead of a silent OK
+    _manage_only_snow(monkeypatch)
+    r = ar.app_grant_review(_four_roles_frame())
+    assert r["status"] == "ok" and r["ahead"] == ar.pending_roles() != ()
     by = {row["GRANTEE"]: row for row in r["table"]}
     for role in ar.pending_roles():
         assert by[role]["STATUS"] == ar.HELD_AHEAD and "-20011" in by[role]["STATUS"]
-    for role in cfg.ROLES_SQL_APP_GRANTEES:
+    for role in _SNOW_ONLY:
         assert by[role]["STATUS"] == "OK"
 
 
-def test_unexpected_non_role_grantee_is_not_promised_a_20011():
-    # roles.sql's current block counts only granted_to = ROLE rows
+def test_every_unexpected_grantee_is_promised_the_20011():
+    # roles.sql's proof block (4.610.1) counts every USAGE row that is not an access ROLE, whatever its kind, so
+    # the -20011 promise holds for a database role too (it was ROLE-only while the block counted ROLE rows only)
+    assert _PROOF_ANY_KIND.search(_streamlit_proof_block(read("snowflake/roles.sql")))
     frame = pd.concat([_four_roles_frame(), _grant_frame(("USAGE", "ROLE", "PUBLIC"),
                                                          ("USAGE", "DATABASE_ROLE", "DB.DR"))], ignore_index=True)
-    by = {row["GRANTEE"]: row for row in ar.app_grant_review(frame)["table"]}
-    assert "-20011" in by["PUBLIC"]["STATUS"]
-    assert "REVOKE" in by["DB.DR"]["STATUS"] and "-20011" not in by["DB.DR"]["STATUS"]
+    r = ar.app_grant_review(frame)
+    assert r["status"] == "drift" and r["unexpected"] == ("DATABASE_ROLE DB.DR", "ROLE PUBLIC")
+    by = {row["GRANTEE"]: row for row in r["table"]}
+    for name in ("PUBLIC", "DB.DR"):
+        assert by[name]["EXPECTED"] == "No" and "REVOKE" in by[name]["STATUS"] and "-20011" in by[name]["STATUS"]
+    assert "not an access role" in by["DB.DR"]["STATUS"]
 
 
 _GRANT_ON_APP = re.compile(r"^\s*GRANT\s+USAGE\s+ON\s+STREAMLIT\s+(\S+)\s+TO\s+ROLE\s+([A-Za-z0-9_$]+)\s*;",
@@ -292,8 +357,8 @@ def _proof_block_problems(roles_sql: str) -> list[str]:
     return problems
 
 
-# The owner-approved four-role target (owner decision 2026-10-05; roles.sql PART C, still pending) with its
-# Streamlit grants: the form the lock below must accept.
+# The owner-approved four-role form (owner decision 2026-10-05; roles.sql PART C, which roles.sql carries since
+# 4.610.1) with its Streamlit grants: the form the lock below must accept.
 _PART_C = f"""
 GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_ACCOUNTADMINS;
 GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_SYSADMINS;
@@ -323,7 +388,7 @@ END;
 $$;
 """
 
-# The two-role block roles.sql holds before PART C (ROLE rows only, NOT IN, present < 2).
+# The two-role block roles.sql held before PART C, through 4.610.0 (ROLE rows only, NOT IN, present < 2).
 _TWO_ROLE = f"""
 GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_ACCOUNTADMINS;
 GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_SYSADMINS;
@@ -549,7 +614,7 @@ def _frames(at) -> str:
     return " ".join(df.value.to_string() for df in at.dataframe)
 
 
-def test_role_admin_sees_own_access_the_roster_and_the_app_grants(access_app):
+def test_role_admin_sees_own_access_the_roster_and_the_app_grants(access_app, monkeypatch):
     at = _open_access(access_app)
     text, frames = _text(at), _frames(at)
     # own access
@@ -564,13 +629,20 @@ def test_role_admin_sees_own_access_the_roster_and_the_app_grants(access_app):
     for role in cfg.APP_ACCESS_ROLES:
         assert role in frames
     assert access_app["grant_reads"] >= 1
-    # a role held ahead of today's roles.sql (a hand-made grant) warns about its next run (holistic 4.610 #7)
+    # roles.sql grants all four (4.610.1): the clean answer carries no warning and no pending wording
+    assert not at.warning, [str(w.value) for w in at.warning]
+    assert not _pending_words_in(text), _pending_words_in(text)
+    # the guidance
+    assert "GRANT ROLE " + cfg.ADMIN_ACCESS_ROLE in text
+    # a role roles.sql does not grant (pinned) that holds USAGE anyway (a hand-made grant) warns about its next
+    # run (holistic 4.610 #7)
+    _manage_only_snow(monkeypatch)
+    at = _open_access(access_app)
+    assert "Exactly the four access roles hold USAGE" in _text(at)
     warn = " ".join(str(w.value) for w in at.warning)
     for role in ar.pending_roles():
         assert role in warn
     assert "-20011" in warn and "roles.sql does not grant" in warn
-    # the guidance
-    assert "GRANT ROLE " + cfg.ADMIN_ACCESS_ROLE in text
 
 
 def test_allowlisted_admin_with_a_failed_lookup_sees_it_failed(access_app):
@@ -594,21 +666,28 @@ def test_allowlisted_admin_with_an_empty_roster_sees_unverified_never_clean(acce
     assert "SOME_NESTED_ROLE" in frames                          # still reported, still not expanded
 
 
-def test_app_grant_drift_says_what_to_do(access_app):
+def test_app_grant_drift_says_what_to_do(access_app, monkeypatch):
     access_app["viewer"] = _ADMIN
-    access_app["grants"] = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
-                                        ("USAGE", "ROLE", "SNOW_ACCOUNTADMINS"),
-                                        ("USAGE", "ROLE", "SNOW_SYSADMINS"),
-                                        ("USAGE", "ROLE", "PUBLIC"))
+    access_app["grants"] = pd.concat([_snow_only_frame(), _grant_frame(("USAGE", "ROLE", "PUBLIC"))],
+                                     ignore_index=True)
     at = _open_access(access_app)
     warn = " ".join(str(w.value) for w in at.warning)
     err = " ".join(str(e.value) for e in at.error)
     assert cfg.ADMIN_ACCESS_ROLE in warn and cfg.VIEW_ACCESS_ROLE in warn
-    # holistic 4.610 #0: DSA/DTI are not roles.sql's to re-grant today, so the warning never says to re-run it
-    assert "not granted by roles.sql yet" in warn and "-20011" in warn
-    assert "Re-run snowflake/roles.sql" not in warn and "-20012" not in warn
+    # roles.sql grants DSA/DTI (4.610.1): a lost grant (a deploy re-created the app) is restored by re-running
+    # its Streamlit block, and its proof block raises -20012 until then
+    assert "Re-run snowflake/roles.sql's Streamlit block" in warn and "-20012" in warn
+    assert "deploy --replace" in warn and "drops its USAGE grants" in warn
+    assert "-20011" not in warn and not _pending_words_in(warn), warn
     assert "PUBLIC" in err and "REVOKE" in err and "-20011" in err
     assert "Exactly the four access roles hold USAGE" not in _text(at)
+    # a role roles.sql does not grant (pinned) is never told to re-run it: re-running adds nothing for it
+    _manage_only_snow(monkeypatch)
+    at = _open_access(access_app)
+    warn = " ".join(str(w.value) for w in at.warning)
+    assert cfg.ADMIN_ACCESS_ROLE in warn and cfg.VIEW_ACCESS_ROLE in warn
+    assert "not granted by roles.sql yet" in warn and "-20011" in warn
+    assert "Re-run snowflake/roles.sql" not in warn and "-20012" not in warn
 
 
 def test_app_grants_empty_or_failed_is_unavailable(access_app):
@@ -694,21 +773,43 @@ def test_off_sis_resolved_help_does_not_promise_a_memo(access_app):
     assert "A resolved answer is re-checked after" not in text
 
 
-def test_how_access_works_says_what_roles_sql_does_today(access_app):
-    """holistic 4.610 #6: the guidance names the roles roles.sql grants today, says the others are pending, and
-    that a DSA grant makes an admin only of someone who can open the app."""
+def _guidance_lines(at) -> list[str]:
+    return [line for e in at.markdown for line in str(e.value).splitlines()]
+
+
+def test_how_access_works_says_what_roles_sql_does_today(access_app, monkeypatch):
+    """holistic 4.610 #6: the guidance says what roles.sql grants. Since 4.610.1 that is all four, USAGE on the
+    database, schema and app only, and every deploy drops the app's USAGE grants, so its Streamlit block is
+    re-run after each one; with a role it does not grant (pinned) the guidance says that role is pending."""
     at = _open_access(access_app)
-    lines = [line for e in at.markdown for line in str(e.value).splitlines()]
+    lines = _guidance_lines(at)
     opening = [line for line in lines if "**Opening the app**" in line]
     assert len(opening) == 1, opening
-    assert f"grants and proves {', '.join(cfg.ROLES_SQL_APP_GRANTEES)} today" in opening[0]
+    assert "grants all four USAGE on the database, schema and app (nothing else)" in opening[0]
+    assert "-20012" in opening[0] and "-20011" in opening[0]
+    assert "re-creates the app and drops its USAGE grants" in opening[0]
+    assert "re-run roles.sql's Streamlit block after each deploy" in opening[0]
+    assert "until a redeploy is confirmed" not in opening[0]
+    assert not _pending_words_in(opening[0]) and " today" not in opening[0], opening[0]
+    help_text = [line for line in lines if "Who can open OVERWATCH" in line]
+    assert len(help_text) == 1 and "snowflake/roles.sql grants all four." in help_text[0], help_text
+    assert not _pending_words_in(_text(at)), _pending_words_in(_text(at))
+    make = [line for line in lines if "**Make someone an admin**" in line]
+    assert len(make) == 1 and make[0].endswith("can create an OVERWATCH admin."), make
+
+    # a role roles.sql does not grant (pinned): named as pending, with what that means for its members
+    _manage_only_snow(monkeypatch)
+    lines = _guidance_lines(_open_access(access_app))
+    opening = [line for line in lines if "**Opening the app**" in line]
+    assert len(opening) == 1, opening
+    assert f"grants and proves {', '.join(_SNOW_ONLY)} today" in opening[0]
     assert "not granted by roles.sql yet" in opening[0] and "-20011" in opening[0]
     assert "USAGE on the database, schema and app" in opening[0]
-    assert "grants them," not in opening[0]                   # the old claim that roles.sql grants all four
+    assert "grants all four" not in opening[0]
+    help_text = [line for line in lines if "Who can open OVERWATCH" in line]
+    assert len(help_text) == 1 and "owner-side change still pending" in help_text[0], help_text
     make = [line for line in lines if "**Make someone an admin**" in line]
     assert len(make) == 1 and "only of someone who can open the app" in make[0], make
-    # the panel_help no longer claims four roles hold it today
-    assert "exactly four roles may hold it" not in read("app/ui/pages/admin.py")
 
 
 def _make_admin_line(at) -> str:
@@ -717,20 +818,31 @@ def _make_admin_line(at) -> str:
     return lines[0]
 
 
-def test_make_admin_caveat_follows_the_live_grant_review(access_app):
-    """final review #1: the 'Make someone an admin' caveat is true in BOTH grant states while roles.sql does not
-    grant DSA. With a hand-made DSA grant (the fixture's four-role answer) its members open the app through DSA
-    itself, so the line must not say they need another role; without one (roles.sql's two-role state), or when
-    the grants could not be read, it keeps the 'until DSA holds USAGE' wording."""
-    assert cfg.ADMIN_ACCESS_ROLE in ar.pending_roles()     # the state this release ships in
+def test_make_admin_caveat_follows_the_live_grant_review(access_app, monkeypatch):
+    """final review #1: the 'Make someone an admin' caveat. Since 4.610.1 roles.sql grants DSA, so there is no
+    caveat in any grant state (a lost grant is the grant review's warning above, with its re-run remedy). While
+    roles.sql did not grant DSA (pinned below) it had to be true in BOTH grant states: with a hand-made DSA grant
+    (the fixture's four-role answer) its members open the app through DSA itself, so the line must not say they
+    need another role; without one, or when the grants could not be read, it keeps the 'until DSA holds USAGE'
+    wording."""
+    assert cfg.ADMIN_ACCESS_ROLE not in ar.pending_roles()     # the state this release ships in
+    for grants, error in ((_four_roles_frame(), ""), (_snow_only_frame(), ""), (pd.DataFrame(), ""),
+                          (_four_roles_frame(), "Insufficient privileges")):
+        access_app["grants"], access_app["grants_error"] = grants, error
+        line = _make_admin_line(_open_access(access_app))
+        assert line.endswith("can create an OVERWATCH admin."), line
+        assert "until " not in line and "another role" not in line and "does not grant" not in line, line
+
+    _manage_only_snow(monkeypatch)
+    assert cfg.ADMIN_ACCESS_ROLE in ar.pending_roles()
+    access_app["grants"], access_app["grants_error"] = _four_roles_frame(), ""
     # hand-grant state: DSA holds USAGE on the app
     line = _make_admin_line(_open_access(access_app))
     assert line.endswith(ar.admin_reach_note(True)), line
     assert f"{cfg.ADMIN_ACCESS_ROLE} holds USAGE on the app" in line
     assert "another role with USAGE" not in line and "until " not in line
-    # roles.sql's state: only the two SNOW_* roles hold it
-    access_app["grants"] = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
-                                        ("USAGE", "ROLE", "SNOW_ACCOUNTADMINS"), ("USAGE", "ROLE", "SNOW_SYSADMINS"))
+    # that roles.sql's state: only the two SNOW_* roles hold it
+    access_app["grants"] = _snow_only_frame()
     line = _make_admin_line(_open_access(access_app))
     assert line.endswith(ar.admin_reach_note(False)), line
     assert f"until {cfg.ADMIN_ACCESS_ROLE} holds USAGE on the database, schema and app" in line
@@ -742,6 +854,11 @@ def test_make_admin_caveat_follows_the_live_grant_review(access_app):
 
 
 def test_admin_reach_note_wording(monkeypatch):
+    # roles.sql grants the admin role (the owner's 2026-10-06 change, 4.610.1): no caveat in any grant state;
+    # the grant review covers a lost grant
+    assert [ar.admin_reach_note(v) for v in (True, False, None)] == ["", "", ""]
+    # a roles.sql that does not grant the admin role (pinned): the caveat, worded from the grant state
+    _manage_only_snow(monkeypatch)
     held, lacking, unknown = (ar.admin_reach_note(v) for v in (True, False, None))
     assert unknown == lacking != held
     for note in (held, lacking):
@@ -749,9 +866,6 @@ def test_admin_reach_note_wording(monkeypatch):
         assert "roles.sql does not" in note
     assert "provided it also holds USAGE on the database and schema" in held
     assert "until" not in held and "another role" not in held
-    # once roles.sql grants the admin role (the owner's change) the caveat goes; the grant review covers a lost grant
-    monkeypatch.setattr(ar, "ROLES_SQL_MANAGED", tuple(cfg.APP_ACCESS_ROLES))
-    assert [ar.admin_reach_note(v) for v in (True, False, None)] == ["", "", ""]
 
 
 def test_remove_an_admin_guidance_names_the_allowlist_exception(access_app):
@@ -761,21 +875,33 @@ def test_remove_an_admin_guidance_names_the_allowlist_exception(access_app):
     assert "OPERATOR_USERS" in bullets[0] and "stays an admin" in bullets[0]
 
 
-def test_missing_usage_for_the_owner_never_claims_its_members_are_locked_out(access_app):
-    access_app["viewer"] = _ADMIN
-    access_app["grants"] = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
-                                        ("USAGE", "ROLE", "SNOW_SYSADMINS"))
-    at = _open_access(access_app)
+def _assert_owner_is_not_locked_out(at) -> str:
     warn = " ".join(str(w.value) for w in at.warning)
     assert "no explicit usage grant" in warn.lower()
-    # the re-run remedy is offered for the role roles.sql grants, the pending wording for the others
-    rerun = re.search(r"No explicit USAGE grant for ([^:]*): roles\.sql grants one to each of them", warn)
-    assert rerun and rerun.group(1) == "SNOW_ACCOUNTADMINS", warn
-    pending = re.search(r"No explicit USAGE grant for ([^:]*): not granted by roles\.sql yet", warn)
-    assert pending and pending.group(1) == ", ".join(ar.pending_roles()), warn
     locked = re.search(r"members of ([^.]*) cannot open the app", warn)
     assert locked, warn
     assert "SNOW_ACCOUNTADMINS" not in locked.group(1)
     assert cfg.ADMIN_ACCESS_ROLE in locked.group(1) and cfg.VIEW_ACCESS_ROLE in locked.group(1)
     assert "SNOW_ACCOUNTADMINS owns the app, so its members still open it" in warn
     assert "owns the app" in _frames(at).lower()                  # the table's MEANS reads the OWNERSHIP row
+    return warn
+
+
+def test_missing_usage_for_the_owner_never_claims_its_members_are_locked_out(access_app, monkeypatch):
+    access_app["viewer"] = _ADMIN
+    access_app["grants"] = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
+                                        ("USAGE", "ROLE", "SNOW_SYSADMINS"))
+    warn = _assert_owner_is_not_locked_out(_open_access(access_app))
+    # roles.sql grants all three missing roles (4.610.1): one re-run remedy names them all, nothing is pending
+    rerun = re.search(r"No explicit USAGE grant for ([^:]*): roles\.sql grants one to each of them", warn)
+    expected = ", ".join(r for r in cfg.APP_ACCESS_ROLES if r != "SNOW_SYSADMINS")
+    assert rerun and rerun.group(1) == expected, warn
+    assert not _pending_words_in(warn), warn
+    # a roles.sql that grants only the SNOW_* roles (pinned): the re-run remedy for the role it grants, the
+    # pending wording for the others, and the owner still never claimed locked out
+    _manage_only_snow(monkeypatch)
+    warn = _assert_owner_is_not_locked_out(_open_access(access_app))
+    rerun = re.search(r"No explicit USAGE grant for ([^:]*): roles\.sql grants one to each of them", warn)
+    assert rerun and rerun.group(1) == "SNOW_ACCOUNTADMINS", warn
+    pending = re.search(r"No explicit USAGE grant for ([^:]*): not granted by roles\.sql yet", warn)
+    assert pending and pending.group(1) == ", ".join(ar.pending_roles()), warn

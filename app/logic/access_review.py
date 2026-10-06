@@ -3,10 +3,11 @@
 Two different questions, answered in two different places:
   * who can OPEN the app is Snowflake's USAGE on the Streamlit. The decision names config.APP_ACCESS_ROLES as
     the roles to hold it, and app_grant_review compares a SHOW GRANTS ON STREAMLIT answer with that set.
-    snowflake/roles.sql grants and proves only config.ROLES_SQL_APP_GRANTEES today (the DSA/DTI side is a
-    pending owner change), so every remedy sentence here is split on that tuple: re-run roles.sql only for a
-    role it grants. tests/test_admin_access_tab.py pins the tuple to roles.sql, and its strict xfail flips
-    when roles.sql's proof block becomes this module's four-role rule;
+    Since 4.610.1 snowflake/roles.sql grants all four USAGE on the database, schema and app, and its
+    -20011/-20012 proof block is this module's rule (tests/test_admin_access_tab.py locks both, and pins
+    config.ROLES_SQL_APP_GRANTEES to the roles roles.sql grants). Every remedy sentence is still split on that
+    tuple, so a role the decision names but roles.sql does not grant (none today) would never be told to
+    re-run roles.sql, which cannot add it;
   * who can CHANGE things is decided in-app per viewer (app.core.session.viewer_access): the named
     OPERATOR_USERS, or a DIRECT user grant of config.ADMIN_ACCESS_ROLE looked up live as the owner. Everyone
     else who can open the app gets the view-only VIEWER_UNKNOWN_PROFILE.
@@ -35,11 +36,13 @@ from app.logic.formulas import ACCOUNT_TIMEZONE, humanize_duration
 
 #: The roles meant to hold USAGE on the app, and the only ones that may (the 2026-10-05 decision's target set).
 EXPECTED_APP_GRANTEES: tuple[str, ...] = tuple(APP_ACCESS_ROLES)
-#: The expected roles roles.sql grants USAGE today, and the only ones its current proof block accepts.
+#: The expected roles roles.sql grants USAGE, and the only ones its proof block accepts (all four since 4.610.1).
 ROLES_SQL_MANAGED: tuple[str, ...] = tuple(ROLES_SQL_APP_GRANTEES)
 
 #: STATUS for an expected role with no USAGE grant, by whether roles.sql grants it (one wording, many readers).
-MISSING_RERUN = "Missing: re-run snowflake/roles.sql's Streamlit grants (its proof block raises -20012 meanwhile)"
+#: MISSING_PENDING and HELD_AHEAD apply only to an access role roles.sql does not grant: none since 4.610.1.
+MISSING_RERUN = ("Missing: re-run snowflake/roles.sql's Streamlit block (every deploy re-creates the app and drops "
+                 "its USAGE grants; the proof block raises -20012 meanwhile)")
 MISSING_PENDING = ("Missing: not granted by roles.sql yet (owner-side change pending); roles.sql's current "
                    "proof block raises -20011 on its next run once this role holds USAGE")
 #: STATUS for an expected role that holds USAGE although roles.sql does not grant it (a hand-made grant).
@@ -48,7 +51,8 @@ HELD_AHEAD = ("OK, but not granted by roles.sql yet (owner-side change pending):
 
 
 def pending_roles(roles: Iterable[str] = EXPECTED_APP_GRANTEES) -> tuple[str, ...]:
-    """The access roles roles.sql does not grant yet (in order): the owner-side change still pending."""
+    """The access roles roles.sql does not grant yet (in order). Empty since 4.610.1, when roles.sql began
+    granting all four; kept so a role the decision adds ahead of roles.sql is never told to re-run it."""
     managed = {str(r).upper() for r in ROLES_SQL_MANAGED}
     return tuple(str(r).upper() for r in roles if str(r).upper() not in managed)
 
@@ -57,10 +61,11 @@ def admin_reach_note(holds_usage: bool | None) -> str:
     """The 'Make someone an admin' caveat on Admin ▸ App access, gated on the live grant review (final review #1).
 
     ``holds_usage`` is whether SHOW GRANTS ON STREAMLIT lists ADMIN_ACCESS_ROLE with USAGE: True / False, or None
-    when that read failed or came back empty. Membership makes an admin only of someone who can open the app, so
-    while roles.sql does not grant the role yet the guidance must match the grant state: a hand-made grant
-    (True) lets members in through the role itself; otherwise (False, or unknown) the 'until' wording holds
-    whichever way the grants stand. Empty once roles.sql grants the role (the grant review covers a lost grant)."""
+    when that read failed or came back empty. Empty while roles.sql grants the role, as it does since 4.610.1
+    (the grant review above the guidance covers a lost grant). Only if roles.sql did not grant it would the
+    caveat apply: membership makes an admin only of someone who can open the app, so a hand-made grant (True)
+    lets members in through the role itself; otherwise (False, or unknown) the 'until' wording holds whichever
+    way the grants stand."""
     if ADMIN_ACCESS_ROLE not in pending_roles():
         return ""
     lead = " Membership makes an admin only of someone who can open the app"
@@ -224,17 +229,18 @@ def _cell(m: Mapping, key: str) -> str:
 def app_grant_review(rows: object, expected: tuple[str, ...] = EXPECTED_APP_GRANTEES) -> dict:
     """Compare a SHOW GRANTS ON STREAMLIT answer with the roles meant (and alone allowed) to open the app.
 
-    The rule is the 2026-10-05 decision's four-role target (the form roles.sql's proof block takes once the
-    owner's pending change lands): a USAGE row is allowed only when granted_to = 'ROLE' and the grantee is one
+    The rule is the 2026-10-05 decision's four-role set, the same rule roles.sql's proof block applies since
+    4.610.1: a USAGE row is allowed only when granted_to = 'ROLE' and the grantee is one
     of ``expected`` (so a database role, application role or share spelled like an access role is still
     unexpected), and every expected role must hold USAGE. Other privileges (OWNERSHIP) never count either way;
     their grantees are reported as ``owners``, and an owning role's MEANS says so (ownership implies every
     privilege, so it still opens the app while its explicit USAGE grant is missing).
 
-    The remedy is split on ROLES_SQL_MANAGED (what roles.sql grants today): a missing role roles.sql grants
-    reads MISSING_RERUN, any other missing role MISSING_PENDING (re-running roles.sql adds nothing for it),
-    and an expected role holding USAGE that roles.sql does not grant reads HELD_AHEAD (the current proof
-    block raises -20011 on it).
+    The remedy is split on ROLES_SQL_MANAGED (what roles.sql grants: all four since 4.610.1): a missing role
+    roles.sql grants reads MISSING_RERUN; only an access role roles.sql does not grant (none today) would read
+    MISSING_PENDING when missing (re-running roles.sql adds nothing for it) or HELD_AHEAD when it holds USAGE
+    anyway (the proof block raises -20011 on it). Every unexpected grantee, whatever its kind, is promised
+    -20011: the proof block counts any USAGE row that is not a ROLE named in the four.
 
     Returns {status: ok | drift | empty, rows, present, missing, missing_rerun, missing_pending, ahead,
     unexpected, owners, table}. An empty answer is 'empty' (the owner always sees its own OWNERSHIP row, so
@@ -282,10 +288,11 @@ def app_grant_review(rows: object, expected: tuple[str, ...] = EXPECTED_APP_GRAN
                       "STATUS": status_text,
                       "MEANS": (OWNER_MEANING if owns else "") + ROLE_MEANING.get(role, "")})
     for kind, name in sorted({(k, n) for k, n in usage if not (k == "ROLE" and n in expected)}):
-        # roles.sql's current block counts only granted_to = ROLE rows, so -20011 is promised for those alone
+        # roles.sql's proof block (4.610.1) counts every USAGE row that is not an access ROLE, whatever its kind
         table.append({"GRANTEE": name, "KIND": kind or "?", "EXPECTED": "No", "HAS_USAGE": "Yes",
                       "STATUS": ("Unexpected: REVOKE it (roles.sql's proof block raises -20011)" if kind == "ROLE"
-                                 else "Unexpected: REVOKE it (not an access role)"),
+                                 else "Unexpected: REVOKE it (not an access role; roles.sql's proof block raises "
+                                      "-20011)"),
                       "MEANS": "Not an access role: anyone holding it can open the app."})
     return {"status": status, "rows": len(records), "present": present, "missing": missing,
             "missing_rerun": missing_rerun, "missing_pending": missing_pending, "ahead": ahead,

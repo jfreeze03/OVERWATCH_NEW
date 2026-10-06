@@ -196,10 +196,12 @@ savings_rollup, unread_maintenance).
 
 - **The app runs owner's-rights under Streamlit-in-Snowflake.** Every viewer's
   statements execute as the app owner. Snowflake RBAC decides who can open the
-  app (USAGE on the Streamlit object: today SNOW_ACCOUNTADMINS + SNOW_SYSADMINS,
-  per `roles.sql`; the owner decision of 2026-10-05 names four roles, adding
-  SNOW_PRI_GFR_PRD_ALFA_DSA and SNOW_PRI_GFR_PRD_ALFA_DTI, whose Snowflake side
-  is a pending owner change). It does NOT limit data per viewer: every viewer reads with the
+  app (USAGE on the Streamlit object: the four roles of the owner decision of
+  2026-10-05, SNOW_ACCOUNTADMINS, SNOW_SYSADMINS, SNOW_PRI_GFR_PRD_ALFA_DSA and
+  SNOW_PRI_GFR_PRD_ALFA_DTI, all granted by `roles.sql` since 4.610.1; DSA and
+  DTI hold USAGE on the database, schema and app only, and a deploy re-creates
+  the app, so its grants are re-run after each one). It does NOT limit data per
+  viewer: every viewer reads with the
   owner's privileges. Viewer identity comes from `st.user`
   (`app/core/identity.py`).
 - Company scoping (ALFA vs Trexis) is a shared-account *convenience filter*,

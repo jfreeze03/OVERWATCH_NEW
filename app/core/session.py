@@ -353,8 +353,8 @@ def active_profile(role: str = "") -> str:
 #      'unverified' when it listed no USER grantee (SHOW shows only what the owner can see, so an empty
 #      answer is a privilege gap, never proof of "no members").
 # FAIL CLOSED: no error, empty answer or revoke ever grants admin. VIEW_ACCESS_ROLE is never looked up:
-# only a role holding USAGE on the app can open it (the decision names the four config.APP_ACCESS_ROLES;
-# roles.sql grants config.ROLES_SQL_APP_GRANTEES today), so every identified non-admin is a DTI member or
+# only a role holding USAGE on the app can open it (the four config.APP_ACCESS_ROLES, which
+# snowflake/roles.sql grants and proves since 4.610.1), so every identified non-admin is a DTI member or
 # a SNOW_* holder and gets the view-only default.
 #
 # MEMBERSHIP IS EXACT: the viewer's st.user name is compared with SHOW's grantee_name as stored, with no

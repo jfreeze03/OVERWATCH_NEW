@@ -3,8 +3,11 @@ SNOW_ACCOUNTADMINS and SNOW_SYSADMINS. remove any traces of other roles.
 also remove task monitor references. the app is producing a number of
 access error messages."
 
-The surviving invariant: roles.sql grants to exactly the two SNOW_* roles
-and actively retires the old two-role layer.
+The surviving invariant: roles.sql actively retires the old two-role layer,
+and its object grants go to the two SNOW_* roles only. Since the owner
+decision of 2026-10-05 (roles.sql change 2026-10-06, 4.610.1) it also grants
+SNOW_PRI_GFR_PRD_ALFA_DSA and SNOW_PRI_GFR_PRD_ALFA_DTI USAGE on the
+database, schema and app, and nothing else.
 
 (The task-absence half of this file was retired 2026-07-13 by the owner's
 correction — "i meant getting rid of resource monitor, not task monitoring"
