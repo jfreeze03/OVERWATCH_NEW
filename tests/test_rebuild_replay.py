@@ -245,7 +245,8 @@ def test_replay_grants_only_to_live_or_shimmed_roles():
     roles_sql = read("snowflake/roles.sql")
     live = {m.group(1) for line in _uncommented(roles_sql) for m in re.finditer(r"\bTO ROLE (\w+)", line)}
     retired = set(re.findall(r"^DROP ROLE IF EXISTS (\w+);$", roles_sql, re.M))
-    assert live == {"SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS"}             # owner decision 2026-07-13
+    assert live == {"SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS",             # owner decision 2026-10-05
+                    "SNOW_PRI_GFR_PRD_ALFA_DSA", "SNOW_PRI_GFR_PRD_ALFA_DTI"}
     preamble = _preamble()
     shim = re.findall(r"^CREATE ROLE IF NOT EXISTS (\w+);$", preamble, re.M)
     targets = {m.group(1) for line in _uncommented(text) for m in re.finditer(r"\bTO ROLE (\w+)", line)}

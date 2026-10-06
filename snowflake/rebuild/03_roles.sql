@@ -1,9 +1,13 @@
 -- 03_roles.sql — BYTE-IDENTICAL copy of snowflake/roles.sql (locked by
 -- tests/test_rebuild_bundle.py); numbered for the rebuild order.
 
--- roles.sql — OVERWATCH access (owner decision 2026-07-13: the ONLY roles
--- with access are SNOW_ACCOUNTADMINS and SNOW_SYSADMINS; the old
--- OVERWATCH_MONITOR / OVERWATCH_OPERATOR layer is retired).
+-- roles.sql — OVERWATCH access. Owner decision 2026-10-05 (supersedes 2026-07-13's
+-- "SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period"): four roles can OPEN the app --
+-- SNOW_ACCOUNTADMINS, SNOW_SYSADMINS, SNOW_PRI_GFR_PRD_ALFA_DSA (admin) and
+-- SNOW_PRI_GFR_PRD_ALFA_DTI (read-only view). The app (4.610+) decides admin vs
+-- view in-app; DSA/DTI get USAGE on the database, schema and app ONLY (no table,
+-- view, warehouse or IMPORTED grants). The two SNOW_* roles keep their worksheet
+-- grants below. The old OVERWATCH_MONITOR / OVERWATCH_OPERATOR layer is retired.
 -- Run as SNOW_ACCOUNTADMINS (IMPORTED PRIVILEGES needs ACCOUNTADMIN-tier).
 
 -- Retire the old layer if it exists (idempotent).
@@ -86,43 +90,55 @@ $$;
 -- every redeploy and any non-owning role gets "does not exist or not
 -- authorized" until this runs. Run this block AFTER each CREATE OR REPLACE
 -- STREAMLIT (or add COPY GRANTS to that statement). DATABASE + SCHEMA USAGE are
--- restated so the block is self-contained after an app/schema rebuild.
+-- restated so the block is self-contained after an app/schema rebuild. After a
+-- deploy, running this block (through the proof below) is all that is needed.
 GRANT USAGE ON DATABASE  DBA_MAINT_DB                        TO ROLE SNOW_ACCOUNTADMINS;
 GRANT USAGE ON DATABASE  DBA_MAINT_DB                        TO ROLE SNOW_SYSADMINS;
+GRANT USAGE ON DATABASE  DBA_MAINT_DB                        TO ROLE SNOW_PRI_GFR_PRD_ALFA_DSA;
+GRANT USAGE ON DATABASE  DBA_MAINT_DB                        TO ROLE SNOW_PRI_GFR_PRD_ALFA_DTI;
 GRANT USAGE ON SCHEMA    DBA_MAINT_DB.OVERWATCH              TO ROLE SNOW_ACCOUNTADMINS;
 GRANT USAGE ON SCHEMA    DBA_MAINT_DB.OVERWATCH              TO ROLE SNOW_SYSADMINS;
+GRANT USAGE ON SCHEMA    DBA_MAINT_DB.OVERWATCH              TO ROLE SNOW_PRI_GFR_PRD_ALFA_DSA;
+GRANT USAGE ON SCHEMA    DBA_MAINT_DB.OVERWATCH              TO ROLE SNOW_PRI_GFR_PRD_ALFA_DTI;
 GRANT USAGE ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP TO ROLE SNOW_ACCOUNTADMINS;
 GRANT USAGE ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP TO ROLE SNOW_SYSADMINS;
+GRANT USAGE ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP TO ROLE SNOW_PRI_GFR_PRD_ALFA_DSA;
+GRANT USAGE ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP TO ROLE SNOW_PRI_GFR_PRD_ALFA_DTI;
 
--- r27 #7 + Wave 3 #4: prove the two-role restriction on the app object — HARD
--- FAIL. RAISEs if the app has any grantee outside {SNOW_ACCOUNTADMINS,
--- SNOW_SYSADMINS}, or if it is missing USAGE for either required role. Replace
--- the app name if yours differs.
+-- r27 #7 + Wave 3 #4 (four roles since 2026-10-05): prove the app object's USAGE
+-- set — HARD FAIL. RAISEs if the app has any USAGE grantee other than the four
+-- access roles (a user, a database or application role, or any other role), or
+-- if it is missing USAGE for any of the four. The app relies on this exact set:
+-- every signed-in viewer who is not an admin gets the read-only view. Replace the
+-- app name if yours differs.
 EXECUTE IMMEDIATE $$
 DECLARE
   unexpected_grantee EXCEPTION (-20011,
-    'Streamlit OVERWATCH_APP has a USAGE grantee outside {SNOW_ACCOUNTADMINS, SNOW_SYSADMINS} — REVOKE it; access is two roles only.');
+    'Streamlit OVERWATCH_APP has a USAGE grantee outside {SNOW_ACCOUNTADMINS, SNOW_SYSADMINS, SNOW_PRI_GFR_PRD_ALFA_DSA, SNOW_PRI_GFR_PRD_ALFA_DTI} — REVOKE it.');
   missing_grantee EXCEPTION (-20012,
-    'Streamlit OVERWATCH_APP is missing USAGE for a required admin role (a CREATE OR REPLACE STREAMLIT dropped its grants) — re-run the GRANT USAGE ON STREAMLIT block above.');
+    'Streamlit OVERWATCH_APP is missing USAGE for an access role (a CREATE OR REPLACE STREAMLIT dropped its grants) — re-run the GRANT USAGE ON STREAMLIT block above.');
   bad INTEGER;
   present INTEGER;
 BEGIN
   SHOW GRANTS ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP;
   SELECT
-    COUNT_IF("privilege" = 'USAGE' AND "granted_to" = 'ROLE'
-             AND "grantee_name" NOT IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')),
+    COUNT_IF("privilege" = 'USAGE'
+             AND NOT ("granted_to" = 'ROLE'
+                      AND "grantee_name" IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS',
+                                             'SNOW_PRI_GFR_PRD_ALFA_DSA', 'SNOW_PRI_GFR_PRD_ALFA_DTI'))),
     COUNT(DISTINCT CASE WHEN "privilege" = 'USAGE' AND "granted_to" = 'ROLE'
-             AND "grantee_name" IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')
+             AND "grantee_name" IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS',
+                                    'SNOW_PRI_GFR_PRD_ALFA_DSA', 'SNOW_PRI_GFR_PRD_ALFA_DTI')
              THEN "grantee_name" END)
     INTO :bad, :present
     FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
   IF (bad > 0) THEN
     RAISE unexpected_grantee;
   END IF;
-  IF (present < 2) THEN
+  IF (present < 4) THEN
     RAISE missing_grantee;
   END IF;
-  RETURN 'Streamlit grants OK — both admin roles present, no unexpected grantee.';
+  RETURN 'Streamlit grants OK — the four access roles are present, no unexpected grantee.';
 END;
 $$;
 

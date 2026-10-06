@@ -18,13 +18,23 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_roles_sql_grants_only_the_two_snow_roles():
+def test_roles_sql_grants_only_the_four_access_roles():
+    # owner decision 2026-10-05 (roles.sql change 2026-10-06, 4.610.1) supersedes 2026-07-13's two roles
     roles = (_ROOT / "snowflake" / "roles.sql").read_text(encoding="utf-8")
     assert "DROP ROLE IF EXISTS OVERWATCH_OPERATOR;" in roles
     assert "DROP ROLE IF EXISTS OVERWATCH_MONITOR;" in roles
-    grantees = {line.split("TO ROLE", 1)[1].strip().rstrip(";")
-                for line in roles.splitlines() if "TO ROLE" in line}
-    assert grantees == {"SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS"}, grantees
+    grants = [line for line in roles.splitlines() if "TO ROLE" in line and not line.lstrip().startswith("--")]
+    grantees = {line.split("TO ROLE", 1)[1].strip().rstrip(";") for line in grants}
+    assert grantees == {"SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS",
+                        "SNOW_PRI_GFR_PRD_ALFA_DSA", "SNOW_PRI_GFR_PRD_ALFA_DTI"}, grantees
+    # DSA/DTI open the app and nothing else: USAGE on the database, the schema and the app, exactly once each
+    allowed = {"GRANT USAGE ON DATABASE DBA_MAINT_DB",
+               "GRANT USAGE ON SCHEMA DBA_MAINT_DB.OVERWATCH",
+               "GRANT USAGE ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP"}
+    for role in ("SNOW_PRI_GFR_PRD_ALFA_DSA", "SNOW_PRI_GFR_PRD_ALFA_DTI"):
+        mine = [" ".join(line.split("TO ROLE", 1)[0].split()) for line in grants
+                if line.split("TO ROLE", 1)[1].strip().rstrip(";") == role]
+        assert sorted(mine) == sorted(allowed), (role, mine)
     assert "CREATE ROLE" not in roles                      # no custom layer returns
 
 

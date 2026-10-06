@@ -221,9 +221,8 @@ _GRANT_ON_APP = re.compile(r"^\s*GRANT\s+USAGE\s+ON\s+STREAMLIT\s+(\S+)\s+TO\s+R
 
 def test_roles_sql_app_grantees_is_what_roles_sql_grants_and_proves_today():
     """config.ROLES_SQL_APP_GRANTEES is the wording switch (holistic 4.610 #0): it must be exactly the roles
-    roles.sql grants USAGE on the app AND the roles its proof block's IN-lists name. The owner's four-role
-    roles.sql change fails this until the tuple gains DSA/DTI in the same change, so the in-app text flips
-    with the file instead of running ahead of it."""
+    roles.sql grants USAGE on the app AND the roles its proof block's IN-lists name (all four access roles
+    since 4.610.1), so the in-app text always matches the file."""
     roles_sql = read("snowflake/roles.sql")
     granted = {role.upper() for obj, role in _GRANT_ON_APP.findall(roles_sql) if obj.upper() == _APP.upper()}
     managed = set(cfg.ROLES_SQL_APP_GRANTEES)
@@ -240,9 +239,13 @@ def test_roles_sql_app_grantees_is_what_roles_sql_grants_and_proves_today():
 
 
 def test_the_grantees_lock_is_not_vacuous():
-    # PART C's four-role file fails the lock against today's two-role tuple
-    granted = {role.upper() for _obj, role in _GRANT_ON_APP.findall(_PART_C)}
-    assert granted == set(cfg.APP_ACCESS_ROLES) != set(cfg.ROLES_SQL_APP_GRANTEES)
+    # the pre-4.610.1 two-role file (DSA/DTI grant lines removed) fails the lock against the four-role tuple
+    two_role = "\n".join(line for line in read("snowflake/roles.sql").splitlines()
+                         if not re.search(r"TO ROLE SNOW_PRI_GFR_PRD_ALFA_D(SA|TI)\b", line))
+    granted = {role.upper() for obj, role in _GRANT_ON_APP.findall(two_role) if obj.upper() == _APP.upper()}
+    assert granted == {"SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS"} != set(cfg.ROLES_SQL_APP_GRANTEES)
+    # ...and PART C's text, which roles.sql now carries, grants exactly the four
+    assert {role.upper() for _obj, role in _GRANT_ON_APP.findall(_PART_C)} == set(cfg.ROLES_SQL_APP_GRANTEES)
 
 
 # ---------------------------------------------------------------------------
@@ -352,16 +355,8 @@ def test_the_proof_block_lock_accepts_part_c_and_rejects_the_two_role_block():
     assert any("IN-list" in p for p in _proof_block_problems(fewer))
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "roles.sql PART C (four roles, any-kind NOT (granted_to = 'ROLE' AND ...)) plus the DSA/DTI USAGE grants is "
-    "an owner change still pending (the release that added Admin > App access did not make it), with the "
-    "regenerated snowflake/rebuild/03 (law 6). Until then roles.sql still holds the two-role block, and "
-    "config.ROLES_SQL_APP_GRANTEES (pinned to it by test_roles_sql_app_grantees_is_what_roles_sql_grants_and_"
-    "proves_today) keeps Admin > App access saying DSA/DTI are 'not granted by roles.sql yet'. strict: once PART C "
-    "lands this XPASSes and FAILS the suite -- in the same change delete this marker AND set "
-    "config.ROLES_SQL_APP_GRANTEES to all four APP_ACCESS_ROLES (that lock fails until you do), which flips the "
-    "in-app wording with the file."))
 def test_roles_sql_proof_block_is_the_rule_app_grant_review_applies():
+    # owner change 2026-10-06 (4.610.1): roles.sql grants DSA/DTI and proves the four-role, any-kind set
     assert _proof_block_problems(read("snowflake/roles.sql")) == []
 
 

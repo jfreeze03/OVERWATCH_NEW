@@ -330,10 +330,9 @@ OPERATOR_USERS: tuple[str, ...] = ("H21427", "E22292", "KEBARR1", "CLROY", "N225
 # ---------------------------------------------------------------------------
 # Role-based app access (v4.610.0, owner decision 2026-10-05, superseding the 2026-07-13
 # "SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period"). The decision names four roles to hold USAGE on the
-# app: the two SNOW_* roles, ADMIN_ACCESS_ROLE and VIEW_ACCESS_ROLE (APP_ACCESS_ROLES, the target set).
-# snowflake/roles.sql grants and proves only ROLES_SQL_APP_GRANTEES today: the DSA/DTI side is a pending
-# owner change (DEPLOYMENT.md section 2; the strict xfail in tests/test_admin_access_tab.py), and until it
-# lands their members can open the app only through another role that holds USAGE.
+# app: the two SNOW_* roles, ADMIN_ACCESS_ROLE and VIEW_ACCESS_ROLE (APP_ACCESS_ROLES). Since 4.610.1
+# snowflake/roles.sql grants all four USAGE on the database, schema and app, and its proof block accepts
+# exactly these four (ROLES_SQL_APP_GRANTEES below).
 #   * ADMIN_ACCESS_ROLE: a DIRECT user grantee is an OVERWATCH admin -- the DBA page set and every
 #     in-app write, exactly like OPERATOR_USERS. A grant to a ROLE is not expanded (direct users only).
 #     Being a member does nothing until the member can open the app.
@@ -344,14 +343,13 @@ OPERATOR_USERS: tuple[str, ...] = ("H21427", "E22292", "KEBARR1", "CLROY", "N225
 ADMIN_ACCESS_ROLE = "SNOW_PRI_GFR_PRD_ALFA_DSA"
 VIEW_ACCESS_ROLE = "SNOW_PRI_GFR_PRD_ALFA_DTI"
 APP_ACCESS_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", ADMIN_ACCESS_ROLE, VIEW_ACCESS_ROLE)
-# The APP_ACCESS_ROLES that snowflake/roles.sql grants USAGE on the app TODAY, and the only ones its
+# The APP_ACCESS_ROLES that snowflake/roles.sql grants USAGE on the app, and the only ones its
 # -20011/-20012 proof block accepts. Admin > App access words a missing role from this split: a role here
-# is re-granted by re-running roles.sql (-20012 while it is missing); any other access role is not granted
-# by roles.sql yet, and the current proof block raises -20011 once it holds USAGE.
-# tests/test_admin_access_tab.py parses roles.sql's GRANT USAGE ON STREAMLIT lines and its proof-block
-# IN-lists and pins them to this tuple, so the owner's four-role roles.sql change must add DSA/DTI here in
-# the same change (and delete the strict xfail there); the in-app wording then flips with it.
-ROLES_SQL_APP_GRANTEES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
+# is re-granted by re-running roles.sql's Streamlit block (-20012 while it is missing); an access role NOT
+# here would be one roles.sql does not grant (none since 4.610.1, when the owner's 2026-10-06 change added
+# DSA/DTI). tests/test_admin_access_tab.py parses roles.sql's GRANT USAGE ON STREAMLIT lines and its
+# proof-block IN-lists and pins them to this tuple, so a change to either must change both.
+ROLES_SQL_APP_GRANTEES: tuple[str, ...] = APP_ACCESS_ROLES
 # FULL PARITY (owner 2026-10-05): a role-sourced admin also gets the account-level levers -- ALTER USER
 # (disable / re-enable any user) and ALTER ACCOUNT SET -- exactly like OPERATOR_USERS. False would limit
 # those two levers to the allowlist (query._entitlement_refusal reads this at call time).
