@@ -348,8 +348,26 @@ def _proof_block_problems(roles_sql: str) -> list[str]:
             problems.append(f"IN-list {names} != EXPECTED_APP_GRANTEES {expected}")
     if not _PROOF_ANY_KIND.search(block):
         problems.append("the bad count is not COUNT_IF(USAGE AND NOT (granted_to = 'ROLE' AND grantee_name IN ...))")
-    if not re.search(rf"\bpresent\s*<\s*{len(expected)}\b", block):
-        problems.append(f"the missing check is not present < {len(expected)}")
+    # which check raises which error (review 4.610.1 #1): the app promises -20011 for every unexpected grantee and
+    # -20012 for a missing access role, so each count must raise its own exception, declared with its own code,
+    # before the block returns its OK
+    raises = {
+        "unexpected": re.search(r"\bIF\s*\(\s*bad\s*>\s*0\s*\)\s*THEN\s*RAISE\s+unexpected_grantee\s*;", block),
+        "missing": re.search(rf"\bIF\s*\(\s*present\s*<\s*{len(expected)}\s*\)\s*THEN\s*RAISE\s+missing_grantee\s*;",
+                             block),
+    }
+    if not raises["unexpected"]:
+        problems.append("the bad count is not IF (bad > 0) THEN RAISE unexpected_grantee")
+    if not raises["missing"]:
+        problems.append(f"the missing check is not IF (present < {len(expected)}) THEN RAISE missing_grantee")
+    for name, code in (("unexpected_grantee", -20011), ("missing_grantee", -20012)):
+        if not re.search(rf"\b{name}\s+EXCEPTION\s*\(\s*{code}\s*,", block):
+            problems.append(f"{name} is not declared EXCEPTION ({code}, ...)")
+    ok = re.search(r"\bRETURN\s+'Streamlit grants OK\b", block)
+    if not ok:
+        problems.append("the block does not RETURN 'Streamlit grants OK'")
+    elif any(m and m.start() > ok.start() for m in raises.values()):
+        problems.append("the block RETURNs 'Streamlit grants OK' before a check can raise")
     if f"SHOW GRANTS ON STREAMLIT {_APP};" not in block:
         problems.append("the block does not read the app object access_sql.show_grants_on_app_sql() reads")
     problems.extend(f"no GRANT USAGE ON STREAMLIT ... TO ROLE {role}" for role in expected
@@ -365,6 +383,11 @@ GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_SYSADMINS;
 GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_PRI_GFR_PRD_ALFA_DSA;
 GRANT USAGE ON STREAMLIT {_APP} TO ROLE SNOW_PRI_GFR_PRD_ALFA_DTI;
 EXECUTE IMMEDIATE $$
+DECLARE
+  unexpected_grantee EXCEPTION (-20011, 'a USAGE grantee outside the four access roles');
+  missing_grantee EXCEPTION (-20012, 'an access role is missing USAGE');
+  bad INTEGER;
+  present INTEGER;
 BEGIN
   SHOW GRANTS ON STREAMLIT {_APP};
   SELECT
@@ -384,6 +407,7 @@ BEGIN
   IF (present < 4) THEN
     RAISE missing_grantee;
   END IF;
+  RETURN 'Streamlit grants OK: the four access roles are present, no unexpected grantee.';
 END;
 $$;
 """
@@ -420,9 +444,43 @@ def test_the_proof_block_lock_accepts_part_c_and_rejects_the_two_role_block():
     assert any("IN-list" in p for p in _proof_block_problems(fewer))
 
 
+def _mutant(text: str, old: str, new: str) -> str:
+    assert text.count(old) == 1, old
+    return text.replace(old, new)
+
+
+def test_the_proof_block_lock_knows_which_check_raises_which_error():
+    """review 4.610.1 #1: the app promises -20011 for every unexpected grantee and -20012 for a missing access
+    role. A block that never raises on 'bad', raises the other exception, swaps the codes or returns its OK
+    before the checks counts the right rows and still breaks that promise; the lock rejects each."""
+    def problems(text: str) -> str:
+        return " | ".join(_proof_block_problems(text))
+
+    no_bad = _mutant(_PART_C, "  IF (bad > 0) THEN\n    RAISE unexpected_grantee;\n  END IF;\n", "")
+    assert "IF (bad > 0) THEN RAISE unexpected_grantee" in problems(no_bad)
+    swapped = _mutant(_mutant(_mutant(_PART_C, "RAISE unexpected_grantee;", "RAISE @swap@;"),
+                              "RAISE missing_grantee;", "RAISE unexpected_grantee;"),
+                      "RAISE @swap@;", "RAISE missing_grantee;")
+    assert ("IF (bad > 0) THEN RAISE unexpected_grantee" in problems(swapped)
+            and "IF (present < 4) THEN RAISE missing_grantee" in problems(swapped))
+    codes = _mutant(_mutant(_mutant(_PART_C, "(-20011,", "(@swap@,"), "(-20012,", "(-20011,"), "(@swap@,", "(-20012,")
+    assert ("unexpected_grantee is not declared EXCEPTION (-20011" in problems(codes)
+            and "missing_grantee is not declared EXCEPTION (-20012" in problems(codes))
+    loose = _mutant(_PART_C, "IF (present < 4) THEN", "IF (present < 3) THEN")
+    assert "IF (present < 4) THEN RAISE missing_grantee" in problems(loose)
+    ok_line = "  RETURN 'Streamlit grants OK: the four access roles are present, no unexpected grantee.';\n"
+    early = _mutant(_mutant(_PART_C, ok_line, ""), "  IF (bad > 0) THEN", ok_line + "  IF (bad > 0) THEN")
+    assert "RETURNs 'Streamlit grants OK' before a check can raise" in problems(early)
+    assert "does not RETURN 'Streamlit grants OK'" in problems(_mutant(_PART_C, ok_line, ""))
+    # each mutant breaks only what it says: the unmutated rule (IN-lists, any-kind count, grants) still holds
+    for text in (no_bad, swapped, codes, loose, early):
+        assert "IN-list" not in problems(text) and "bad count is not COUNT_IF" not in problems(text)
+
+
 def test_roles_sql_proof_block_is_the_rule_app_grant_review_applies():
     # owner change 2026-10-06 (4.610.1): roles.sql grants DSA/DTI and proves the four-role, any-kind set
     assert _proof_block_problems(read("snowflake/roles.sql")) == []
+    assert _proof_block_problems(read("snowflake/rebuild/03_roles.sql")) == []    # the copy a rebuild runs
 
 
 # ---------------------------------------------------------------------------

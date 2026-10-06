@@ -28,7 +28,12 @@ change is wording only.
 - **Tests.** The strict xfail that waited for this change is gone: roles.sql's proof block is now locked to the same
   rule Admin ▸ App access applies. The App access tests assert the four-role wording, and still cover the
   pending wording (kept for a role the decision ever adds before roles.sql grants it) by pinning the managed set to
-  the two SNOW_* roles.
+  the two SNOW_* roles. The proof-block lock also checks which count raises which error: `bad > 0` raises
+  unexpected_grantee (-20011), `present < 4` raises missing_grantee (-20012), and both checks run before the block
+  returns 'Streamlit grants OK'. The grant lock reads lowercase and mixed-case grants too, so a lowercase extra
+  grant to DSA or DTI fails it.
+- **docs/FULL_REBUILD.md step 7** re-runs roles.sql's Streamlit block after the redeploy. Step 4 ran roles.sql
+  before it, and the redeploy drops the app's USAGE for all four roles.
 
 ## 4.610.0 - Role-based access: SNOW_PRI_GFR_PRD_ALFA_DSA members are OVERWATCH admins, everyone else gets a two-page read-only view, admins edit alert rules in-app, and V174 watches the new admin role (2026-10-05)
 
