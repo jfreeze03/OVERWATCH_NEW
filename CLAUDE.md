@@ -194,9 +194,10 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   doubling with each further failure up to the 5-minute TTL) and FAILS
   CLOSED; every admin is re-verified at every privileged write (memo at
   most 15 s). If the DSA lookup is down (privilege gap, missing or unusable
-  V175 procedure, a SNOW_SYSADMINS cutover without V175), nobody can change
-  anything in-app until it recovers; urgent changes go through a Snowsight
-  worksheet as SNOW_ACCOUNTADMINS. Trust delegation
+  V175 procedure), nobody can change anything in-app until it recovers;
+  urgent changes go through a Snowsight worksheet as SNOW_ACCOUNTADMINS. A
+  SNOW_SYSADMINS cutover without V175 is worse: its SHOW can list SOME of
+  the members with status ok, silently demoting the rest (no error row). Trust delegation
   accepted: whoever can GRANT the DSA role can mint an OVERWATCH admin with
   account-level levers. SNOW_ACCOUNTADMINS + SNOW_SYSADMINS keep roles.sql's
   object grants; DSA/DTI get no worksheet grants (USAGE on the database,

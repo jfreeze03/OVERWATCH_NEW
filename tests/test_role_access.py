@@ -621,17 +621,17 @@ def test_operator_with_a_non_admin_source_is_refused(wired, monkeypatch, source)
     executor allows only off_sis outright, re-verifies role, and refuses every other source (a stale
     allowlist included: the username route is gone since v4.611.0). It never reasons 'not role, so allow'."""
     s, errs = wired
-
-    def _boom() -> bool:
-        raise AssertionError("only a role-sourced admin re-verifies")
+    rechecks: list[int] = []
 
     monkeypatch.setattr(sess, "is_operator", lambda: True)
     monkeypatch.setattr(sess, "access_source", lambda: source)
-    monkeypatch.setattr(sess, "reverify_role_admin", _boom)
+    # recording, not raising: the executor swallows a raising re-check and refuses anyway (review r1)
+    monkeypatch.setattr(sess, "reverify_role_admin", lambda: rechecks.append(1) or True)
     for stmt in ("ALTER WAREHOUSE WH_X SUSPEND", "ALTER USER U SET DISABLED = TRUE",
                  "UPDATE DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE SET NOTE = 'x'"):
         ok, msg = q.execute_statement(stmt, page="Operations")
-        assert ok is False and "operator entitlement required" in msg, (source, stmt)
+        assert ok is False and msg == q._ENTITLEMENT_REFUSAL, (source, stmt)
+    assert rechecks == [], source            # only a role-sourced admin re-verifies
     assert s.log == [] and len(errs) == 3
 
 

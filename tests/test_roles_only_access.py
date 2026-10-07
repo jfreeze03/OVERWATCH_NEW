@@ -221,10 +221,7 @@ class _Session:
 
 
 def test_the_executor_refuses_a_stale_allowlist_source(monkeypatch):
-    s, errs = _Session(), []
-
-    def _boom() -> bool:
-        raise AssertionError("an 'allowlist' source is refused outright; it is not re-verified")
+    s, errs, rechecks = _Session(), [], []
 
     monkeypatch.setattr(q, "get_session", lambda: s)
     monkeypatch.setattr(q, "apply_query_tag", lambda *a, **k: None)
@@ -233,9 +230,12 @@ def test_the_executor_refuses_a_stale_allowlist_source(monkeypatch):
                         lambda page, exc, context="": errs.append((page, exc, context)) or "r")
     monkeypatch.setattr(sess, "is_operator", lambda: True)
     monkeypatch.setattr(sess, "access_source", lambda: "allowlist")
-    monkeypatch.setattr(sess, "reverify_role_admin", _boom)
+    # a recording stub, not a raising one: the executor swallows any exception from the re-check and refuses, so
+    # a raising stub could not tell "refused outright" from "re-verified, then refused" (review r1)
+    monkeypatch.setattr(sess, "reverify_role_admin", lambda: rechecks.append(1) or True)
     ok, msg = q.execute_statement("ALTER USER U SET DISABLED = TRUE", page="Operations")
-    assert ok is False and "operator entitlement required" in msg
+    assert ok is False and msg == q._ENTITLEMENT_REFUSAL      # not _ROLE_RECHECK_REFUSAL
+    assert rechecks == []                                     # an 'allowlist' source is never re-verified
     assert cfg.ADMIN_ACCESS_ROLE in msg and "OPERATOR_USERS" not in msg
     assert s.log == [] and len(errs) == 1 and isinstance(errs[0][1], PermissionError)
 

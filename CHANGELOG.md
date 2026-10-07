@@ -41,16 +41,19 @@ no migration, no validate floor change.
   names only the role.
 - **V175 becomes a hard prerequisite of the SNOW_SYSADMINS owner switch.** With no username fallback, a switch
   without it can leave some admins (a silent partial SHOW) or all of them read-only. Apply it and see Admin ▸ App
-  access read "Lookup OK ... by CALL ..." before the switch.
+  access read "Lookup OK ... by CALL ..." before the switch (press the sidebar's Refresh data after applying V175:
+  the tab's Re-check now alone does not re-read the schema version, which is otherwise cached up to 4 hours).
 - **Small cost.** The five former named admins now also run the membership lookup (once per session, then every 5
   minutes) and the write-time re-check (at most one per 15 seconds). Both are metadata-only reads.
 - **Unchanged.** The KEBARR1 ALFA billing override (COMPANY_SCOPE) is cost attribution, not access, and stays.
-- **Before deploying (owner-run, read-only).** As SNOW_ACCOUNTADMINS run `SHOW GRANTS OF ROLE
-  SNOW_PRI_GFR_PRD_ALFA_DSA` (or `CALL DBA_MAINT_DB.OVERWATCH.SP_ADMIN_ROLE_MEMBERS()` once V175 is applied): it
-  should list the 6 users as granted_to = USER. Immediately after it, the exact-case cross-check must return 0 rows
-  (a returned name would silently become view-only): `SELECT DISTINCT USER_NAME FROM DBA_MAINT_DB.OVERWATCH.APP_USAGE
-  WHERE EVENT_KIND='access_resolved' AND SECTION='allowlist' AND USER_NAME NOT IN (SELECT "grantee_name" FROM
-  TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "granted_to"='USER');`
+- **Before deploying (owner-run, read-only): runbox `PREFLIGHT_4611_ROLES_ONLY.sql`.** As SNOW_ACCOUNTADMINS:
+  - R1 lists DSA's direct members as the lookup sees them (expect the 6 users, granted_to = USER).
+  - R2 lists every viewer the app resolved as a named admin in the last 90 days who is not an exact DSA grantee. It
+    must return 0 rows.
+  - R2b checks the five former names directly, so it covers anyone who has not opened the app lately. EXACT_MEMBER
+    must be TRUE for each one who should stay an admin; CASE_ONLY_MATCH TRUE means the spelling differs in case.
+  An empty R2 alone proves nothing when nobody has opened the app since 4.610 (no 'allowlist' events exist); R2b is
+  the check that cannot pass vacuously. Anyone R2 or R2b flags would silently become view-only.
 - **Order.** Merge PR #54 (4.610.2 / V175) first, then this release. Deploy with `snow streamlit deploy --replace`,
   then re-run roles.sql's Streamlit block. Each admin confirms Admin ▸ App access reads "Decided by: Direct member of
   SNOW_PRI_GFR_PRD_ALFA_DSA". Apply V175 (and see it in use) before the SNOW_SYSADMINS switch.

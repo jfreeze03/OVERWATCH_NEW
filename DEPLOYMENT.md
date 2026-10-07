@@ -600,7 +600,8 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > SNOW_SYSADMINS cutover. Without it, a SHOW as the new owner can silently list fewer admins (the missing ones become
 > read-only with no error), or none (nobody can change anything in-app). There is no username fallback: roles alone
 > decide who is an admin (owner 2026-10-07). Apply it, and see Admin ▸ App access read "Lookup OK ... by CALL ...",
-> before the switch. It is harmless before then: under today's owner the CALL lists what SHOW lists. Nothing runs at apply time. Before it, the read-only PREFLIGHT P175.1 lists DSA's direct
+> before the switch: the app notices V175 when its schema cache turns over (up to 4 h) or at once after the sidebar's
+> Refresh data (the tab's Re-check now alone re-runs the lookup but not the schema read). It is harmless before then: under today's owner the CALL lists what SHOW lists. Nothing runs at apply time. Before it, the read-only PREFLIGHT P175.1 lists DSA's direct
 > users as SNOW_ACCOUNTADMINS sees them and P175.2 confirms SNOW_SYSADMINS exists. After it: PART B V175.1 (version
 > row, procedure, USAGE for SNOW_SYSADMINS) and V175.2 (the CALL lists P175.1's users). Admin ▸ App access names the
 > CALL in its lookup verdict once a lookup has run on it. Rollback: RUNBOOK §12, "Rolling back V175".
