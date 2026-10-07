@@ -25,8 +25,8 @@ from app.logic.security import capped_window
 # BREAK_GLASS on column ROLE inside a plain (non-f) SQL string, and effective_access applies
 # REACHES_ADMIN_ROLES as a genuine two-line SQL list (its parity with this constant is locked in
 # tests/migrations/test_v075_security_operating_model.py). ----------------------------------
-# v4.610 (owner decision 2026-10-05, D14): SNOW_PRI_GFR_PRD_ALFA_DSA members are OVERWATCH admins (full parity
-# with the named admins, account-level levers included), so a DSA grant is an admin grant: ADMIN_HOLDER_ROLES
+# v4.610 (owner decision 2026-10-05, D14): SNOW_PRI_GFR_PRD_ALFA_DSA members are the OVERWATCH admins (the
+# only admin route, account-level levers included), so a DSA grant is an admin grant: ADMIN_HOLDER_ROLES
 # (the privileged-role-holder panel and both new-network-login readers) appends it, and ALERT_ADMIN_ROLES below
 # gains it together with V174 (its parity test pins it to the LATEST SP_ALERT_SCAN). SNOW_PRI_GFR_PRD_ALFA_DTI is
 # view-only and joins no admin tier; the other tiers are unchanged (owner-scoped D14).

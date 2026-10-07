@@ -1,11 +1,11 @@
 """Security signal for the 2026-10-05 access model (decision D14).
 
-Membership of SNOW_PRI_GFR_PRD_ALFA_DSA now makes an OVERWATCH admin (full parity with the named
-admins, account-level levers included), so a DSA grant must show up where the app watches admin-role
-holders: ADMIN_HOLDER_ROLES feeds the privileged-role-holder panel and both new-network-login readers
-(live and fact). The alert parity constant ALERT_ADMIN_ROLES gains DSA together with V174 (SP_ALERT_SCAN's
-SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT arms), because tests/test_security_alert_parity.py pins the constant to
-the LATEST SP_ALERT_SCAN; that lock and V174's own tests own the append. SNOW_PRI_GFR_PRD_ALFA_DTI is
+Membership of SNOW_PRI_GFR_PRD_ALFA_DSA now makes an OVERWATCH admin; since v4.611.0 DSA membership is the
+only route to OVERWATCH admin (account-level levers included), so a DSA grant must show up where the app
+watches admin-role holders: ADMIN_HOLDER_ROLES feeds the privileged-role-holder panel and both
+new-network-login readers (live and fact). The alert parity constant ALERT_ADMIN_ROLES gains DSA together
+with V174 (SP_ALERT_SCAN's SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT arms), because
+tests/test_security_alert_parity.py pins the constant to the LATEST SP_ALERT_SCAN; that lock and V174's own tests own the append. SNOW_PRI_GFR_PRD_ALFA_DTI is
 view-only, so it joins no admin tier. The other tiers (break-glass, elevated, reaches-admin) answer
 different questions and stay as they were (owner-scoped D14); the two ELEVATED_ROLES checks say out loud
 which admin-holder role they skip.

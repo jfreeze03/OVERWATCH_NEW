@@ -20,7 +20,7 @@ decision here traces to a finding in the hostile panel review of the old app
 | 4 copies of SQL-safety primitives | One module: `app/core/sqlsafe.py`. |
 | 6,134-line setup SQL, no versioning | Numbered migrations in `snowflake/migrations/` + `SCHEMA_VERSION` table + status check on the Admin page. |
 | 92k lines, two apps, 30 zombie section modules | One app, 10 pages, pure-logic layer with tests. No dead routes. |
-| Anyone could change the $/credit execs see | Rates live in `DBA_MAINT_DB.OVERWATCH.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). The only in-app editor is Admin ▸ Settings: OVERWATCH admins only (`config.OPERATOR_USERS` or direct members of SNOW_PRI_GFR_PRD_ALFA_DSA), type-to-confirm, and UPDATED_BY is stamped. There is no sidebar or per-session rate override. |
+| Anyone could change the $/credit execs see | Rates live in `DBA_MAINT_DB.OVERWATCH.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). The only in-app editor is Admin ▸ Settings: OVERWATCH admins only (direct members of SNOW_PRI_GFR_PRD_ALFA_DSA), type-to-confirm, and UPDATED_BY is stamped. There is no sidebar or per-session rate override. |
 | Cloud-services adjustment hardcoded to 0 | Billed dollars come from `METERING_DAILY_HISTORY` **with** `CREDITS_ADJUSTMENT_CLOUD_SERVICES` applied. |
 | Silent LIMIT injection | Row caps fetch `n+1`, set a `truncated` flag, and the UI shows a truncation banner. |
 | No deep links | Page navigation syncs to `?page=` query params where the runtime supports it. |
@@ -46,11 +46,12 @@ can open the app is USAGE on the Streamlit object (the owner decision of
 SNOW_PRI_GFR_PRD_ALFA_DSA and SNOW_PRI_GFR_PRD_ALFA_DTI; `roles.sql` grants
 all four, and its Streamlit block is re-run after every deploy, see
 DEPLOYMENT.md §2). Inside it every query runs
-with the owner's rights, so page visibility and writes are keyed on the viewer:
-the named admins (`config.OPERATOR_USERS`) and direct user members of
-SNOW_PRI_GFR_PRD_ALFA_DSA (checked live with `SHOW GRANTS OF ROLE`, fail
-closed) get every page and can change things; everyone else gets the
-read-only MONITOR view (Cost Intelligence + Operations).
+with the owner's rights, so page visibility and writes are keyed on the
+viewer's roles: direct user members of SNOW_PRI_GFR_PRD_ALFA_DSA (checked live
+with `SHOW GRANTS OF ROLE`, or `CALL SP_ADMIN_ROLE_MEMBERS()` once V175 is
+applied; fail closed) get every page and can change things; everyone else, DTI
+members and SNOW_* holders included, gets the read-only MONITOR view (Cost
+Intelligence + Operations). No username is hard-coded.
 
 ## Pages
 
@@ -264,7 +265,7 @@ Streamlit-in-Snowflake: see `DEPLOYMENT.md` (uses `snowflake.yml`, `environment.
 
 Defaults seeded in `SETTINGS` and mirrored in `app/config.py`:
 compute **$3.68/credit**, Cortex **$2.20/credit**, storage **$23/TB/mo**.
-Change them on Admin ▸ Settings (OVERWATCH admins only: `config.OPERATOR_USERS` or direct SNOW_PRI_GFR_PRD_ALFA_DSA members), not in code.
+Change them on Admin ▸ Settings (OVERWATCH admins only: direct members of SNOW_PRI_GFR_PRD_ALFA_DSA), not in code.
 
 ## Development
 

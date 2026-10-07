@@ -1,7 +1,7 @@
 """Next-Fifty #23 (v4.588.0): every SiS viewer runs with the app OWNER's rights, so the in-app operator
-allowlist is the authorization boundary. The query executors now re-check it themselves for owner-
-privileged statements (the ALTER levers + query cancel) instead of trusting every call site to remember
-is_operator().
+entitlement (a direct SNOW_PRI_GFR_PRD_ALFA_DSA grant since v4.611.0) is the authorization boundary. The query
+executors now re-check it themselves for owner-privileged statements (the ALTER levers + query cancel) instead
+of trusting every call site to remember is_operator().
 
 v4.610.0 (owner decision 2026-10-05) widened the privileged set: every OVERWATCH-table DML / CALL needs the
 entitlement too (action-proc CALLs included), EXCEPT the viewer's own self-service rows (USER_PREFS,

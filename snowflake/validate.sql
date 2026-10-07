@@ -169,8 +169,8 @@ WITH checks AS (
            IFF(CONTAINS(GET_DDL('VIEW', 'DBA_MAINT_DB.OVERWATCH.INCIDENT_PROPOSALS'), '''EXH'', ''ALL'''),
                'OK', 'FAIL: INCIDENT_PROPOSALS is older than V170 — re-run V170')
     UNION ALL
-    -- V175: the admin-access lookup the app CALLs once the version row exists. Missing = every DSA-only admin
-    -- is read-only (the lookup fails closed); the named admins are unaffected.
+    -- V175: the admin-access lookup the app CALLs once the version row exists. Missing = every OVERWATCH admin
+    -- (all are direct DSA members) is read-only: the lookup fails closed and there is no username fallback.
     SELECT 'SP_ADMIN_ROLE_MEMBERS present (V175)',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
                  WHERE PROCEDURE_SCHEMA = 'OVERWATCH' AND PROCEDURE_NAME = 'SP_ADMIN_ROLE_MEMBERS') = 1,
