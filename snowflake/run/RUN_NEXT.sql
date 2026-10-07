@@ -1,20 +1,27 @@
 -- #####################################################################
---  OVERWATCH -- RUN_NEXT.sql (2026-10-06): APPLY V174 -- SNOW_PRI_GFR_PRD_ALFA_DSA joins the hourly admin-security alerts.
---  Since app 4.610.0, direct holders of SNOW_PRI_GFR_PRD_ALFA_DSA are OVERWATCH admins. V174 makes the hourly scan treat
---  the role like the other admin roles: a new DSA grant raises SEC_ADMIN_GRANT, a DSA holder's login from a new network
---  raises SEC_NEW_ADMIN_NETWORK, and a DSA holder's login takeover is CRITICAL. Nothing else changes.
---  The previous RUN_NEXT (V173) is applied (2026-10-04) and is in git history; do not re-run it.
+--  OVERWATCH -- RUN_NEXT.sql (2026-10-07): APPLY V175 -- the admin-access lookup as an owner-run procedure
+--  (SP_ADMIN_ROLE_MEMBERS), so DSA admins keep their admin rights after SNOW_SYSADMINS takes over the app.
+--  The app decides who is an admin by listing SNOW_PRI_GFR_PRD_ALFA_DSA's users. Today it runs SHOW GRANTS OF ROLE as
+--  the app owner, and SHOW lists only what the owner role can see. V175 creates a procedure that runs the same SHOW
+--  as SNOW_ACCOUNTADMINS whatever role owns the app; app 4.610.2 CALLs it once V175 is applied.
+--  Safe to apply now: until the owner switch the CALL lists exactly what SHOW lists. Nothing runs at apply time.
+--
+--  This file carries V174 first because V175 refuses to run without it (-20175). If V174 is already applied
+--  (PART_B_V174.sql's V174.1 reads OK), re-running its section is harmless (it re-creates SP_ALERT_SCAN identically);
+--  or start at the ">>> V175" banner.
 --
 --  ORDER (all files in snowflake/run/):
---   1. PREFLIGHT_V174.sql (read-only): P174.1 lists the 6 direct DSA holders; P174.2-P174.4 what the first scan will raise.
---   2. THIS FILE, top to bottom, as SNOW_ACCOUNTADMINS. It refuses to run unless V173 is applied (-20174). It only
---      re-creates SP_ALERT_SCAN (and refreshes one rule NAME): no table change, no CALL, no task change. Any time of day;
---      no app redeploy needed for it. Re-running it is harmless.
---   3. PART_B_V174.sql: V174.1 right after this file; V174.2 after the first hourly scan that STARTS after the apply
---      (~:08 Central; reads WAIT until then); V174.3 once V174.2 reads OK (what the first scan raised).
---  FIRST RUN: the DSA grants date from 2025-07-16, so no SEC_ADMIN_GRANT is expected; only a DSA holder's new-network
---  login or takeover episode from the last 24h can raise (see the migration header below).
---  The migration text below is byte-identical to snowflake/migrations/V174__alert_scan_dsa_admin_role.sql (main 0b849e95).
+--   1. PREFLIGHT_V175.sql (read-only): P175.0 where the migrations stand; P175.1 the DSA users the procedure will
+--      return; P175.2 SNOW_SYSADMINS exists; P175.3 the procedure is new; P175.4 no future OWNERSHIP grant on
+--      procedures (any row there: stop and paste it back).
+--   2. THIS FILE, top to bottom, as SNOW_ACCOUNTADMINS. Any time of day; no app redeploy needed for it.
+--   3. PART_B_V175.sql right after: V175.1 (version row, procedure owned by SNOW_ACCOUNTADMINS, USAGE for
+--      SNOW_SYSADMINS) and V175.2 (the CALL lists the same users as SHOW). V175.3 (optional, run last) repeats the
+--      CALL as SNOW_SYSADMINS: the cutover check.
+--   If V174 was applied by this file (not before), also run PART_B_V174.sql (V174.1 now, V174.2 after the next hourly
+--   scan).
+--  The migration text below is byte-identical to snowflake/migrations/V174__alert_scan_dsa_admin_role.sql and
+--  V175__admin_role_members_proc.sql on branch v46102-admin-role-members (commit 64dca788).
 -- #####################################################################
 
 USE ROLE SNOW_ACCOUNTADMINS;
@@ -1382,7 +1389,80 @@ SELECT 174 AS VERSION,
        'Owner access decision 2026-10-05: a direct holder of SNOW_PRI_GFR_PRD_ALFA_DSA is an OVERWATCH admin, so the hourly security arms watch the role. SP_ALERT_SCAN re-derived from V173, byte-identical except the role added at the end of the admin-role lists of arms [18] SEC_NEW_ADMIN_NETWORK, [26] SEC_LOGIN_TAKEOVER and [27] SEC_ADMIN_GRANT (one two-line note per arm): a direct grant raises SEC_ADMIN_GRANT, a holder takeover is CRITICAL, a holder new network raises. The SEC_ADMIN_GRANT rule NAME lists it (guarded on the V162 seed). SP_ALERT_SCAN_DAILY, RETURN labels and tallies unchanged. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 174);
 
--- >>> quick check: expect rows for 173 and 174
-SELECT VERSION, APPLIED_AT FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION >= 173 ORDER BY VERSION;
+-- >>> V175__admin_role_members_proc.sql
+-- V175__admin_role_members_proc.sql
+--
+-- The admin-access lookup as an owner-run procedure, so it keeps answering after the app's owner changes
+-- (owner decision 2026-10-06: SNOW_SYSADMINS will own and run OVERWATCH_APP; design decision D4).
+--
+-- WHY: since 4.610 the app decides who is an admin by running SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA as
+-- the app owner. SHOW lists only what the CURRENT role can see. If SNOW_SYSADMINS sees fewer DSA grantees than
+-- SNOW_ACCOUNTADMINS does (SYSADMINS_OWNER_PREFLIGHT_v2: S2 differs from Z2), every DSA-only admin silently
+-- drops to read-only at the cutover (the lookup fails closed). The named admins (config OPERATOR_USERS) are
+-- never affected: they need no lookup.
+--
+--   + SP_ADMIN_ROLE_MEMBERS(): EXECUTE AS OWNER, so it runs as the role that applies this file
+--     (SNOW_ACCOUNTADMINS, the owner of every OVERWATCH object). It runs the SAME SHOW GRANTS OF ROLE the app runs
+--     today and returns its two columns, granted_to and grantee_name, unfiltered: the app keeps only the direct
+--     USER rows and reports a ROLE grantee as nested, exactly as it does with SHOW. The role is HARD-CODED: no
+--     argument, so the procedure can list this one role's grantees and nothing else.
+--   + COPY GRANTS: a later CREATE OR REPLACE of this procedure keeps its USAGE grants (without it, a re-create
+--     drops them and the lookup fails closed again).
+--   + GRANT USAGE to SNOW_SYSADMINS: the future app owner can CALL it. In this file, so a re-run (or a rebuild
+--     replay) re-grants it. SNOW_SYSADMINS already reads the same membership through
+--     SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS; this discloses nothing new, it only removes the up-to-2h lag.
+--
+-- The app (4.610.2+) CALLs it once this version row exists (schema_gate.has_migration(175)) and runs SHOW
+-- before that, so one build works before and after the apply, under either owner. The fail-closed paths are
+-- unchanged: a failed CALL is lookup_failed, an answer with no USER row is unverified, neither ever makes an admin.
+--
+-- COST: none at apply time. Per lookup: one CALL in place of one SHOW, at the same cadence (once per viewer session
+-- per 5 min, plus the write-time re-check). Inside it, the SHOW (cloud services) and one RESULT_SCAN of its few rows,
+-- which runs on the caller's warehouse (the app's own).
+-- NEEDED: before the SNOW_SYSADMINS cutover when the preflight's S2 differs from Z2. Harmless before that: under
+-- today's owner the CALL returns what SHOW returns.
+-- ROLLBACK: do not drop the procedure while this version row exists: the app would CALL a missing procedure and
+-- every DSA-only admin would be read-only (fail closed). RUNBOOK §12, "Rolling back V175".
+-- Apply AFTER V174, as SNOW_ACCOUNTADMINS (the role that owns the OVERWATCH schema). Idempotent; safe to re-run.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20175, 'V175 requires V174 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 174) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ADMIN_ROLE_MEMBERS()
+COPY GRANTS
+RETURNS TABLE ("granted_to" VARCHAR, "grantee_name" VARCHAR)
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+-- V175: who holds SNOW_PRI_GFR_PRD_ALFA_DSA (config.ADMIN_ACCESS_ROLE), as this procedure's owner sees it. Read-only.
+DECLARE
+    res RESULTSET;
+BEGIN
+    SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA;
+    res := (SELECT "granted_to", "grantee_name" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+    RETURN TABLE(res);
+END;
+$$;
+
+GRANT USAGE ON PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ADMIN_ROLE_MEMBERS() TO ROLE SNOW_SYSADMINS;
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 175 AS VERSION,
+       'Owner decision 2026-10-06 (SNOW_SYSADMINS will own the app): SP_ADMIN_ROLE_MEMBERS(), an EXECUTE AS OWNER procedure that runs SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA (hard-coded) and returns granted_to and grantee_name, created WITH COPY GRANTS, USAGE granted to SNOW_SYSADMINS. The app CALLs it for the admin-access lookup once this row exists, so the lookup answers as this procedure''s owner whatever role owns the app. Read-only; no task change, no procedure run at apply time.' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 175);
+
+-- >>> quick check: expect rows for 174 and 175
+SELECT VERSION, APPLIED_AT FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION >= 174 ORDER BY VERSION;
 
 ALTER SESSION UNSET TIMEZONE;
