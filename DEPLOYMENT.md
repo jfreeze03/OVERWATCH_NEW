@@ -596,10 +596,11 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA (the role is hard-coded) and returns its granted_to and grantee_name,
 > WITH COPY GRANTS, and grants USAGE on it to SNOW_SYSADMINS. App 4.610.2+ CALLs it for the admin-access lookup once
 > the version row exists (within 4 h, the schema cache) and runs SHOW before that, so deploy and apply in either
-> order. SHOW answers as the app owner, the CALL as the procedure's owner: it is NEEDED before the cutover when the
-> SNOW_SYSADMINS preflight's S2 lists fewer DSA users than Z2 (without it every DSA-only admin is read-only under a
-> SNOW_SYSADMINS-owned app; the named admins never are). It is harmless before then: under today's owner the CALL
-> lists what SHOW lists. Nothing runs at apply time. Before it, the read-only PREFLIGHT P175.1 lists DSA's direct
+> order. SHOW answers as the app owner, the CALL as the procedure's owner: since 4.611.0 it is REQUIRED before the
+> SNOW_SYSADMINS cutover. Without it, a SHOW as the new owner can silently list fewer admins (the missing ones become
+> read-only with no error), or none (nobody can change anything in-app). There is no username fallback: roles alone
+> decide who is an admin (owner 2026-10-07). Apply it, and see Admin ▸ App access read "Lookup OK ... by CALL ...",
+> before the switch. It is harmless before then: under today's owner the CALL lists what SHOW lists. Nothing runs at apply time. Before it, the read-only PREFLIGHT P175.1 lists DSA's direct
 > users as SNOW_ACCOUNTADMINS sees them and P175.2 confirms SNOW_SYSADMINS exists. After it: PART B V175.1 (version
 > row, procedure, USAGE for SNOW_SYSADMINS) and V175.2 (the CALL lists P175.1's users). Admin ▸ App access names the
 > CALL in its lookup verdict once a lookup has run on it. Rollback: RUNBOOK §12, "Rolling back V175".
@@ -696,7 +697,8 @@ roles, total"): the decision names four roles. **SNOW_ACCOUNTADMINS** and
 PRIVILEGES on the SNOWFLAKE db, read/write on the OVERWATCH schema,
 warehouse usage), which also actively retires the old
 OVERWATCH_MONITOR / OVERWATCH_OPERATOR layer. Direct user members of
-**SNOW_PRI_GFR_PRD_ALFA_DSA** are OVERWATCH admins and
+**SNOW_PRI_GFR_PRD_ALFA_DSA** are the only OVERWATCH admins (no username is
+hard-coded, 2026-10-07) and
 **SNOW_PRI_GFR_PRD_ALFA_DTI** is view-only; the app decides that per viewer
 (below). Since 4.610.1 `roles.sql` grants all four roles USAGE on the
 database, the schema and the app. DSA and DTI get those three grants and
@@ -719,18 +721,16 @@ created_on was the last deploy, 2026-10-05 08:44, while the schema's was
 every query with the app owner's privileges, not the viewer's role. The
 viewer's identity (`st.user`) decides only which navigation profile they see
 and whether the operator gate opens. `session.viewer_access` resolves an
-identified viewer in this order:
+identified viewer to one of two outcomes:
 
-1. On `config.OPERATOR_USERS` (the five named admins): DBA pages + admin, no
-   lookup (source `allowlist`).
-2. A direct USER grantee of SNOW_PRI_GFR_PRD_ALFA_DSA, read live with
-   `SHOW GRANTS OF ROLE` run as the owner (`granted_to = USER` rows; a grant to
-   a role is not expanded): DBA pages + admin with full parity, the
+1. A direct USER grantee of SNOW_PRI_GFR_PRD_ALFA_DSA, read live with
+   `SHOW GRANTS OF ROLE` run as the owner, or V175's
+   `CALL SP_ADMIN_ROLE_MEMBERS()` once it is applied (`granted_to = USER` rows;
+   a grant to a role is not expanded): DBA pages + admin with full parity, the
    account-level levers included (source `role`).
-3. Otherwise read-only (source `default`). A non-DBA `VIEWER_PROFILES` pin
-   (none remain) gets its pinned profile; everyone else (DTI members, SNOW_*
-   holders not on the allowlist) gets **MONITOR** = Cost Intelligence +
-   Operations. A failed or empty lookup (below) gives the same profile, with
+2. Everyone else is read-only **MONITOR** = Cost Intelligence + Operations
+   (DTI members and SNOW_* holders who are not direct DSA members; source
+   `default`). A failed or empty lookup (below) gives the same profile, with
    source `lookup_failed` / `unverified`. An unidentified SiS viewer also gets
    MONITOR and is never an admin.
 
@@ -738,24 +738,31 @@ The lookup runs once per session, is re-checked after 5 minutes, and FAILS
 CLOSED: an error (source `lookup_failed`) or an empty USER set (`unverified`,
 a privilege gap, never "no members") means read-only, retried after 1 minute,
 then 2 and 4, then every 5 minutes while it keeps failing (every open session
-runs it), with one APP_ERROR_LOG row (page 'Access') and the sidebar caption
-"Admin access check unavailable". Every viewer not on the allowlist sees that
-caption, since membership is unknown meanwhile. Membership is an exact,
-case-sensitive match of the viewer's username with SHOW's grantee name. Each
-viewer and source writes one APP_USAGE `access_resolved` event per session.
-Admin ▸ App access shows the answer, the DSA lookup status and the app's
-USAGE grantees. Two consequences the code
+runs it), with one APP_ERROR_LOG row per outage (page 'Access') and the
+sidebar caption "Admin access check unavailable" plus a 'Why read-only?' panel
+(what failed, the Snowflake error, what to check). Every viewer sees them,
+since membership is unknown meanwhile, and nobody can change anything in-app
+until the lookup recovers: no username bypasses it. Admin ▸ App access cannot
+be opened meanwhile, so fix the cause in Snowsight as SNOW_ACCOUNTADMINS, then
+press Refresh data to re-check at once. Membership is an exact, case-sensitive
+match of the viewer's username with SHOW's grantee name. Each viewer and
+source writes one APP_USAGE `access_resolved` event per session (SECTION =
+`role` / `default` / `lookup_failed` / `unverified`; rows logged before
+4.611.0 may read `allowlist`, a retired value nothing reads). Admin ▸ App
+access shows the answer, the DSA lookup status and the app's USAGE grantees.
+Two consequences the code
 accounts for:
 
 - Viewer identity comes from `st.user` (`app/core/identity.py`), because
   `CURRENT_USER()` returns the app owner inside the app. Preferences,
   usage telemetry, and audit actor stamps all ride `identity_sql()`.
-- The in-app execution gate is OVERWATCH admin (`session.is_operator()`:
-  the `config.OPERATOR_USERS` allowlist or a direct SNOW_PRI_GFR_PRD_ALFA_DSA
-  member), plus a typed confirmation for classifying or account-touching
-  writes. Because every viewer runs as the owner, that admin set is the app's
-  authorization boundary, and whoever controls DSA membership controls who is
-  an OVERWATCH admin (a trust delegation the owner accepted 2026-10-05). The
+- The in-app execution gate is OVERWATCH admin (`session.is_operator()`: a
+  direct SNOW_PRI_GFR_PRD_ALFA_DSA member, the only route), plus a typed
+  confirmation for classifying or account-touching writes. Because every
+  viewer runs as the owner, that admin set is the app's authorization
+  boundary, and whoever controls DSA membership controls who is an OVERWATCH
+  admin (a trust delegation the owner accepted 2026-10-05; the username
+  allowlist was removed 2026-10-07). The
   executors run one statement at a time from a fixed allow-list: DML (INSERT /
   UPDATE / DELETE / MERGE) on DBA_MAINT_DB.OVERWATCH objects, CALLs of
   DBA_MAINT_DB.OVERWATCH procs, and the Operations ▸ Emergency levers
@@ -763,12 +770,11 @@ accounts for:
   `ALTER ACCOUNT SET`. Since 4.610.0 the executor re-checks admin itself for
   those levers, for query cancel, and for every OVERWATCH write except the
   viewer's own rows (USER_PREFS, USER_WATCHLIST, APP_USAGE,
-  APP_QUERY_TELEMETRY, matched as the exact object name). A role admin is
+  APP_QUERY_TELEMETRY, matched as the exact object name). An admin is
   re-verified with a fresh lookup at write time (cached at most 15 seconds),
   so a revoke of DSA stops their writes within about 15 seconds; their pages
-  follow within 5 minutes (at once after 'Refresh data'). A named admin on
-  `config.OPERATOR_USERS` stays an admin until removed from that list and
-  redeployed. Any admin can, with the owner's rights, change warehouse
+  follow within 5 minutes (at once after 'Refresh data'). Revoking DSA is the
+  only way to remove an admin; no redeploy. Any admin can, with the owner's rights, change warehouse
   settings (size, suspend, timeouts, clusters), pause or resume pipes, suspend
   or resume tasks, disable or re-enable users and set account parameters.
 

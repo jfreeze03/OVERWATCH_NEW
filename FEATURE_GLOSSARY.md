@@ -67,19 +67,21 @@ in the parameter's own seconds to match the ALTER statement and the alert titles
 filter by warehouse/database/role ownership; account-level events ride along as `ALL`.
 A per-viewer **watchlist** spans companies.
 
-**Who sees what (v4.610.0, owner decision 2026-10-05).** OVERWATCH admins are the named admins
-(`config.OPERATOR_USERS`, no lookup) and direct user members of SNOW_PRI_GFR_PRD_ALFA_DSA (checked live with
-`SHOW GRANTS OF ROLE` run as the owner; a grant to a role is not expanded). They see every page and can change
-things, the account-level levers included. Everyone else who can open the app (SNOW_PRI_GFR_PRD_ALFA_DTI members,
-SNOW_* holders not on the allowlist, an unidentified viewer) gets the read-only **MONITOR** profile: Cost
-Intelligence and Operations only, landing on Cost Intelligence; its tables show no row drill, Case File or rule
-jump that would lead to a page it cannot open. The check fails closed: a failed lookup or an empty member list
-means read-only, retried after 1 minute, then 2 and 4, then every 5 minutes while it keeps failing, with the sidebar
-caption **"Admin access check unavailable — admins by role (SNOW_PRI_GFR_PRD_ALFA_DSA) are read-only until it
-recovers; named admins are unaffected."** (every viewer not on the allowlist sees it, since membership is unknown
-meanwhile). Membership is an exact, case-sensitive match of the
-viewer's username with the grantee name. Each viewer and outcome writes one APP_USAGE event **`access_resolved`**
-per session (SECTION = allowlist / role / default / lookup_failed / unverified).
+**Who sees what (v4.611.0, owner decisions 2026-10-05 and 2026-10-07).** OVERWATCH admins are the direct
+user members of SNOW_PRI_GFR_PRD_ALFA_DSA (checked live with `SHOW GRANTS OF ROLE` run as the owner, or V175's
+`CALL SP_ADMIN_ROLE_MEMBERS()` once applied; a grant to a role is not expanded). No username is hard-coded: roles
+alone decide. They see every page and can change things, the account-level levers included. Everyone else who can
+open the app (SNOW_PRI_GFR_PRD_ALFA_DTI members, SNOW_* holders who are not direct DSA members, an unidentified
+viewer) gets the read-only **MONITOR** profile: Cost Intelligence and Operations only, landing on Cost
+Intelligence; its tables show no row drill, Case File or rule jump that would lead to a page it cannot open. The
+check fails closed: a failed lookup or an empty member list means read-only for every viewer, admins included,
+retried after 1 minute, then 2 and 4, then every 5 minutes while it keeps failing, with the sidebar caption
+**"Admin access check unavailable — OVERWATCH admins (direct members of SNOW_PRI_GFR_PRD_ALFA_DSA) are read-only
+until it recovers."** and a **Why read-only?** panel under it (the lookup's verdict, the Snowflake error, what to
+check, and the fix: Snowsight as SNOW_ACCOUNTADMINS, then Refresh data). Every viewer sees both, since membership
+is unknown meanwhile. Membership is an exact, case-sensitive match of the viewer's username with the grantee name.
+Each viewer and outcome writes one APP_USAGE event **`access_resolved`** per session (SECTION = role / default /
+lookup_failed / unverified; rows logged before 4.611.0 may read allowlist, a retired value nothing reads).
 
 **Anomaly / robust-z.** Spikes use a **median/MAD modified z-score** (not mean/std, which a
 spike inflates to hide itself). A flag needs `|z| ≥ 3.5` **and** materiality (≥ $50 on the
@@ -953,9 +955,9 @@ v4.610.0 (owner decision 2026-10-05), read-only: who can open OVERWATCH and who 
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|
-| **Viewer / Profile / Can change things / Resolved** | Your username, profile and its pages, whether you are an OVERWATCH admin, and how long ago the answer was resolved (Central clock in the help). | session.access_info(); source label = named admin (allowlist) / direct SNOW_PRI_GFR_PRD_ALFA_DSA member (role) / view-only default / lookup failed / unverified. | text | app.core.session.access_info |
+| **Viewer / Profile / Can change things / Resolved** | Your username, profile and its pages, whether you are an OVERWATCH admin, and how long ago the answer was resolved (Central clock in the help). | session.access_info(); source label = direct SNOW_PRI_GFR_PRD_ALFA_DSA member (role) / view-only default / lookup failed / unverified. | text | app.core.session.access_info |
 | **Lookup OK: N direct user members of SNOW_PRI_GFR_PRD_ALFA_DSA** | The live DSA membership lookup: OK with its USER count, failed, or unverified (an empty answer is a privilege gap, never "no members"). | access_review.roster_summary over SHOW GRANTS OF ROLE rows with granted_to = USER; granted_to = ROLE rows are listed as nested, not expanded. | count | access_sql.show_grants_of_role_sql (canary-exempt: SHOW) |
-| **DSA members table** | Direct USER members, with display names and whether each is also a named admin; role grantees flagged "No: nested, not expanded". | with_user_names over the USER rows; ALSO_NAMED_ADMIN = user in config.OPERATOR_USERS. | rows | session.access_info(roster=True) |
+| **DSA members table** | Direct USER members (the OVERWATCH admins), with display names; role grantees flagged "No: nested, not expanded". | with_user_names over the USER rows. | rows | session.access_info(roster=True) |
 | **Who can open the app** | The app's USAGE grantees compared with the four access roles of the 2026-10-05 decision, all of which roles.sql grants since 4.610.1. A missing role warns "re-run snowflake/roles.sql's Streamlit block" (every deploy re-creates the app and drops its USAGE grants; the proof block raises -20012 meanwhile). Any other grantee, of any kind, is an error (REVOKE it; roles.sql's proof block raises -20011 on it), an empty answer is unverified. The "not granted by roles.sql yet" wording remains only for an access role roles.sql does not grant, which none is today. | access_review.app_grant_review: a USAGE row passes only for granted_to = ROLE and a name in config.APP_ACCESS_ROLES; the remedy splits on config.ROLES_SQL_APP_GRANTEES (pinned to roles.sql by test); the OWNERSHIP row names the owning role. | rows | access_sql.show_grants_on_app_sql -> SHOW GRANTS ON STREAMLIT (tier live, canary-exempt) |
 
 ### Migrations & freshness

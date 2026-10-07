@@ -275,16 +275,16 @@ def is_operator() -> bool:
     ``resolve_role_profile(current_role()) in OPERATOR_PROFILES`` never
     differentiates people — one accidental app grant would expose DBA actions to
     any viewer. Entitle from st.user (the actual viewer) instead, through
-    viewer_access(): the config.OPERATOR_USERS allowlist, or (v4.610.0, owner
-    decision 2026-10-05) a DIRECT user grant of config.ADMIN_ACCESS_ROLE looked up
-    live as the owner.
+    viewer_access(): a DIRECT user grant of config.ADMIN_ACCESS_ROLE looked up
+    live as the owner -- the only admin route (no username is hard-coded; owner
+    2026-10-07).
 
     Snowflake RBAC is NOT a backstop here: because every viewer executes with the
     app OWNER's privileges, an operator write does NOT fail server-side for an
     under-privileged viewer — it runs as the owner. This resolution is therefore
     the application authorization boundary, not merely "what the app offers". The
     query executors re-check it for every privileged statement
-    (query._entitlement_refusal), and a role-sourced admin's write re-verifies the
+    (query._entitlement_refusal), and every admin's privileged write re-verifies the
     membership live (reverify_role_admin), so a revoke stops writes within
     config.WRITE_RECHECK_S even while the session's page memo still lists DBA pages.
 
@@ -324,8 +324,7 @@ def active_profile(role: str = "") -> str:
     Under owner's-rights SiS, SQL CURRENT_ROLE() is the app OWNER's role for
     EVERY viewer, so page visibility must key on the viewer identity (st.user),
     not the role. An identified viewer resolves through viewer_access(): an admin
-    (OPERATOR_USERS or a direct ADMIN_ACCESS_ROLE grant) gets DBA; anyone else an
-    explicit non-admin VIEWER_PROFILES pin or the view-only
+    (a direct ADMIN_ACCESS_ROLE grant) gets DBA; anyone else the view-only
     VIEWER_UNKNOWN_PROFILE (MONITOR), NEVER the owner's DBA. When no viewer
     identity is available, distinguish SiS (fail CLOSED to NO_IDENTITY_PROFILE —
     an unresolved SiS viewer must never inherit the owner's DBA surface) from
@@ -342,17 +341,19 @@ def active_profile(role: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Viewer access resolution (v4.610.0, owner decision 2026-10-05).
+# Viewer access resolution (v4.610.0, owner decision 2026-10-05; roles only since v4.611.0, owner
+# 2026-10-07: "their roles should show who gets access to what").
 #
-# For an identified viewer, first match wins:
-#   1. config.OPERATOR_USERS            -> DBA + operator, source 'allowlist' (no SQL at all)
-#   2. a DIRECT user grantee of config.ADMIN_ACCESS_ROLE (SHOW GRANTS OF ROLE, run as the owner; once V175
+# An identified viewer has exactly two outcomes:
+#   1. a DIRECT user grantee of config.ADMIN_ACCESS_ROLE (SHOW GRANTS OF ROLE, run as the owner; once V175
 #      is applied, CALL SP_ADMIN_ROLE_MEMBERS(), the same SHOW run as the procedure's owner)
 #                                        -> DBA + operator, source 'role'
-#   3. otherwise                         -> a non-admin VIEWER_PROFILES pin or VIEWER_UNKNOWN_PROFILE
-#      (MONITOR), read-only; source 'default' when the lookup answered, 'lookup_failed' when it raised,
-#      'unverified' when it listed no USER grantee (SHOW shows only what the owner can see, so an empty
-#      answer is a privilege gap, never proof of "no members").
+#   2. otherwise                         -> VIEWER_UNKNOWN_PROFILE (MONITOR), read-only; source 'default'
+#      when the lookup answered, 'lookup_failed' when it raised, 'unverified' when it listed no USER
+#      grantee (SHOW shows only what the owner can see, so an empty answer is a privilege gap, never proof
+#      of "no members").
+# No admin bypasses the lookup: while it fails or lists no user, every viewer, former named admins
+# included, is read-only (owner 2026-10-07).
 # FAIL CLOSED: no error, empty answer or revoke ever grants admin. VIEW_ACCESS_ROLE is never looked up:
 # only a role holding USAGE on the app can open it (the four config.APP_ACCESS_ROLES, which
 # snowflake/roles.sql grants and proves since 4.610.1), so every identified non-admin is a DTI member or
@@ -360,15 +361,15 @@ def active_profile(role: str = "") -> str:
 #
 # MEMBERSHIP IS EXACT: the viewer's st.user name is compared with SHOW's grantee_name as stored, with no
 # case folding (holistic 4.610 #1: a user named "jdoe" must never ride a DSA grant to user JDOE). The
-# upper-cased _viewer() form keys the memos and the hand-typed OPERATOR_USERS / VIEWER_PROFILES lookups.
+# upper-cased _viewer() form keys the memos.
 #
 # One st.session_state memo per viewer session (the warehouse runtime gives each viewer a personal app
 # instance, so nothing is shared between viewers): a resolved answer is re-resolved after
 # ACCESS_TTL_S; a failed / empty lookup is retried after config.access_retry_s(n), ACCESS_RETRY_S after
 # the first consecutive failure and doubling up to ACCESS_TTL_S (every open session runs the lookup, so a
 # long outage must not cost one SHOW per session per minute). A failure writes ONE APP_ERROR_LOG row per
-# session, and every distinct (viewer, source) writes one APP_USAGE 'access_resolved' event naming the
-# source (the audit of who held admin through the role).
+# outage (a good lookup re-arms it), and every distinct (viewer, source) writes one APP_USAGE
+# 'access_resolved' event naming the source (the audit of who held admin through the role).
 # ---------------------------------------------------------------------------
 _ACCESS_KEY = "_ow_access"             # {viewer, profile, operator, source, at, error}
 _ROSTER_KEY = "_ow_access_roster"      # {status, users, roles, at, error} — the last admin-role lookup
@@ -379,8 +380,10 @@ _LOOKUP_SQL_KEY = "_ow_access_lookup_sql"   # the statement the last admin-role 
 _VIA_PROC_KEY = "_ow_access_via_proc"       # True once this session saw V175 applied: the lookup never goes back to SHOW
 _GATE_ERR_LOGGED_KEY = "_ow_access_gate_err_logged"
 #: The sources an identified viewer's resolution carries. An unidentified viewer reads 'no_identity'
-#: on SiS and 'off_sis' elsewhere (no memo, no lookup).
-ACCESS_SOURCES: tuple[str, ...] = ("allowlist", "role", "default", "lookup_failed", "unverified")
+#: on SiS and 'off_sis' elsewhere (no memo, no lookup). APP_USAGE 'access_resolved' rows logged before
+#: 4.611.0 may carry SECTION='allowlist': that source is retired (the username allowlist was removed,
+#: owner 2026-10-07) and nothing reads those rows.
+ACCESS_SOURCES: tuple[str, ...] = ("role", "default", "lookup_failed", "unverified")
 #: Sources that mean the admin-role lookup could not answer: read-only until it recovers (sidebar caption).
 ACCESS_UNAVAILABLE_SOURCES: tuple[str, ...] = ("lookup_failed", "unverified")
 _USAGE_PREFIX = ("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE "
@@ -393,9 +396,8 @@ def _clock() -> float:
 
 
 def _viewer() -> str:
-    """The viewer's username, upper-cased ('' when unidentified): the memo key and the form the hand-typed
-    OPERATOR_USERS / VIEWER_PROFILES lookups fold to. Module-attribute lookup on identity is the seam the
-    tests monkeypatch."""
+    """The viewer's username, upper-cased ('' when unidentified): the memo key. Module-attribute lookup on
+    identity is the seam the tests monkeypatch."""
     return _viewer_exact().upper()
 
 
@@ -510,8 +512,10 @@ def _admin_role_rows() -> list:
 
 
 def _log_access_failure(exc: BaseException) -> None:
-    """ONE APP_ERROR_LOG row per session for a failed or empty admin-role lookup (the sidebar and
-    Admin ▸ App access say so on every run; the log needs it once). Never raises."""
+    """ONE APP_ERROR_LOG row per outage for a failed or empty admin-role lookup (the sidebar says so on
+    every run; the log needs it once). A good lookup re-arms it (_admin_roster), so a later outage in the
+    same session logs its own row: with no in-app admin during an outage, APP_ERROR_LOG PAGE='Access' read
+    from Snowsight is the evidence. Never raises."""
     if st.session_state.get(_ACCESS_ERR_LOGGED_KEY):
         return
     st.session_state[_ACCESS_ERR_LOGGED_KEY] = True
@@ -520,7 +524,7 @@ def _log_access_failure(exc: BaseException) -> None:
 
         _errors.record_error("Access", exc, context=(
             f"admin-access lookup ({_lookup_label()}) failed or listed no user: "
-            "viewers not on OPERATOR_USERS resolve read-only until it recovers"))
+            "every viewer, admins included, resolves read-only until it recovers"))
     except Exception:
         pass
 
@@ -555,6 +559,8 @@ def _admin_roster(*, fresh: bool = False) -> dict:
         if users:
             memo = {"status": "ok", "users": tuple(sorted(users)), "roles": roles, "at": now, "error": "",
                     "fails": 0}
+            # re-arm the once-per-outage error row: the next outage in this session logs its own
+            st.session_state.pop(_ACCESS_ERR_LOGGED_KEY, None)
         else:
             msg = (f"{_lookup_label()} listed no USER grantee of {ADMIN_ACCESS_ROLE}: a privilege gap or an "
                    "empty role, treated as unverified (read-only), never as 'no members'")
@@ -591,23 +597,16 @@ def _log_access_event(access: dict) -> None:
 
 
 def _resolve_identified(name: str, exact: str = "") -> tuple[dict, bool]:
-    """(access, memoize). ``name`` is the upper-cased viewer (allowlist / pin lookups, memo key); ``exact``
-    is the st.user name as given, the only form compared with the admin-role roster (default: ``name``).
+    """(access, memoize). ``name`` is the upper-cased viewer (the memo key); ``exact`` is the st.user name
+    as given, the only form compared with the admin-role roster (default: ``name``). No username is
+    special: the roster alone decides (owner 2026-10-07).
     The off-SiS answer is never memoized: is_sis() is also False on a DISCONNECTED SiS run
     (get_cached_session() is None), and that pure 'default' must not outlive the outage."""
-    from app.config import (
-        OPERATOR_PROFILES,
-        VIEWER_UNKNOWN_PROFILE,
-        access_retry_s,
-        is_operator_user,
-        resolve_viewer_profile,
-    )
+    from app.config import OPERATOR_PROFILES, VIEWER_UNKNOWN_PROFILE, access_retry_s
 
     admin = OPERATOR_PROFILES[0]
     base = {"viewer": name, "at": _clock(), "error": ""}
-    if is_operator_user(name):           # break-glass: the named admins never wait on a lookup
-        return {**base, "profile": admin, "operator": True, "source": "allowlist"}, True
-    view_profile = resolve_viewer_profile(name) or VIEWER_UNKNOWN_PROFILE
+    view_profile = VIEWER_UNKNOWN_PROFILE
     if not is_sis():
         # Off-SiS (local dev, tests) there is no owner's-rights session to look the role up as.
         return {**base, "profile": view_profile, "operator": False, "source": "default"}, False
@@ -647,9 +646,11 @@ def viewer_access() -> dict:
         return {"viewer": "", "profile": profile, "operator": profile in OPERATOR_PROFILES,
                 "source": "off_sis", "at": _clock(), "error": ""}
     memo = st.session_state.get(_ACCESS_KEY)
-    if isinstance(memo, dict) and memo.get("viewer") == name and _fresh(
-            memo, (memo.get("retry_s") or access_retry_s(1))
-            if memo.get("source") in ACCESS_UNAVAILABLE_SOURCES else ACCESS_TTL_S):
+    # only a memo whose source is a current one is reused: a pre-4.611 'allowlist' memo (a hot-reloaded
+    # session) re-resolves with one lookup instead of riding the retired route
+    if (isinstance(memo, dict) and memo.get("viewer") == name and memo.get("source") in ACCESS_SOURCES
+            and _fresh(memo, (memo.get("retry_s") or access_retry_s(1))
+                       if memo.get("source") in ACCESS_UNAVAILABLE_SOURCES else ACCESS_TTL_S)):
         return dict(memo)
     memo, keep = _resolve_identified(name, _viewer_exact())
     if keep:
@@ -668,8 +669,8 @@ def access_source() -> str:
 
 
 def reverify_role_admin() -> bool:
-    """Write-time re-verification for a ROLE-sourced admin (query._entitlement_refusal calls it on
-    every privileged write when access_source() == 'role').
+    """Write-time re-verification for every SiS admin (source 'role' is the only admin source on SiS since
+    4.611.0; query._entitlement_refusal calls it on every privileged write when access_source() == 'role').
 
     A FRESH admin-role lookup, memoized only when positive and for at most config.WRITE_RECHECK_S.
     False on a revoke, an empty answer or a failed lookup — and then this session's page memo is
@@ -698,23 +699,28 @@ def forget_access() -> None:
         st.session_state.pop(key, None)
 
 
+def admin_roster_users() -> tuple[str, ...]:
+    """The direct ADMIN_ACCESS_ROLE members from this session's last GOOD admin-role lookup, names exactly
+    as stored; () when the last lookup failed or listed no user, or none ran (off SiS).
+
+    An assignment roster for owner pickers, not an access check: it reads only the roster memo and never
+    runs a lookup (on SiS an operator's own resolution has already filled it)."""
+    memo = st.session_state.get(_ROSTER_KEY)
+    if isinstance(memo, dict) and memo.get("status") == "ok":
+        return tuple(str(u) for u in (memo.get("users") or ()))
+    return ()
+
+
 def access_info(*, roster: bool = False) -> dict:
     """Snapshot for Admin ▸ App access: the viewer's resolved access plus the admin-role roster.
 
-    ``roster=True`` also resolves the ADMIN_ACCESS_ROLE roster (one memoized lookup) when this
-    session has none — an allowlisted admin's own resolution never runs it. roster_status is
+    ``roster=True`` also resolves the roster when this session has none (on SiS every identified
+    viewer's resolution already ran it). roster_status is
     'not_checked' until a lookup ran, else ok / unverified / lookup_failed (an empty roster is
     'unverified', never a clean "no members"). ``retry_s`` is the wait before the next lookup while the
     last one failed or listed no user (config.access_retry_s of its consecutive-failure count), else None:
     a good or absent roster has no retry pending (``ttl_s`` is its re-check)."""
-    from app.config import (
-        ACCESS_TTL_S,
-        ADMIN_ACCESS_ROLE,
-        OPERATOR_USERS,
-        ROLE_ADMIN_ACCOUNT_LEVERS,
-        VIEW_ACCESS_ROLE,
-        access_retry_s,
-    )
+    from app.config import ACCESS_TTL_S, ADMIN_ACCESS_ROLE, VIEW_ACCESS_ROLE, access_retry_s
 
     access = viewer_access()
     if roster:
@@ -735,8 +741,6 @@ def access_info(*, roster: bool = False) -> dict:
         "age_s": age,
         "admin_role": ADMIN_ACCESS_ROLE,
         "view_role": VIEW_ACCESS_ROLE,
-        "account_levers": bool(ROLE_ADMIN_ACCOUNT_LEVERS),
-        "allowlist": tuple(OPERATOR_USERS),
         "ttl_s": ACCESS_TTL_S,
         # the backoff actually in force (review: a fixed ACCESS_RETRY_S misstated every retry after the first)
         "retry_s": (access_retry_s(r.get("fails")) if r and r.get("status") in ACCESS_UNAVAILABLE_SOURCES

@@ -161,6 +161,7 @@ def test_a_failed_call_fails_closed_and_names_the_call(lookup):
     assert summary["state"] == "unavailable" and _CALL in summary["headline"]
     hint = access_review.lookup_check_hint(info)
     assert hint.startswith(f"Check: run {_CALL}") and "re-run V175 as SNOW_ACCOUNTADMINS" in hint
+    assert "named admin" not in hint.lower()          # v4.611.0: nobody is exempt from the lookup
 
 
 def test_a_call_with_no_user_row_is_unverified_never_an_admin(lookup):
@@ -183,6 +184,7 @@ def test_the_show_hint_is_unchanged_before_v175():
     hint = access_review.lookup_check_hint(info)
     assert hint.startswith(f"Check: run SHOW GRANTS OF ROLE {cfg.ADMIN_ACCESS_ROLE} as SNOW_ACCOUNTADMINS")
     assert access_review.lookup_check_hint({"admin_role": cfg.ADMIN_ACCESS_ROLE}) == hint
+    assert "named admin" not in hint.lower()
 
 
 def test_the_call_is_a_read_not_a_privileged_write():

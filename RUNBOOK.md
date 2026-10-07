@@ -45,11 +45,12 @@ labels and generates (never silently executes) the SQL to fix what it finds.
   all four USAGE on the database, schema and app (DSA and DTI get nothing
   else) and its proof block accepts exactly those four; re-run its Streamlit
   block after every deploy (DEPLOYMENT.md §2). Under SiS the navigation profile and
-  the admin gate follow the viewer (`st.user`): the named admins
-  (`config.OPERATOR_USERS`, no lookup) and direct user members of
-  SNOW_PRI_GFR_PRD_ALFA_DSA (checked live with `SHOW GRANTS OF ROLE`, fail
-  closed, re-checked every 5 minutes and at every write) are OVERWATCH admins
-  with every page and every action, the account-level levers included.
+  the admin gate follow the viewer (`st.user`): direct user members of
+  SNOW_PRI_GFR_PRD_ALFA_DSA, and only them (no username is hard-coded; checked
+  live with `SHOW GRANTS OF ROLE`, or V175's `CALL SP_ADMIN_ROLE_MEMBERS()` once
+  applied, fail closed, re-checked every 5 minutes and at every write) are
+  OVERWATCH admins with every page and every action, the account-level levers
+  included.
   Everyone else, an unidentified viewer too, gets the read-only **MONITOR**
   view: Cost Intelligence and Operations. Admin actions always show the SQL
   first, and the executor re-checks admin itself for every lever and every
@@ -99,8 +100,8 @@ override. This is a convenience scope on a shared account, not a security
 boundary. Who can open the app is USAGE on the Streamlit object (the four
 access roles of the 2026-10-05 decision, which roles.sql grants, §1);
 inside it every query runs with the owner's rights, so page visibility and
-writes are keyed on the viewer (`session.viewer_access`: `config.OPERATOR_USERS`,
-then a direct SNOW_PRI_GFR_PRD_ALFA_DSA grant, else MONITOR).
+writes are keyed on the viewer (`session.viewer_access`: a direct
+SNOW_PRI_GFR_PRD_ALFA_DSA grant, else MONITOR; no username is hard-coded).
 
 **Honesty contracts** enforced by tests: no synthetic data anywhere; empty
 states say why and what would fill them; estimated vs verified savings
@@ -110,8 +111,8 @@ labels its source and lag.
 **Streamlit-in-Snowflake specifics:** OVERWATCH is an owner's-rights app:
 every query runs with the app owner's privileges (`CURRENT_USER()` /
 `CURRENT_ROLE()` are the owner's). The viewer's identity (`st.user`, mapped
-through `session.viewer_access`: the named admins, then direct
-SNOW_PRI_GFR_PRD_ALFA_DSA members, else MONITOR; an unresolved viewer fails closed to the
+through `session.viewer_access`: direct SNOW_PRI_GFR_PRD_ALFA_DSA members
+only, else MONITOR; an unresolved viewer fails closed to the
 least-privilege profile) selects only the navigation profile and the
 operator gate. `ALTER SESSION` is not available to the app (capability
 detected at connect). Streamlit-in-Snowflake stamps every statement the app runs with its own
@@ -652,7 +653,7 @@ flagged "no longer read (safe to delete)") ·
 App access (4.610.0, read-only: your resolved access and how it was decided, the
 SNOW_PRI_GFR_PRD_ALFA_DSA lookup status — "Lookup OK: N direct user members",
 failed, or unverified, which is a privilege gap and never "no members" — its
-direct members and its not-expanded role grantees, the named admins, and
+direct members and its not-expanded role grantees, and
 "Who can open the app": the app's USAGE grantees from SHOW GRANTS ON
 STREAMLIT compared with the four access roles; "Re-check now" clears only
 your own session's answer) ·
@@ -1106,7 +1107,7 @@ Nothing runs at apply time.
 
 **Rolling back V174.** Prefer disabling a rule in Alerts > Rules. Otherwise re-run V173's SP_ALERT_SCAN (the CREATE PROCEDURE in V173__alert_scan_supported_subquery_and_div0.sql that creates SP_ALERT_SCAN, that CREATE only, never the whole file, which would also re-create SP_ALERT_SCAN_DAILY). A DSA grant, a DSA holder's takeover or new network is then watched as a regular user's again. SP_ALERT_SCAN_DAILY was not touched. The SEC_ADMIN_GRANT NAME refresh is cosmetic and can stay. Nothing ran at apply time; the version row stays. On a V174 schema, the V173 / V168 / V162 rollbacks above start from this one: roll V174 back first.
 
-**Rolling back V175.** Do not drop SP_ADMIN_ROLE_MEMBERS while V175's version row exists: app 4.610.2+ CALLs it for the admin-access lookup, so a missing procedure (or a revoked USAGE for the role that owns the app) makes every DSA-only admin read-only until it is back. The lookup fails closed, and the named admins (config OPERATOR_USERS) are unaffected. To repair, re-run V175 as SNOW_ACCOUNTADMINS (it re-creates the procedure WITH COPY GRANTS and re-grants SNOW_SYSADMINS). Never as SNOW_SYSADMINS: the role that creates it owns it, and the procedure answers as its owner, so it would list only what SNOW_SYSADMINS can see. It is read-only and changes no data, so there is nothing to undo. Going back to the app-owner SHOW is an app change (session._admin_lookup_sql), not a SQL rollback.
+**Rolling back V175.** Do not drop SP_ADMIN_ROLE_MEMBERS while V175's version row exists: app 4.610.2+ CALLs it for the admin-access lookup, so a missing procedure (or a revoked USAGE for the role that owns the app) makes every admin read-only until it is back. The lookup fails closed and, since 4.611.0, there is no username fallback, so nobody can change anything in-app meanwhile. To repair, re-run V175 as SNOW_ACCOUNTADMINS (it re-creates the procedure WITH COPY GRANTS and re-grants SNOW_SYSADMINS). Never as SNOW_SYSADMINS: the role that creates it owns it, and the procedure answers as its owner, so it would list only what SNOW_SYSADMINS can see. It is read-only and changes no data, so there is nothing to undo. Going back to the app-owner SHOW is an app change (session._admin_lookup_sql), not a SQL rollback.
 
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
@@ -1228,17 +1229,22 @@ SCHEMA_VERSION to the expected set (V001 through the repo tip, admin.py `_EXPECT
 
 **A SNOW_PRI_GFR_PRD_ALFA_DSA member sees only Cost Intelligence + Operations and the sidebar says "Admin access
 check unavailable".** The app could not confirm DSA membership and failed closed (read-only, retried after 1
-minute, then 2 and 4, then every 5 minutes while it keeps failing; every viewer not on the allowlist sees the same
-caption meanwhile, and the named admins on `config.OPERATOR_USERS` are unaffected). Check APP_ERROR_LOG for PAGE =
-'Access' and Admin ▸ App access (a named admin can open it). Then, read-only, as SNOW_ACCOUNTADMINS with `USE
-SECONDARY ROLES NONE`, run `SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA`: it must list each member as a
-`granted_to = USER` row. An error or an empty result means the owner role cannot see the role's grants (a
-privilege gap, not "no members"). Letting the owner role see them is an owner-side Snowflake change that this
-release does not make or prescribe; until it is made, only the named admins can change things. A member granted
-through another role (a `granted_to = ROLE` row) is not expanded and stays view-only by design, and the match is
-exact: a username differing from the grantee name only by case is a different user. A revoke takes effect on
-writes within about 15 seconds and on pages within about 5 minutes (at once after 'Refresh data'); a role admin
-whose membership cannot be confirmed at write time (revoked, failed or empty lookup) is refused.
+minute, then 2 and 4, then every 5 minutes while it keeps failing). Every viewer sees the same caption and a 'Why
+read-only?' panel meanwhile (what failed, the Snowflake error, what to check), and nobody can change things in
+OVERWATCH until it recovers: since 4.611.0 no username bypasses the lookup, and Admin ▸ App access cannot be opened.
+Make urgent changes in a worksheet as SNOW_ACCOUNTADMINS. To diagnose, in Snowsight:
+`SELECT LOGGED_AT, ERROR_MESSAGE, CONTEXT FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG WHERE PAGE = 'Access' ORDER BY
+LOGGED_AT DESC` (one row per outage per session). Then, read-only, run the lookup the panel names, as the role that
+owns the app with `USE SECONDARY ROLES NONE`: `SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA`, or
+`CALL DBA_MAINT_DB.OVERWATCH.SP_ADMIN_ROLE_MEMBERS()` once V175 is applied. It must list each member as a
+`granted_to = USER` row. An error or an empty result means the role cannot see the role's grants (a privilege gap,
+not "no members"); if the CALL errors, re-run V175 as SNOW_ACCOUNTADMINS. Letting the owner role see the grants is
+an owner-side Snowflake change that this release does not make or prescribe. Once fixed, press Refresh data to
+re-check at once. A member granted through another role (a `granted_to = ROLE` row) is not expanded and stays
+view-only by design, and the match is exact: a username differing from the grantee name only by case is a different
+user. A revoke takes effect on writes within about 15 seconds and on pages within about 5 minutes (at once after
+'Refresh data'); an admin whose membership cannot be confirmed at write time (revoked, failed or empty lookup) is
+refused.
 
 **A DSA, DTI or SNOW_* holder gets "does not exist or not authorized" opening the app right after a deploy.**
 `snow streamlit deploy --replace` re-created the app object, which drops every USAGE grant on it (database and
@@ -1452,9 +1458,10 @@ family** — queries sharing QUERY_PARAMETERIZED_HASH (same SQL shape,
 different literals). **Break-glass** — ACCOUNTADMIN / SNOW_ACCOUNTADMINS;
 for emergencies and grants, not routine work. **Dedupe key** — string that
 makes an alert fire once per object per period. **Mart-first** — read our
-small fact tables before the big ACCOUNT_USAGE views. **Operator** —
-member of SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (DBA profile); may execute
-generated statements behind typed confirms. **Quiet window** — contiguous hours where a warehouse
+small fact tables before the big ACCOUNT_USAGE views. **Operator / OVERWATCH admin** —
+a direct USER member of SNOW_PRI_GFR_PRD_ALFA_DSA (DBA profile; checked live, fail closed); may execute
+generated statements behind typed confirms. Holding SNOW_ACCOUNTADMINS / SNOW_SYSADMINS opens the app but
+does not make an admin. **Quiet window** — contiguous hours where a warehouse
 burns credits with ~no queries. **Verified saving** — ledger item proven
 by actual before/after spend, not projection.
 

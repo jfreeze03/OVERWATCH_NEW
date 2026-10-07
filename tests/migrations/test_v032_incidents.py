@@ -129,7 +129,8 @@ def test_control_room_incidents_section():
     assert 'section_header("Incidents", _inc_health)' in _CR   # rec6 + r27: data-driven header, mirrors the exception set
     # #3 (2026-07-31): operator gating moved from CURRENT_ROLE() (the app owner's role
     # under owner's-rights SiS, same for every viewer) to session.is_operator(), which
-    # resolves the VIEWER identity against an allowlist. The section is still op-gated.
+    # resolves the VIEWER identity against the SNOW_PRI_GFR_PRD_ALFA_DSA roster (direct user grant).
+    # The section is still op-gated.
     assert "is_operator()" in _CR
     assert "mart_sql.incident_metrics(90, company)" in _CR      # triage filter honored
     assert "mart_sql.open_incidents(50, company, lifecycle=True)" in _CR   # #12a: Control Room reads the lifecycle cols

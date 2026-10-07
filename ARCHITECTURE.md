@@ -187,8 +187,8 @@ savings_rollup, unread_maintenance).
 - User/database spend: allocated from query elapsed-time share (or
   `QUERY_ATTRIBUTION_HISTORY` when present) and always labeled **allocated**.
 - Rates come from `SETTINGS` (seeded $3.68 compute / $2.20 Cortex /
-  $23 TB-mo). The Admin page edits them (OVERWATCH admins: the `OPERATOR_USERS`
-  allowlist or direct SNOW_PRI_GFR_PRD_ALFA_DSA members, type-to-confirm); code ships matching defaults only as offline
+  $23 TB-mo). The Admin page edits them (OVERWATCH admins: direct
+  SNOW_PRI_GFR_PRD_ALFA_DSA members, type-to-confirm); code ships matching defaults only as offline
   fallback.
 - All conversion math lives in `app/logic/formulas.py` and is regression-tested.
 
@@ -211,13 +211,14 @@ savings_rollup, unread_maintenance).
 - User classification: `TRXS_*` → Trexis; explicit override `KEBARR1` → ALFA
   (holds both companies' roles, treated as ALFA by policy).
 - Page visibility and the admin gate depend on the viewer
-  (`session.viewer_access`, owner decision 2026-10-05): a viewer on
-  `config.OPERATOR_USERS` is an admin with no lookup (source `allowlist`); a
-  direct USER grantee of SNOW_PRI_GFR_PRD_ALFA_DSA, read live with
-  `SHOW GRANTS OF ROLE` run as the owner, is an admin with full parity
-  (source `role`; a grant to a role is not expanded); everyone else, and an
-  unidentified SiS viewer, gets the read-only MONITOR profile (Cost
-  Intelligence + Operations; source `default`). The lookup is memoized per
+  (`session.viewer_access`, owner decisions 2026-10-05 and 2026-10-07): the
+  only admin route is a direct USER grant of SNOW_PRI_GFR_PRD_ALFA_DSA, read
+  live with `SHOW GRANTS OF ROLE` run as the owner, or V175's
+  `CALL SP_ADMIN_ROLE_MEMBERS()` once it is applied: an admin with full parity
+  (source `role`; a grant to a role is not expanded). No username is
+  hard-coded. Everyone else, and an unidentified SiS viewer, gets the
+  read-only MONITOR profile (Cost Intelligence + Operations; source
+  `default`). The lookup is memoized per
   session (re-checked after 300 s; a failure, `lookup_failed`, or an empty USER
   set, `unverified`, is retried first after 60 s, the wait doubling with each
   further failure up to the 300 s TTL) and fails closed. It filters
@@ -229,8 +230,8 @@ savings_rollup, unread_maintenance).
   (`query._PRIVILEGED_PREFIXES`), query cancel, and every
   INSERT/UPDATE/DELETE/MERGE/CALL on OVERWATCH except the viewer's own
   self-service rows (USER_PREFS, USER_WATCHLIST, APP_USAGE,
-  APP_QUERY_TELEMETRY, matched as the exact object token); a role-sourced
-  admin is re-verified live at write time (memo at most 15 s).
+  APP_QUERY_TELEMETRY, matched as the exact object token); every admin is
+  re-verified live at write time (memo at most 15 s).
   Operator and UI writes go through the executors (`query.execute_statement`,
   `execute_statement_async`, `execute_action`), whose allow-list admits one
   statement aimed at OVERWATCH objects or a lever. Two paths skip that
@@ -306,8 +307,8 @@ Snowpark binds would not remove the display/require-review path.
 
 **Hardcoded company scope instead of row access policies.** Two companies,
 one account, scope is convenience not a security boundary (the Streamlit
-grant and the in-app admin check, `OPERATOR_USERS` plus direct
-SNOW_PRI_GFR_PRD_ALFA_DSA members, are). RAPs
+grant and the in-app admin check, direct SNOW_PRI_GFR_PRD_ALFA_DSA
+members, are). RAPs
 cannot bind SNOWFLAKE.ACCOUNT_USAGE itself, and policy sprawl across derived
 objects buys admin burden without closing the actual exposure. Revisit on a
 compliance driver.

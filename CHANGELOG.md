@@ -1,5 +1,69 @@
 # Changelog
 
+## 4.611.0 - Roles alone decide who is an OVERWATCH admin (2026-10-07)
+
+The owner, 2026-10-07: "the hardcoded users like H21427, E22292 and the others need to be removed because their roles
+should show who gets access to what". This release removes every username from OVERWATCH's access decisions. App-only:
+no migration, no validate floor change.
+
+- **The only way to be an OVERWATCH admin is a direct `GRANT ROLE SNOW_PRI_GFR_PRD_ALFA_DSA TO USER <name>`.**
+  `config.OPERATOR_USERS` and `is_operator_user` are gone, and so is the allowlist branch in
+  `session._resolve_identified`. An admin is a direct USER member of the DSA role found by the live lookup (SHOW
+  GRANTS OF ROLE, or V175's CALL once applied). A grant to a role does not count, the username must match the
+  grantee name exactly (case included), and the check still fails closed. H21427, E22292, KEBARR1, CLROY and N22514
+  stay admins only because they are direct DSA members today, along with LD8283. Revoking DSA now removes any of
+  them within about 15 seconds for writes and 5 minutes for pages, with no redeploy.
+- **The other username paths are gone too.** `VIEWER_PROFILES` / `resolve_viewer_profile` (empty since 4.610.0, but a
+  pin could widen a non-admin from MONITOR to READER) are removed: every non-admin is MONITOR. READER stays as a page
+  set no route reaches. `ROLE_ADMIN_ACCOUNT_LEVERS` is removed: its False value meant "the allowlist only", which
+  would now mean nobody. Every admin keeps ALTER USER / ALTER ACCOUNT SET (the 2026-10-05 full parity).
+- **No `allowlist` source survives.** `session.ACCESS_SOURCES` is role / default / lookup_failed / unverified and
+  Admin ▸ App access has no label for it. APP_USAGE `access_resolved` rows logged before 4.611.0 may still read
+  SECTION = 'allowlist'; nothing reads them, and they age out with the 365-day retention. Every admin write now
+  re-verifies membership live (at most once per 15 seconds): the executor runs only off-SiS local dev without a
+  write-time lookup, and refuses a stale 'allowlist' source outright. A pre-4.611 'allowlist' memo in an open
+  session is re-resolved with one lookup instead of being reused.
+- **No in-app emergency override any more.** If the app cannot read DSA's members, every viewer gets the two
+  read-only pages until it can, all six admins included. Causes: a privilege gap for the owner role,
+  SP_ADMIN_ROLE_MEMBERS dropped or its USAGE lost, a rebuild between teardown and the V175 replay, or the
+  SNOW_SYSADMINS owner switch without V175. During an outage the sidebar keeps the caption ("Admin access check
+  unavailable — OVERWATCH admins (direct members of SNOW_PRI_GFR_PRD_ALFA_DSA) are read-only until it recovers.")
+  and adds a **Why read-only?** panel for every viewer: the lookup's verdict, the Snowflake error, what to check,
+  and the fix (Snowsight as SNOW_ACCOUNTADMINS, then press Refresh data to re-check at once; it also retries on its
+  own). It adds no lookup and names no member. Each outage now writes its own APP_ERROR_LOG row (PAGE = 'Access'):
+  a good lookup re-arms the once-per-outage log, so a second outage in the same session is no longer silent. Alerts
+  and email paging keep running (they are Snowflake tasks), and Emergency-lever SQL is still shown for copy-paste.
+- **Owner picker.** The Action Center / Security owner picker is seeded from the live DSA member list (this
+  session's last good lookup, no extra query), so LD8283 joins it. Other…, (unassigned) and the current owner stay.
+- **Admin ▸ App access** drops the "Named admins" caption and the ALSO_NAMED_ADMIN column: the DSA direct members
+  are the admins ("no username is hard-coded in the app"). The account-levers caption is constant, and the guidance
+  says REVOKE alone removes an admin and that during an outage the fix is in Snowsight. `config.ADMIN_ACCESS_HINT`
+  names only the role.
+- **V175 becomes a hard prerequisite of the SNOW_SYSADMINS owner switch.** With no username fallback, a switch
+  without it can leave some admins (a silent partial SHOW) or all of them read-only. Apply it and see Admin ▸ App
+  access read "Lookup OK ... by CALL ..." before the switch.
+- **Small cost.** The five former named admins now also run the membership lookup (once per session, then every 5
+  minutes) and the write-time re-check (at most one per 15 seconds). Both are metadata-only reads.
+- **Unchanged.** The KEBARR1 ALFA billing override (COMPANY_SCOPE) is cost attribution, not access, and stays.
+- **Before deploying (owner-run, read-only).** As SNOW_ACCOUNTADMINS run `SHOW GRANTS OF ROLE
+  SNOW_PRI_GFR_PRD_ALFA_DSA` (or `CALL DBA_MAINT_DB.OVERWATCH.SP_ADMIN_ROLE_MEMBERS()` once V175 is applied): it
+  should list the 6 users as granted_to = USER. Immediately after it, the exact-case cross-check must return 0 rows
+  (a returned name would silently become view-only): `SELECT DISTINCT USER_NAME FROM DBA_MAINT_DB.OVERWATCH.APP_USAGE
+  WHERE EVENT_KIND='access_resolved' AND SECTION='allowlist' AND USER_NAME NOT IN (SELECT "grantee_name" FROM
+  TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "granted_to"='USER');`
+- **Order.** Merge PR #54 (4.610.2 / V175) first, then this release. Deploy with `snow streamlit deploy --replace`,
+  then re-run roles.sql's Streamlit block. Each admin confirms Admin ▸ App access reads "Decided by: Direct member of
+  SNOW_PRI_GFR_PRD_ALFA_DSA". Apply V175 (and see it in use) before the SNOW_SYSADMINS switch.
+- **Rollback:** redeploy 4.610.2, then re-run roles.sql's Streamlit block. No SQL to undo: this release changes no
+  database object.
+- **Repo.** validate.sql's V175 comment and `snowflake/rebuild/05_validate.sql` (regenerated) say there is no
+  username fallback; CLAUDE.md (law 9 and the access decision), README, DEPLOYMENT, RUNBOOK, ARCHITECTURE and
+  FEATURE_GLOSSARY say roles alone decide and there is no break-glass. New lock `tests/test_roles_only_access.py`:
+  config holds no username-keyed admin or profile list, no app module names a former admin (KEBARR1 only in the
+  company override), no `allowlist` source survives in the resolver or the executor, and the five former names are
+  admins only on an exact DSA roster row. The access tests now make an admin only through a scripted DSA roster
+  (`tests/_access.py`), never through a username.
+
 ## 4.610.2 - V175: the admin-access lookup as an owner-run procedure (2026-10-07)
 
 The owner decided on 2026-10-06 that SNOW_SYSADMINS will own and run OVERWATCH_APP instead of SNOW_ACCOUNTADMINS.
