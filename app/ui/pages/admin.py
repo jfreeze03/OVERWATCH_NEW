@@ -819,6 +819,10 @@ _EXPECTED_MIGRATIONS = {
          "SEC_ADMIN_GRANT (a direct grant raises), SEC_LOGIN_TAKEOVER (a holder takeover is CRITICAL) and "
          "SEC_NEW_ADMIN_NETWORK (a holder new network raises); the SEC_ADMIN_GRANT rule name lists it. Tallies and "
          "every other arm unchanged. No task change, no apply-time run",
+    175: "Owner decision 2026-10-06 (SNOW_SYSADMINS will own the app): SP_ADMIN_ROLE_MEMBERS(), an owner-run "
+         "procedure that lists SNOW_PRI_GFR_PRD_ALFA_DSA's grantees (role hard-coded, created WITH COPY GRANTS, "
+         "USAGE to SNOW_SYSADMINS). The app CALLs it for the admin-access lookup once applied, so the lookup "
+         "answers the same whatever role owns the app. Read-only; no task change, no apply-time run",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -1215,7 +1219,7 @@ def _access_tab() -> None:
                    {"ok": "ok", "unavailable": "bad"}.get(summary["state"], ""), "security")
     if sis:
         if st.button("Re-check now", key="adm_access_recheck",
-                     help="Forget your own session's access answer and look it up again (one SHOW)."):
+                     help="Forget your own session's access answer and look it up again (one lookup)."):
             fresh = _session.recheck_access()
             st.session_state[_RECHECK_RECEIPT_KEY] = {"at": time.time(), "text": (
                 "Re-checked: your session's access memo was cleared and resolved again with one fresh lookup. "
@@ -1234,10 +1238,7 @@ def _access_tab() -> None:
         st.caption(summary["headline"])
     elif summary["state"] == "unavailable":
         empty_state("unavailable", summary["headline"], detail=summary["detail"],
-                    hint=(f"Check: run SHOW GRANTS OF ROLE {ADMIN_ACCESS_ROLE} as SNOW_ACCOUNTADMINS (USE "
-                          "SECONDARY ROLES NONE). It must list each member as a granted_to = USER row; if it errors "
-                          "or lists none, the owner role cannot see the role's grants. The named admins are "
-                          "unaffected."))
+                    hint=access_review.lookup_check_hint(info))
     else:
         st.caption(summary["headline"])
     allowlist = tuple(str(u).upper() for u in (info.get("allowlist") or ()))

@@ -16,15 +16,24 @@ all four and its -20011/-20012 proof block accepts exactly that set). The ON for
 allowed in owner's-rights code, and the owner role owns the app, so it always sees at least its own
 OWNERSHIP row: an empty answer is unverified, never "no grantees".
 
-Not canaried: the Admin canary EXPLAINs every entry and SHOW cannot be EXPLAINed (see app/data/canary.py
-and tests/test_canary_coverage.py's CANARY_EXEMPT).
+V175 (owner decision 2026-10-06: SNOW_SYSADMINS will own the app) wraps the admin-role SHOW in
+SP_ADMIN_ROLE_MEMBERS(), an EXECUTE AS OWNER procedure with the role hard-coded. SHOW answers as the APP owner;
+the CALL answers as the PROCEDURE's owner (the role that applied V175), so the lookup keeps listing the same
+members after the app changes owner. session._admin_lookup_sql picks the CALL once V175 is applied.
+
+Not canaried: the Admin canary EXPLAINs every entry and EXPLAIN cannot compile a SHOW or a CALL (see
+app/data/canary.py and tests/test_canary_coverage.py's CANARY_EXEMPT).
 """
 
 from __future__ import annotations
 
 import re
 
-from app.config import ADMIN_ACCESS_ROLE, APP_STREAMLIT_NAME, CORE_SCHEMA, OVERWATCH_DB
+from app.config import ADMIN_ACCESS_ROLE, APP_STREAMLIT_NAME, CORE_SCHEMA, OVERWATCH_DB, core_object
+
+# V175: the owner-run admin-role lookup and the migration that creates it (session gates the CALL on it).
+ADMIN_MEMBERS_PROC = "SP_ADMIN_ROLE_MEMBERS"
+ADMIN_MEMBERS_MIGRATION = 175
 
 # An UNQUOTED Snowflake identifier: a letter or underscore, then letters, digits, '_' or '$' (255 max).
 # Nothing else can reach the statement, so neither a quote nor a ';' can.
@@ -54,3 +63,13 @@ def show_grants_on_app_sql() -> str:
     DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP). Admin ▸ App access reads it through run(..., max_rows=0) and compares
     the USAGE rows with config.APP_ACCESS_ROLES (logic.access_review.app_grant_review). Takes no input."""
     return f"SHOW GRANTS ON STREAMLIT {OVERWATCH_DB}.{CORE_SCHEMA}.{APP_STREAMLIT_NAME}"
+
+
+def call_admin_role_members_sql() -> str:
+    """The V175 admin-access lookup: SP_ADMIN_ROLE_MEMBERS() runs SHOW GRANTS OF ROLE <ADMIN_ACCESS_ROLE> as the
+    procedure's owner and returns the same granted_to / grantee_name rows, so role_grant_members reads either
+    answer. The procedure takes no argument (the role is hard-coded in V175), and neither does this builder.
+
+    A read: session._admin_role_rows collects it directly, never through the write executor, so it needs no
+    admin entitlement (it is what decides entitlement) and invalidates no cache domain."""
+    return f"CALL {core_object(ADMIN_MEMBERS_PROC)}()"

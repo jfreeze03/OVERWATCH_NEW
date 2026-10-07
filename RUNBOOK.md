@@ -1106,6 +1106,8 @@ Nothing runs at apply time.
 
 **Rolling back V174.** Prefer disabling a rule in Alerts > Rules. Otherwise re-run V173's SP_ALERT_SCAN (the CREATE PROCEDURE in V173__alert_scan_supported_subquery_and_div0.sql that creates SP_ALERT_SCAN, that CREATE only, never the whole file, which would also re-create SP_ALERT_SCAN_DAILY). A DSA grant, a DSA holder's takeover or new network is then watched as a regular user's again. SP_ALERT_SCAN_DAILY was not touched. The SEC_ADMIN_GRANT NAME refresh is cosmetic and can stay. Nothing ran at apply time; the version row stays. On a V174 schema, the V173 / V168 / V162 rollbacks above start from this one: roll V174 back first.
 
+**Rolling back V175.** Do not drop SP_ADMIN_ROLE_MEMBERS while V175's version row exists: app 4.610.2+ CALLs it for the admin-access lookup, so a missing procedure (or a revoked USAGE for the role that owns the app) makes every DSA-only admin read-only until it is back. The lookup fails closed, and the named admins (config OPERATOR_USERS) are unaffected. To repair, re-run V175 (it re-creates the procedure WITH COPY GRANTS and re-grants SNOW_SYSADMINS). It is read-only and changes no data, so there is nothing to undo. Going back to the app-owner SHOW is an app change (session._admin_lookup_sql), not a SQL rollback.
+
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
 | COST_DAILY_CREDITS | COST | account credits/day over threshold | daily key |

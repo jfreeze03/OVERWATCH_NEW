@@ -118,7 +118,8 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    APP_QUERY_TELEMETRY, matched as the exact object token after the prefix).
    Admin = `config.OPERATOR_USERS` (allowlist, no lookup) or a direct USER
    member of SNOW_PRI_GFR_PRD_ALFA_DSA (`session.viewer_access`, live
-   `SHOW GRANTS OF ROLE`, fail closed, re-verified at write time in
+   `SHOW GRANTS OF ROLE`; once V175 is applied, `CALL SP_ADMIN_ROLE_MEMBERS()`,
+   a read outside the executor; fail closed, re-verified at write time in
    `query._entitlement_refusal`; keep calling `_session.is_operator()` there,
    it is the tests' monkeypatch seam). Cache invalidation is domain-scoped.
 10. **Formulas:** `app/logic/formulas.py` is the only place credits become
@@ -182,7 +183,9 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   VIEWER_PROFILES can never pin DBA. Every other viewer who can open the app
   (DTI members, SNOW_* holders not on the allowlist, an unidentified SiS
   viewer) gets MONITOR = Cost Intelligence + Operations, read-only; DTI is
-  never looked up. Membership is `SHOW GRANTS OF ROLE` run as the owner, once
+  never looked up. Membership is `SHOW GRANTS OF ROLE` run as the owner (once
+  V175 is applied, `CALL SP_ADMIN_ROLE_MEMBERS()`: the same SHOW run as the
+  procedure's owner, so it survives the SNOW_SYSADMINS owner switch), once
   per session (re-checked after 300 s; a failure, 'lookup_failed', or an
   empty USER set, 'unverified', is retried first after 60 s, the wait
   doubling with each further failure up to the 5-minute TTL) and FAILS

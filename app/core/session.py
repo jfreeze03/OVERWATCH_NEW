@@ -346,7 +346,8 @@ def active_profile(role: str = "") -> str:
 #
 # For an identified viewer, first match wins:
 #   1. config.OPERATOR_USERS            -> DBA + operator, source 'allowlist' (no SQL at all)
-#   2. a DIRECT user grantee of config.ADMIN_ACCESS_ROLE (SHOW GRANTS OF ROLE, run as the owner)
+#   2. a DIRECT user grantee of config.ADMIN_ACCESS_ROLE (SHOW GRANTS OF ROLE, run as the owner; once V175
+#      is applied, CALL SP_ADMIN_ROLE_MEMBERS(), the same SHOW run as the procedure's owner)
 #                                        -> DBA + operator, source 'role'
 #   3. otherwise                         -> a non-admin VIEWER_PROFILES pin or VIEWER_UNKNOWN_PROFILE
 #      (MONITOR), read-only; source 'default' when the lookup answered, 'lookup_failed' when it raised,
@@ -374,6 +375,7 @@ _ROSTER_KEY = "_ow_access_roster"      # {status, users, roles, at, error} — t
 _RECHECK_KEY = "_ow_access_recheck"    # {viewer, at} — the last POSITIVE write-time re-verification
 _ACCESS_ERR_LOGGED_KEY = "_ow_access_err_logged"
 _ACCESS_EVENTS_KEY = "_ow_access_events"
+_LOOKUP_SQL_KEY = "_ow_access_lookup_sql"   # the statement the last admin-role lookup ran (SHOW, or V175's CALL)
 #: The sources an identified viewer's resolution carries. An unidentified viewer reads 'no_identity'
 #: on SiS and 'off_sis' elsewhere (no memo, no lookup).
 ACCESS_SOURCES: tuple[str, ...] = ("allowlist", "role", "default", "lookup_failed", "unverified")
@@ -447,16 +449,44 @@ def role_grant_members(rows: object) -> tuple[frozenset[str], tuple[str, ...]]:
     return frozenset(users), tuple(sorted(roles))
 
 
-def _admin_role_rows() -> list:
-    """The live SHOW GRANTS OF ROLE <ADMIN_ACCESS_ROLE> answer, run as the app owner. Raises on any
-    failure (the callers fail closed). Not through run(): its tier cache would outlive the access TTLs
-    and the write-time re-check must be fresh."""
+def _admin_lookup_sql() -> str:
+    """The admin-access lookup statement. Once V175 is applied: CALL SP_ADMIN_ROLE_MEMBERS(), which runs
+    SHOW GRANTS OF ROLE <ADMIN_ACCESS_ROLE> as the PROCEDURE's owner, so it answers the same whatever role owns
+    the app (owner decision 2026-10-06: SNOW_SYSADMINS will). Before it: that SHOW, as the app owner.
+
+    The gate answers from the startup schema read (no statement of its own) and is False when SCHEMA_VERSION
+    is unreadable: SHOW then, the pre-V175 behaviour. Either statement fails closed the same way."""
+    from app.config import ADMIN_ACCESS_ROLE
+    from app.data import access_sql
+
+    try:
+        from app.ui import schema_gate  # lazy: schema_gate imports app.core.query, which imports this module
+
+        via_proc = schema_gate.has_migration(access_sql.ADMIN_MEMBERS_MIGRATION, "session")
+    except Exception:
+        via_proc = False
+    if via_proc:
+        return access_sql.call_admin_role_members_sql()
+    return access_sql.show_grants_of_role_sql(ADMIN_ACCESS_ROLE)
+
+
+def _lookup_label() -> str:
+    """The statement the last admin-role lookup ran, for its error log and Admin ▸ App access."""
     from app.config import ADMIN_ACCESS_ROLE
     from app.data.access_sql import show_grants_of_role_sql
 
+    return str(st.session_state.get(_LOOKUP_SQL_KEY) or show_grants_of_role_sql(ADMIN_ACCESS_ROLE))
+
+
+def _admin_role_rows() -> list:
+    """The live admin-role answer (_admin_lookup_sql: V175's CALL, else SHOW GRANTS OF ROLE as the app owner).
+    Raises on any failure (the callers fail closed). Not through run(): its tier cache would outlive the
+    access TTLs and the write-time re-check must be fresh. Not through the write executor either: the CALL
+    is a read, and it is what decides admin entitlement."""
+    sql = _admin_lookup_sql()
+    st.session_state[_LOOKUP_SQL_KEY] = sql
     s = get_session()
-    return list(submit_collect(s, s.sql(show_grants_of_role_sql(ADMIN_ACCESS_ROLE)),
-                               statement_params(s, page="session", tier="metadata")) or [])
+    return list(submit_collect(s, s.sql(sql), statement_params(s, page="session", tier="metadata")) or [])
 
 
 def _log_access_failure(exc: BaseException) -> None:
@@ -466,11 +496,10 @@ def _log_access_failure(exc: BaseException) -> None:
         return
     st.session_state[_ACCESS_ERR_LOGGED_KEY] = True
     try:
-        from app.config import ADMIN_ACCESS_ROLE
         from app.core import errors as _errors
 
         _errors.record_error("Access", exc, context=(
-            f"admin-access lookup (SHOW GRANTS OF ROLE {ADMIN_ACCESS_ROLE}) failed or listed no user: "
+            f"admin-access lookup ({_lookup_label()}) failed or listed no user: "
             "viewers not on OPERATOR_USERS resolve read-only until it recovers"))
     except Exception:
         pass
@@ -507,7 +536,7 @@ def _admin_roster(*, fresh: bool = False) -> dict:
             memo = {"status": "ok", "users": tuple(sorted(users)), "roles": roles, "at": now, "error": "",
                     "fails": 0}
         else:
-            msg = (f"SHOW GRANTS OF ROLE {ADMIN_ACCESS_ROLE} listed no USER grantee: a privilege gap or an "
+            msg = (f"{_lookup_label()} listed no USER grantee of {ADMIN_ACCESS_ROLE}: a privilege gap or an "
                    "empty role, treated as unverified (read-only), never as 'no members'")
             memo = {"status": "unverified", "users": (), "roles": roles, "at": now, "error": msg,
                     "fails": streak + 1}
@@ -697,6 +726,7 @@ def access_info(*, roster: bool = False) -> dict:
         "nested_roles": tuple(r.get("roles") or ()) if r else (),
         "roster_at": r.get("at") if r else None,
         "roster_error": str(r.get("error") or "") if r else "",
+        "roster_lookup": _lookup_label() if r else "",
     }
 
 
