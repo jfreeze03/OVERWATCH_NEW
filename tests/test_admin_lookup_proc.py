@@ -15,6 +15,8 @@ The SQL side (V175 itself) is locked in tests/migrations/test_v175_admin_role_me
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 import streamlit as st
 
@@ -86,33 +88,59 @@ def test_the_call_builder_names_the_v175_procedure():
     assert access_sql.call_admin_role_members_sql().endswith("()")
 
 
-def test_call_once_v175_is_applied_show_before(lookup):
-    assert sess._admin_lookup_sql() == _CALL
+def test_the_fake_gate_matches_the_real_signature():
+    # the fixture calls has_migration(v, page) positionally; a keyword-only change must fail here, not hide
+    inspect.signature(schema_gate.has_migration).bind(access_sql.ADMIN_MEMBERS_MIGRATION, "session")
+
+
+def test_show_before_v175_call_once_applied(lookup):
     lookup.applied = False
     assert sess._admin_lookup_sql() == _SHOW
+    lookup.applied = True
+    assert sess._admin_lookup_sql() == _CALL
 
 
-def test_an_unreadable_gate_keeps_the_pre_v175_show(lookup):
+def test_the_call_is_sticky_once_this_session_saw_v175(lookup):
+    # review r1 #3: after the owner switch a fallback SHOW would answer as SNOW_SYSADMINS and could list fewer
+    # users with no error, so an unreadable SCHEMA_VERSION later in the session must not undo the CALL
+    assert sess._admin_lookup_sql() == _CALL
+    lookup.applied = False
+    assert sess._admin_lookup_sql() == _CALL
+    lookup.gate_raises = True
+    assert sess._admin_lookup_sql() == _CALL
+    assert lookup.errors == []          # the sticky answer never consulted the gate
+
+
+def test_a_raising_gate_keeps_the_pre_v175_show_and_is_logged_once(lookup):
     lookup.gate_raises = True
     assert sess._admin_lookup_sql() == _SHOW
+    assert sess._admin_lookup_sql() == _SHOW
+    assert len(lookup.errors) == 1
+    page, _exc, context = lookup.errors[0]
+    assert page == "Access" and "V175 schema check failed" in context and _SHOW in context
 
 
 def test_the_lookup_collects_the_chosen_statement_and_records_it(lookup):
-    rows = sess._admin_role_rows()
-    assert lookup.ran == [_CALL]
-    assert st.session_state[sess._LOOKUP_SQL_KEY] == _CALL
-    assert sess.role_grant_members(rows) == (frozenset({_DSA_USER}), ("SOME_NESTED_ROLE",))
     lookup.applied = False
     sess._admin_role_rows()
-    assert lookup.ran == [_CALL, _SHOW]
+    assert lookup.ran == [_SHOW]
     assert st.session_state[sess._LOOKUP_SQL_KEY] == _SHOW
+    lookup.applied = True
+    rows = sess._admin_role_rows()
+    assert lookup.ran == [_SHOW, _CALL]
+    assert st.session_state[sess._LOOKUP_SQL_KEY] == _CALL
+    assert sess.role_grant_members(rows) == (frozenset({_DSA_USER}), ("SOME_NESTED_ROLE",))
 
 
 def test_the_call_answer_makes_a_dsa_member_an_admin(lookup):
     access = sess.viewer_access()
     assert access["operator"] is True and access["source"] == "role"
     assert lookup.ran == [_CALL]
-    assert sess.access_info()["roster_lookup"] == _CALL
+    info = sess.access_info()
+    assert info["roster_lookup"] == _CALL
+    # review r1 #2: the healthy verdict says which statement answered (the only in-app sign of the switch)
+    summary = access_review.roster_summary(info, now=0.0)
+    assert summary["state"] == "ok" and summary["headline"].endswith(f"by {_CALL}).")
 
 
 def test_quoted_column_names_from_the_call_still_parse():
@@ -132,7 +160,7 @@ def test_a_failed_call_fails_closed_and_names_the_call(lookup):
     summary = access_review.roster_summary(info, now=0.0)
     assert summary["state"] == "unavailable" and _CALL in summary["headline"]
     hint = access_review.lookup_check_hint(info)
-    assert hint.startswith(f"Check: run {_CALL}") and "re-run V175" in hint
+    assert hint.startswith(f"Check: run {_CALL}") and "re-run V175 as SNOW_ACCOUNTADMINS" in hint
 
 
 def test_a_call_with_no_user_row_is_unverified_never_an_admin(lookup):

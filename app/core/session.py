@@ -376,6 +376,8 @@ _RECHECK_KEY = "_ow_access_recheck"    # {viewer, at} — the last POSITIVE writ
 _ACCESS_ERR_LOGGED_KEY = "_ow_access_err_logged"
 _ACCESS_EVENTS_KEY = "_ow_access_events"
 _LOOKUP_SQL_KEY = "_ow_access_lookup_sql"   # the statement the last admin-role lookup ran (SHOW, or V175's CALL)
+_VIA_PROC_KEY = "_ow_access_via_proc"       # True once this session saw V175 applied: the lookup never goes back to SHOW
+_GATE_ERR_LOGGED_KEY = "_ow_access_gate_err_logged"
 #: The sources an identified viewer's resolution carries. An unidentified viewer reads 'no_identity'
 #: on SiS and 'off_sis' elsewhere (no memo, no lookup).
 ACCESS_SOURCES: tuple[str, ...] = ("allowlist", "role", "default", "lookup_failed", "unverified")
@@ -454,17 +456,35 @@ def _admin_lookup_sql() -> str:
     SHOW GRANTS OF ROLE <ADMIN_ACCESS_ROLE> as the PROCEDURE's owner, so it answers the same whatever role owns
     the app (owner decision 2026-10-06: SNOW_SYSADMINS will). Before it: that SHOW, as the app owner.
 
-    The gate answers from the startup schema read (no statement of its own) and is False when SCHEMA_VERSION
-    is unreadable: SHOW then, the pre-V175 behaviour. Either statement fails closed the same way."""
+    The gate shares the startup schema read's cache entry and is False when SCHEMA_VERSION is unreadable: SHOW
+    then, the pre-V175 behaviour. STICKY: once this session saw V175 applied it keeps the CALL, so a later
+    unreadable SCHEMA_VERSION never drops it back to SHOW (after the owner switch SHOW would answer, as the new
+    owner, with possibly fewer users: a silent drop the CALL exists to prevent; review r1 #3). A gate that
+    raises is logged once per session. Either statement fails closed the same way."""
     from app.config import ADMIN_ACCESS_ROLE
     from app.data import access_sql
 
-    try:
-        from app.ui import schema_gate  # lazy: schema_gate imports app.core.query, which imports this module
+    via_proc = bool(st.session_state.get(_VIA_PROC_KEY))
+    if not via_proc:
+        try:
+            # lazy: schema_gate imports app.core.query, which imports this module
+            from app.ui import schema_gate
 
-        via_proc = schema_gate.has_migration(access_sql.ADMIN_MEMBERS_MIGRATION, "session")
-    except Exception:
-        via_proc = False
+            via_proc = bool(schema_gate.has_migration(access_sql.ADMIN_MEMBERS_MIGRATION, "session"))
+        except Exception as exc:
+            via_proc = False
+            if not st.session_state.get(_GATE_ERR_LOGGED_KEY):
+                st.session_state[_GATE_ERR_LOGGED_KEY] = True
+                try:
+                    from app.core import errors as _errors
+
+                    _errors.record_error("Access", exc, context=(
+                        "admin-access lookup: the V175 schema check failed, so this session's lookup uses "
+                        f"{access_sql.show_grants_of_role_sql(ADMIN_ACCESS_ROLE)} until it answers"))
+                except Exception:
+                    pass
+        if via_proc:
+            st.session_state[_VIA_PROC_KEY] = True
     if via_proc:
         return access_sql.call_admin_role_members_sql()
     return access_sql.show_grants_of_role_sql(ADMIN_ACCESS_ROLE)

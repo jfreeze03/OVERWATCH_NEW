@@ -24,9 +24,9 @@
 -- before that, so one build works before and after the apply, under either owner. The fail-closed paths are
 -- unchanged: a failed CALL is lookup_failed, an answer with no USER row is unverified, neither ever makes an admin.
 --
--- COST: none at apply time. Per lookup: one CALL (the SHOW and one RESULT_SCAN inside it, cloud services only,
--- no warehouse scan) in place of one SHOW, at the same cadence (once per viewer session per 5 min, plus the
--- write-time re-check).
+-- COST: none at apply time. Per lookup: one CALL in place of one SHOW, at the same cadence (once per viewer session
+-- per 5 min, plus the write-time re-check). Inside it, the SHOW (cloud services) and one RESULT_SCAN of its few rows,
+-- which runs on the caller's warehouse (the app's own).
 -- NEEDED: before the SNOW_SYSADMINS cutover when the preflight's S2 differs from Z2. Harmless before that: under
 -- today's owner the CALL returns what SHOW returns.
 -- ROLLBACK: do not drop the procedure while this version row exists: the app would CALL a missing procedure and

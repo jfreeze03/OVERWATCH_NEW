@@ -99,4 +99,5 @@ def test_run_docs_list_v175():
     assert f"snowflake/migrations/{_NAME}" in read("DEPLOYMENT.md")
     assert f"snowflake/migrations/{_NAME} -- " in read("README.md")
     assert "**Rolling back V175.**" in read("RUNBOOK.md")
+    assert "re-run V175 as SNOW_ACCOUNTADMINS" in read("RUNBOOK.md")
     assert "DROP PROCEDURE IF EXISTS DBA_MAINT_DB.OVERWATCH.SP_ADMIN_ROLE_MEMBERS();" in read("snowflake/teardown.sql")

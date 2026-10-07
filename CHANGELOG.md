@@ -18,13 +18,19 @@ owner. The owner switch itself is a later release.
   CALL is a read collected outside the write executor: it is what decides admin entitlement, so it needs none, and
   it invalidates no cache. Every fail-closed path is unchanged: a failed CALL is `lookup_failed`, an answer with no
   USER row is `unverified`, and neither ever makes an admin. The named admins (OPERATOR_USERS) never need the lookup.
-- **Admin ▸ App access names the statement that ran** in its lookup verdict, and its "Check:" hint matches it (for
-  the CALL: which role to run it as, and that an error means re-run V175). The error-log context and the
-  'unverified' message name it too.
+  Once a session has seen V175 applied it keeps the CALL: a later unreadable SCHEMA_VERSION never drops it back to
+  SHOW, which after the owner switch could list fewer users with no error. A schema check that raises is logged once
+  per session.
+- **Admin ▸ App access names the statement that ran** in its lookup verdict, healthy or not ("Lookup OK: ... by CALL
+  ..."), so the switch is visible in the app. Its "Check:" hint matches the statement (for the CALL: which role to run
+  it as, and that an error means re-run V175 as SNOW_ACCOUNTADMINS, never as SNOW_SYSADMINS, whose copy would answer
+  as itself). The error-log context and the 'unverified' message name it too.
 - **When to apply.** Needed before the cutover when the SNOW_SYSADMINS preflight's S2 lists fewer DSA users than
   Z2; harmless before then (under today's owner the CALL lists what SHOW lists). Runbox: `V175_ADMIN_ROLE_MEMBERS.sql`
   with `PREFLIGHT_V175.sql` and `PART_B_V175.sql`.
-- **Repo.** validate.sql floor V001..V175 plus an SP_ADMIN_ROLE_MEMBERS presence row; teardown drops the procedure;
+- **Repo.** The CI smoke replay skips V175's GRANT (a production account role; the pattern names this one grant, so
+  any other GRANT still stops the smoke). validate.sql floor V001..V175 plus an SP_ADMIN_ROLE_MEMBERS presence row;
+  teardown drops the procedure;
   Admin ▸ Migrations expects V175; DEPLOYMENT, README, RUNBOOK §12 ("Rolling back V175": do not drop it while the
   version row exists) and the rebuild bundle follow. Tests lock the role literal to `config.ADMIN_ACCESS_ROLE`, COPY
   GRANTS and the SNOW_SYSADMINS grant, the CALL/SHOW switch on the gate, and that a failed CALL never makes an admin.

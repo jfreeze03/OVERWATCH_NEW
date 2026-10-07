@@ -188,7 +188,7 @@ def roster_summary(info: Mapping, *, now: float) -> dict[str, str]:
         noun = "member" if n == 1 else "members"
         return {"state": "ok", "detail": "",
                 "headline": (f"Lookup OK: {n} direct user {noun} of {role} "
-                             f"(checked {_age(info.get('roster_at'), now)} ago).")}
+                             f"(checked {_age(info.get('roster_at'), now)} ago, by {lookup}).")}
     if status == "lookup_failed":
         return {"state": "unavailable", "detail": detail,
                 "headline": (f"The admin-role lookup failed ({lookup}). Viewers not on "
@@ -213,8 +213,8 @@ def lookup_check_hint(info: Mapping) -> str:
     lookup = str(info.get("roster_lookup") or "")
     if lookup.upper().startswith("CALL "):
         return (f"Check: run {lookup} as the role that owns the app (USE SECONDARY ROLES NONE). An error means "
-                "that role cannot CALL it: re-run V175, which re-creates the procedure and grants USAGE to "
-                "SNOW_SYSADMINS. If it lists no granted_to = USER row, the procedure's owner (the role that "
+                "that role cannot CALL it: re-run V175 as SNOW_ACCOUNTADMINS (the procedure must stay owned by that "
+                "role, which sees every grant), which re-creates it and grants USAGE to SNOW_SYSADMINS. If it lists no granted_to = USER row, the procedure's owner (the role that "
                 f"applied V175) cannot see {role}'s grants. The named admins are unaffected.")
     return (f"Check: run SHOW GRANTS OF ROLE {role} as SNOW_ACCOUNTADMINS (USE SECONDARY ROLES NONE). It must "
             "list each member as a granted_to = USER row; if it errors or lists none, the owner role cannot see "

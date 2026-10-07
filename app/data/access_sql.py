@@ -72,4 +72,6 @@ def call_admin_role_members_sql() -> str:
 
     A read: session._admin_role_rows collects it directly, never through the write executor, so it needs no
     admin entitlement (it is what decides entitlement) and invalidates no cache domain."""
-    return f"CALL {core_object(ADMIN_MEMBERS_PROC)}()"
+    # the literal name keeps the CALL visible to tests/test_proc_domain_invalidation.py's grep (a lock there
+    # requires it to equal ADMIN_MEMBERS_PROC)
+    return f"CALL {core_object('SP_ADMIN_ROLE_MEMBERS')}()"
