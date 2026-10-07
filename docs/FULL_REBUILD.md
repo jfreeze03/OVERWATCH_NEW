@@ -421,7 +421,11 @@ snowflake/loader_chain_check.sql when you need task-state diagnosis.)
 ## 7. Redeploy the app
 
 Push the current build to the stage / Streamlit-in-Snowflake as usual
-(DEPLOYMENT.md). The app expects V001 through its own tip: Admin ▸
+(DEPLOYMENT.md), then re-run roles.sql's Streamlit block (DEPLOYMENT.md §2);
+it must return 'Streamlit grants OK'. The deploy re-creates the app object
+and drops the USAGE step 4 granted to all four access roles, so until the
+block runs only the owning role can open the app. The app expects V001
+through its own tip: Admin ▸
 Migrations & freshness shows any drift, and validate.sql's first row checks
 the full chain.
 

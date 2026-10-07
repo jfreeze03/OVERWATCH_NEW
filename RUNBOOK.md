@@ -41,9 +41,10 @@ labels and generates (never silently executes) the SQL to fix what it finds.
 - Roles: the owner decision of 2026-10-05 (superseding 2026-07-13's "two
   roles") names four roles: **SNOW_ACCOUNTADMINS**, **SNOW_SYSADMINS**,
   **SNOW_PRI_GFR_PRD_ALFA_DSA** and **SNOW_PRI_GFR_PRD_ALFA_DTI** (the old
-  monitor/operator layer stays retired). `roles.sql` still grants the two
-  SNOW_* roles only; the Snowflake side for DSA and DTI is an owner change not
-  made in 4.610.0 (DEPLOYMENT.md §2). Under SiS the navigation profile and
+  monitor/operator layer stays retired). Since 4.610.1 `roles.sql` grants
+  all four USAGE on the database, schema and app (DSA and DTI get nothing
+  else) and its proof block accepts exactly those four; re-run its Streamlit
+  block after every deploy (DEPLOYMENT.md §2). Under SiS the navigation profile and
   the admin gate follow the viewer (`st.user`): the named admins
   (`config.OPERATOR_USERS`, no lookup) and direct user members of
   SNOW_PRI_GFR_PRD_ALFA_DSA (checked live with `SHOW GRANTS OF ROLE`, fail
@@ -95,8 +96,8 @@ on Cost Intelligence → Spend & Attribution (Unmapped entities) until a
 `COMPANY_SCOPE` row maps it, so nothing silently bills ALFA. User `KEBARR1`
 holds both companies' roles and is classified **ALFA** by explicit
 override. This is a convenience scope on a shared account, not a security
-boundary. Who can open the app is USAGE on the Streamlit object (today the
-two SNOW_* roles roles.sql grants; the 2026-10-05 decision names four, §1);
+boundary. Who can open the app is USAGE on the Streamlit object (the four
+access roles of the 2026-10-05 decision, which roles.sql grants, §1);
 inside it every query runs with the owner's rights, so page visibility and
 writes are keyed on the viewer (`session.viewer_access`: `config.OPERATOR_USERS`,
 then a direct SNOW_PRI_GFR_PRD_ALFA_DSA grant, else MONITOR).
@@ -170,7 +171,11 @@ every upgrade) and
 `snow streamlit deploy --replace`, from a clean, committed tree: it ships
 `snowflake.yml`'s artifacts as they are on disk, including the two
 snowflake/ templates every viewer can read on Alerts ▸ Native delivery
-(DEPLOYMENT.md §3).
+(DEPLOYMENT.md §3). Then re-run roles.sql's Streamlit block (the
+`GRANT USAGE` lines through its proof block, which must return 'Streamlit
+grants OK'): the deploy re-creates the app object and drops its USAGE
+grants, so until then only the owning role can open the app. Database and
+schema USAGE are untouched by a deploy (DEPLOYMENT.md §2).
 
 **Deploy order and the schema gate (since 4.602).** Every app read of a
 column a migration adds, and every caption that describes a migration's new
@@ -1233,6 +1238,12 @@ exact: a username differing from the grantee name only by case is a different us
 writes within about 15 seconds and on pages within about 5 minutes (at once after 'Refresh data'); a role admin
 whose membership cannot be confirmed at write time (revoked, failed or empty lookup) is refused.
 
+**A DSA, DTI or SNOW_* holder gets "does not exist or not authorized" opening the app right after a deploy.**
+`snow streamlit deploy --replace` re-created the app object, which drops every USAGE grant on it (database and
+schema USAGE survive). Re-run roles.sql's Streamlit block, the `GRANT USAGE` lines through its proof block, as
+SNOW_ACCOUNTADMINS; it must return 'Streamlit grants OK'. Admin ▸ App access ▸ Who can open the app lists the
+missing roles meanwhile (a holder of the owning role can still open the app).
+
 **Everything is stale.** `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` (or Admin ▸ Migrations &
 freshness ▸ Task health) —
 suspended tasks are the usual cause (a failed run suspends after retries).
@@ -1424,7 +1435,8 @@ the same day.
       V078 first-fill keyed a year of Cortex Code rows on the stored offset,
       and the loader's Central MERGE never deletes them.
 5. **Bad deploy:** `snow streamlit deploy --replace` from the previous git
-   tag. Migrations are additive; no schema rollback exists or is needed.
+   tag, then roles.sql's Streamlit block (the deploy drops the app's USAGE
+   grants). Migrations are additive; no schema rollback exists or is needed.
 6. **Verify after any recovery:** validate.sql all OK → Admin canary all
    PASS → freshness board green after the next hourly run.
 

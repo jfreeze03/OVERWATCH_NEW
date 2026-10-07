@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.610.1 - roles.sql grants the two access roles (2026-10-06)
+
+The owner asked on 2026-10-06 for `roles.sql` to include SNOW_PRI_GFR_PRD_ALFA_DSA and SNOW_PRI_GFR_PRD_ALFA_DTI.
+This finishes the Snowflake side of the 2026-10-05 access decision that 4.610.0 left open. No migration; the app
+change is wording only.
+
+- **roles.sql grants DSA and DTI USAGE on the database, the schema and the app, and nothing else.** No table, view,
+  warehouse or IMPORTED grants: the two SNOW_* roles keep their worksheet grants as before. Its proof block now
+  accepts exactly the four access roles. It stops with -20012 when one of them lacks USAGE on the app, and with
+  -20011 when anything else holds it, whatever the grantee's kind (a user, a database or application role, or any
+  other role; the old block counted roles only). `snowflake/rebuild/03_roles.sql` is regenerated to match.
+- **After every deploy, re-run roles.sql's Streamlit block** (the GRANT USAGE lines through its proof block, which
+  must return 'Streamlit grants OK'). `snow streamlit deploy --replace` re-creates the app object, which drops its
+  USAGE grants; the database, the schema and every other object are untouched. The 2026-10-06 preflight confirmed
+  it: the app's created_on was the last deploy (2026-10-05 08:44) while the schema's was 2026-05-26. Until the block
+  runs, only the owning role can open the app. DEPLOYMENT.md §2 and §3, the release checklist and the RUNBOOK say so.
+- **The DSA lookup works.** Preflight P1 confirmed that SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA lists 6 direct
+  users: the 5 named admins and LD8283.
+- **Admin ▸ App access follows roles.sql.** `config.ROLES_SQL_APP_GRANTEES` is now all four roles, so a missing DSA
+  or DTI grant reads like a missing SNOW_* grant: re-run roles.sql's Streamlit block (-20012 meanwhile). The "not
+  granted by roles.sql yet (owner-side change pending)" wording and the -20011 warning for a hand-made DSA or DTI
+  grant no longer appear, and "Make someone an admin" drops its "only of someone who can open the app" caveat (the
+  grant review above it covers a lost grant). Any unexpected grantee now says roles.sql raises -20011 on it,
+  matching the new proof block. "How access works" says roles.sql grants all four and that its Streamlit block is
+  re-run after every deploy.
+- **Tests.** The strict xfail that waited for this change is gone: roles.sql's proof block is now locked to the same
+  rule Admin ▸ App access applies. The App access tests assert the four-role wording, and still cover the
+  pending wording (kept for a role the decision ever adds before roles.sql grants it) by pinning the managed set to
+  the two SNOW_* roles. The proof-block lock also checks which count raises which error: `bad > 0` raises
+  unexpected_grantee (-20011), `present < 4` raises missing_grantee (-20012), and both checks run before the block
+  returns 'Streamlit grants OK'. The grant lock reads lowercase and mixed-case grants too, so a lowercase extra
+  grant to DSA or DTI fails it.
+- **docs/FULL_REBUILD.md step 7** re-runs roles.sql's Streamlit block after the redeploy. Step 4 ran roles.sql
+  before it, and the redeploy drops the app's USAGE for all four roles.
+
 ## 4.610.0 - Role-based access: SNOW_PRI_GFR_PRD_ALFA_DSA members are OVERWATCH admins, everyone else gets a two-page read-only view, admins edit alert rules in-app, and V174 watches the new admin role (2026-10-05)
 
 Owner decision 2026-10-05, superseding 2026-07-13's "Access = SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period". The

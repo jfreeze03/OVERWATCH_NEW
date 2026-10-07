@@ -683,18 +683,22 @@ warehouse usage), which also actively retires the old
 OVERWATCH_MONITOR / OVERWATCH_OPERATOR layer. Direct user members of
 **SNOW_PRI_GFR_PRD_ALFA_DSA** are OVERWATCH admins and
 **SNOW_PRI_GFR_PRD_ALFA_DTI** is view-only; the app decides that per viewer
-(below). As of 4.610.0 `roles.sql` and its `SHOW GRANTS ON STREAMLIT` proof
-block still cover only the two SNOW_* roles: the Snowflake side for DSA and
-DTI is an owner change this release does not make, so until it lands their
-members cannot open the app.
+(below). Since 4.610.1 `roles.sql` grants all four roles USAGE on the
+database, the schema and the app. DSA and DTI get those three grants and
+nothing else (no table, view, warehouse or IMPORTED grants). Its
+`SHOW GRANTS ON STREAMLIT` proof block accepts exactly the four: it stops
+with -20012 when one of them lacks USAGE on the app, and with -20011 when
+anything else holds it (a user, a database or application role, or any
+other role).
 
-**Hazard until roles.sql is updated:** once DSA or DTI holds USAGE on the
-app, re-running the current `roles.sql` (the apply order above, and the
-re-grant after every deploy) stops at its proof block with -20011 ("access
-is two roles only"), and keeps stopping there until `roles.sql` itself is
-updated for the four roles. That block predates the 2026-10-05 decision: for
-DSA and DTI the error means the block is out of date, not that the grant is
-stray. Admin ▸ App access says the same on the role's row.
+**After every `snow streamlit deploy --replace`, re-run roles.sql's
+Streamlit block**: the `GRANT USAGE` lines through its proof block, which
+must return 'Streamlit grants OK'. The deploy re-creates the app object, and
+that drops every USAGE grant on it, so until the block runs only the owning
+role can open the app. Database and schema USAGE, and every other object,
+are untouched by a deploy (the 2026-10-06 preflight confirmed it: the app's
+created_on was the last deploy, 2026-10-05 08:44, while the schema's was
+2026-05-26). Admin ▸ App access shows a missing role with the same remedy.
 
 **OVERWATCH is an owner's-rights service.** Streamlit-in-Snowflake executes
 every query with the app owner's privileges, not the viewer's role. The
@@ -768,13 +772,12 @@ accounts for:
   the revokes block accidents, not adversaries; export on a schedule if an
   auditor needs stronger guarantees.
 - `roles.sql` ends with a `SHOW GRANTS ON STREAMLIT` proof block: every
-  grantee should be one of the allowed roles, and the output says so. As of
-  4.610.0 that block still allows the two SNOW_* roles only, while Admin ▸
-  App access ▸ Who can open the app compares the grantees with the four roles
-  the 2026-10-05 decision names (so it reports DSA and DTI as missing, "not
-  granted by roles.sql yet", until the owner's Snowflake-side change lands;
-  `config.ROLES_SQL_APP_GRANTEES` is pinned to roles.sql by test and flips the
-  wording in the same change).
+  USAGE grantee must be one of the four access roles, all four must be
+  present, and the output says so. Admin ▸ App access ▸ Who can open the app
+  applies the same rule to a live `SHOW GRANTS ON STREAMLIT` (read-only), so a
+  role a deploy dropped shows there as missing, with the re-run remedy.
+  `config.ROLES_SQL_APP_GRANTEES` is pinned to roles.sql's grants and proof
+  block by test, so the in-app wording changes with the file.
 
 ## 3. Streamlit-in-Snowflake (primary target)
 
@@ -786,6 +789,10 @@ table enabled). `snowflake.yml` pins the deploy there.
 # Snowflake CLI (uploads artifacts to OVERWATCH_STAGE, creates/updates the app)
 snow streamlit deploy --replace
 ```
+
+Then re-run roles.sql's Streamlit block (§2): `--replace` re-creates the app
+object and drops its USAGE grants, so until that block returns 'Streamlit
+grants OK' only the owning role can open the app.
 
 Deploy from a clean, committed tree: the deploy uploads whatever is on
 disk, but the secret scan (tests/test_no_committed_secrets.py) checks only
@@ -830,9 +837,8 @@ app picks them up on next open.
 `snowflake.yml` defines the app (`streamlit_app.py`, `query_warehouse:
 WH_ALFA_ADMIN`); `environment.yml` pins the Snowflake-channel packages.
 Queries execute with the app owner's rights; USAGE on the Streamlit object
-decides who can open the app (today the two SNOW_* roles `roles.sql` grants;
-see §2 for the 2026-10-05 decision), and the in-app admin check (§2) decides
-who can change things.
+decides who can open the app (the four access roles `roles.sql` grants, §2),
+and the in-app admin check (§2) decides who can change things.
 
 ## 4. Local development (dev only)
 
@@ -919,7 +925,8 @@ V078 first-fill keyed a year of Cortex Code rows on the stored offset) -> step 7
   SETTINGS / DEPARTMENT_MAP / routes, then roles.sql + validate.sql. Facts refill
   from the loader tasks (history limited to ACCOUNT_USAGE retention). See RUNBOOK §16.
 - **App broken after deploy:** `snow streamlit deploy --replace` with the
-  previous git tag; migrations are additive so no schema rollback is needed.
+  previous git tag, then roles.sql's Streamlit block (§2); migrations are
+  additive so no schema rollback is needed.
 - **"Failed to retrieve packages... Have you enabled External Access
   Integration (EAI)?" / pypi.org DNS errors on load:** the app is running on
   the CONTAINER runtime. Snowsight's editor defaults new deploys to it, and
@@ -949,7 +956,9 @@ V078 first-fill keyed a year of Cortex Code rows on the stored offset) -> step 7
    never re-applied), except a "live task not in expected set" row for each
    opt-in task you installed (alert_drill.sql's TASK_ALERT_DRILL,
    ml_forecast_option.sql's TASK_REFRESH_ML_FORECAST).
-4. `snow streamlit deploy --replace`, from a clean, committed tree (§3).
+4. `snow streamlit deploy --replace`, from a clean, committed tree (§3),
+   then re-run roles.sql's Streamlit block (§2; it must return 'Streamlit
+   grants OK').
 5. Check app settings → runtime = **Run on warehouse**. If save reports a
    retained `ARTIFACT_REPOSITORIES` setting, run
    `snowflake/warehouse_runtime_reset.sql` as the app-owning role (see §6).

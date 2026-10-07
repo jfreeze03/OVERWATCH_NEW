@@ -157,6 +157,20 @@ def test_full_rebuild_restores_delivery_without_duplicates_or_lost_grants():
     assert not missing, missing
 
 
+def test_full_rebuild_redeploy_re_runs_the_streamlit_grants():
+    """review 4.610.1 #3: step 4 runs roles.sql before step 7 redeploys, and the deploy (CREATE OR REPLACE
+    STREAMLIT, no COPY GRANTS) drops the app's USAGE for all four access roles, so step 7 re-runs roles.sql's
+    Streamlit block, as DEPLOYMENT.md §2/§3 do after every deploy, and checks its proof block's answer."""
+    fr = read("docs/FULL_REBUILD.md")
+    assert fr.index("## 4. Grants") < fr.index("## 7. Redeploy the app")
+    step7 = " ".join(_section(fr, "## 7. Redeploy the app", "## 7b. Re-install the opt-in objects").split())
+    assert "re-run roles.sql's Streamlit block (DEPLOYMENT.md §2)" in step7, step7
+    assert "it must return 'Streamlit grants OK'" in step7, step7
+    assert "drops the USAGE step 4 granted" in step7, step7
+    dep = " ".join(read("DEPLOYMENT.md").split())
+    assert "re-run roles.sql's Streamlit block" in dep and "must return 'Streamlit grants OK'" in dep
+
+
 def test_manual_deploy_path_uploads_every_app_folder():
     """R1-322 / R1-340: PUT does not recurse, so every folder holding app files is listed."""
     dep = read("DEPLOYMENT.md")

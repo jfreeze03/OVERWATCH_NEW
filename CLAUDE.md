@@ -192,12 +192,14 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   account-level levers. SNOW_ACCOUNTADMINS + SNOW_SYSADMINS keep roles.sql's
   object grants; DSA/DTI get no worksheet grants (USAGE on the database,
   schema and Streamlit only). The monitor/operator role layer stays retired;
-  audit tables keep append-only REVOKEs (accident-proofing). **Pending owner:**
-  roles.sql's six DSA/DTI USAGE grants and four-role -20011/-20012 proof block
-  were not made in v4.610.0 (the xfail(strict) lock in
-  `tests/test_admin_access_tab.py` flips when they land); until then DSA/DTI
-  cannot open the app, and a hand-made grant trips -20011 on the next
-  roles.sql run.
+  audit tables keep append-only REVOKEs (accident-proofing). **roles.sql
+  (owner request 2026-10-06, v4.610.1)** grants DSA and DTI those six USAGE
+  grants and nothing else, and its -20011/-20012 proof block accepts exactly
+  the four roles, any grantee kind (`config.ROLES_SQL_APP_GRANTEES` =
+  APP_ACCESS_ROLES, pinned to roles.sql by `tests/test_admin_access_tab.py`).
+  Every `snow streamlit deploy --replace` re-creates the app object and drops
+  its USAGE grants (database/schema USAGE survive): re-run roles.sql's
+  Streamlit block after each deploy.
 - **Task monitoring STAYS** (2026-07-13 correction: "i meant getting rid of
   resource monitor, not task monitoring"). V045 restored it end-to-end.
 - **Resource monitors are GONE** (same correction). OVERWATCH_RM was

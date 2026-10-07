@@ -1163,12 +1163,15 @@ def _access_tab() -> None:
     Read-only. Its one side effect is 'Re-check now', which forgets THIS viewer's own access memo and
     resolves it again with one fresh lookup (session.recheck_access). It never touches another viewer's
     session (the warehouse runtime gives each viewer their own app instance) and writes nothing."""
+    # 4.610.1: roles.sql grants all four access roles, so pending is empty; the branch stays so a role the
+    # decision adds ahead of roles.sql is never described as granted (tests monkeypatch it to cover the wording)
     pending = access_review.pending_roles()
+    managed = ", ".join(ROLES_SQL_APP_GRANTEES)
     panel_help(
         "Who can open OVERWATCH, and who can change things in it. Opening the app is Snowflake's USAGE grant "
-        "on the Streamlit: the 2026-10-05 decision names four roles to hold it, and snowflake/roles.sql grants "
-        f"{', '.join(ROLES_SQL_APP_GRANTEES)} today"
-        + (f" ({', '.join(pending)}: an owner-side change still pending)" if pending else "")
+        "on the Streamlit: the 2026-10-05 decision names four roles to hold it, and snowflake/roles.sql "
+        + (f"grants {managed} today ({', '.join(pending)}: an owner-side change still pending)" if pending
+           else "grants all four")
         + ". Changing things is decided in the app, per "
         f"viewer: the named admins (config OPERATOR_USERS) and DIRECT user members of {ADMIN_ACCESS_ROLE} "
         "are admins, and everyone else who can open the app gets the view-only pages. Red here means a check "
@@ -1277,15 +1280,17 @@ def _access_tab() -> None:
                 empty_state("clean", "Exactly the four access roles hold USAGE on the app; no other grantee.")
             if review["ahead"]:
                 # holistic 4.610 #0/#7: a role roles.sql does not grant yet holds USAGE (a hand-made grant). The
-                # page is right that it may; today's roles.sql is not, so say what its next run will do.
+                # page is right that it may; that roles.sql is not, so say what its next run will do. Never
+                # shown since 4.610.1 (roles.sql grants all four); kept for a role added ahead of roles.sql.
                 ahead = review["ahead"]
                 st.warning(f"{', '.join(ahead)} {'holds' if len(ahead) == 1 else 'hold'} USAGE on the app, but "
                            "roles.sql does not grant "
                            f"{'it' if len(ahead) == 1 else 'them'} yet (owner-side change pending): its current "
                            "proof block raises -20011 on its next run until it is updated.")
             if review["missing"]:
-                # holistic 4.610 #0: the remedy is split on what roles.sql grants today. Re-running roles.sql
-                # restores only its own grants; any other access role is the owner's pending change.
+                # holistic 4.610 #0: the remedy is split on what roles.sql grants (all four since 4.610.1).
+                # Re-running roles.sql restores only its own grants; a role it does not grant would need
+                # roles.sql itself changed first.
                 # OWNERSHIP implies every privilege: an owning role still opens the app without its explicit
                 # USAGE grant, so only the non-owners are locked out.
                 locked_out = [r for r in review["missing"] if r not in review["owners"]]
@@ -1293,9 +1298,9 @@ def _access_tab() -> None:
                 parts = []
                 if review["missing_rerun"]:
                     parts.append(f"No explicit USAGE grant for {', '.join(review['missing_rerun'])}: roles.sql "
-                                 "grants one to each of them. Re-run snowflake/roles.sql's Streamlit grants (a "
-                                 "`snow streamlit deploy --replace` or CREATE OR REPLACE STREAMLIT can drop them; "
-                                 "its proof block raises -20012 meanwhile).")
+                                 "grants one to each of them. Re-run snowflake/roles.sql's Streamlit block (every "
+                                 "`snow streamlit deploy --replace` or CREATE OR REPLACE STREAMLIT re-creates the "
+                                 "app and drops its USAGE grants; its proof block raises -20012 meanwhile).")
                 if review["missing_pending"]:
                     pend = review["missing_pending"]
                     one = len(pend) == 1
@@ -1311,11 +1316,10 @@ def _access_tab() -> None:
                                  f"{'its' if len(owning) == 1 else 'their'} members still open it.")
                 st.warning(" ".join(parts))
             if review["unexpected"]:
-                # roles.sql's current block counts only granted_to = ROLE rows, so -20011 is promised for those
-                role_kind = any(u.startswith("ROLE ") for u in review["unexpected"])
+                # roles.sql's proof block (4.610.1) counts every USAGE row that is not an access ROLE, any kind
                 st.error(f"USAGE granted outside the four access roles: {', '.join(review['unexpected'])}. "
-                         "REVOKE it: anyone holding it can open the app and gets the view-only pages"
-                         + (" (roles.sql's proof block raises -20011 on a ROLE grantee)." if role_kind else "."))
+                         "REVOKE it: anyone holding it can open the app and gets the view-only pages "
+                         "(roles.sql's proof block raises -20011 on any of them).")
             styled_table(pd.DataFrame(review["table"]))
             if review["owners"]:
                 st.caption(f"OWNERSHIP: {', '.join(review['owners'])}. Every viewer's SQL runs with the owner "
@@ -1325,12 +1329,14 @@ def _access_tab() -> None:
 
     section_header("How access works", "", "admin")
     view_pages = " and ".join(access_review.profile_pages(VIEWER_UNKNOWN_PROFILE)) or "—"
-    managed = ", ".join(ROLES_SQL_APP_GRANTEES)
     st.markdown("\n".join([
         "- **Opening the app**: a role that holds USAGE on it opens it; the 2026-10-05 decision names the four "
-        f"roles above. `snowflake/roles.sql` grants and proves {managed} today: its proof block fails on a "
-        "missing one (-20012) and on any other ROLE grantee (-20011). Re-run roles.sql after every "
-        "`snow streamlit deploy --replace` until a redeploy is confirmed to keep the grants."
+        "roles above. `snowflake/roles.sql` "
+        + (f"grants and proves {managed} today" if pending
+           else "grants all four USAGE on the database, schema and app (nothing else) and proves that exact set")
+        + ": its proof block fails on a missing one (-20012) and on any other grantee (-20011). Every "
+        "`snow streamlit deploy --replace` re-creates the app and drops its USAGE grants (the database and "
+        "schema grants survive), so re-run roles.sql's Streamlit block after each deploy."
         + (f" {', '.join(pending)}: not granted by roles.sql yet (owner-side change pending). Until each of "
            "them holds USAGE on the database, schema and app, their members open the app only through another "
            "role that holds it; once they do, roles.sql's current proof block raises -20011 on its next run."

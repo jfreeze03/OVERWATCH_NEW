@@ -11,8 +11,8 @@ proof of "no members", and the caller treats it as unverified (read-only), never
 
 SHOW GRANTS ON STREAMLIT lists who holds a privilege on the app itself (USAGE = who can open it; OWNERSHIP =
 whose rights every viewer runs with). Admin ▸ App access reads it (read-only) to compare the USAGE grantees
-with the four config.APP_ACCESS_ROLES the 2026-10-05 decision names (snowflake/roles.sql's -20011/-20012 proof
-block grants and pins only config.ROLES_SQL_APP_GRANTEES until the owner's pending change lands). The ON form is
+with the four config.APP_ACCESS_ROLES the 2026-10-05 decision names (since 4.610.1 snowflake/roles.sql grants
+all four and its -20011/-20012 proof block accepts exactly that set). The ON form is
 allowed in owner's-rights code, and the owner role owns the app, so it always sees at least its own
 OWNERSHIP row: an empty answer is unverified, never "no grantees".
 
