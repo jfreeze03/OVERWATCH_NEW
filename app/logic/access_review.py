@@ -180,6 +180,7 @@ def roster_summary(info: Mapping, *, now: float) -> dict[str, str]:
     privilege gap or an empty role, read-only until it recovers, and never a clean "no members"), or
     'not_checked' (no lookup ran in this session: off Streamlit-in-Snowflake)."""
     role = str(info.get("admin_role") or ADMIN_ACCESS_ROLE)
+    lookup = str(info.get("roster_lookup") or f"SHOW GRANTS OF ROLE {role}")   # V175: the CALL once applied
     status = str(info.get("roster_status") or "not_checked")
     detail = str(info.get("roster_error") or "")
     if status == "ok":
@@ -187,19 +188,37 @@ def roster_summary(info: Mapping, *, now: float) -> dict[str, str]:
         noun = "member" if n == 1 else "members"
         return {"state": "ok", "detail": "",
                 "headline": (f"Lookup OK: {n} direct user {noun} of {role} "
-                             f"(checked {_age(info.get('roster_at'), now)} ago).")}
+                             f"(checked {_age(info.get('roster_at'), now)} ago, by {lookup}).")}
     if status == "lookup_failed":
         return {"state": "unavailable", "detail": detail,
-                "headline": (f"The admin-role lookup failed (SHOW GRANTS OF ROLE {role}). Viewers not on "
+                "headline": (f"The admin-role lookup failed ({lookup}). Viewers not on "
                              "OPERATOR_USERS are read-only until it recovers.")}
     if status == "unverified":
         return {"state": "unavailable", "detail": detail,
-                "headline": (f"The admin-role lookup is unverified: SHOW GRANTS OF ROLE {role} listed no USER "
-                             "grantee. That is a privilege gap or an empty role, never read as 'no members'. "
+                "headline": (f"The admin-role lookup is unverified: {lookup} listed no USER grantee of "
+                             f"{role}. That is a privilege gap or an empty role, never read as 'no members'. "
                              "Viewers not on OPERATOR_USERS are read-only until it lists them.")}
     return {"state": "not_checked", "detail": "",
             "headline": ("The admin-role lookup runs only on Streamlit-in-Snowflake, as the app owner. Off "
                          "SiS the role -> profile map decides access.")}
+
+
+def lookup_check_hint(info: Mapping) -> str:
+    """What to run by hand when the admin-role lookup is unavailable, for the statement it actually ran.
+
+    SHOW (before V175) answers as the app owner, so check it as that role. V175's CALL answers as the
+    procedure's owner: an error there means the app owner cannot CALL it (no USAGE, or the procedure is gone),
+    and no USER row means the procedure's owner cannot see the role's grants."""
+    role = str(info.get("admin_role") or ADMIN_ACCESS_ROLE)
+    lookup = str(info.get("roster_lookup") or "")
+    if lookup.upper().startswith("CALL "):
+        return (f"Check: run {lookup} as the role that owns the app (USE SECONDARY ROLES NONE). An error means "
+                "that role cannot CALL it: re-run V175 as SNOW_ACCOUNTADMINS (the procedure must stay owned by that "
+                "role, which sees every grant), which re-creates it and grants USAGE to SNOW_SYSADMINS. If it lists no granted_to = USER row, the procedure's owner (the role that "
+                f"applied V175) cannot see {role}'s grants. The named admins are unaffected.")
+    return (f"Check: run SHOW GRANTS OF ROLE {role} as SNOW_ACCOUNTADMINS (USE SECONDARY ROLES NONE). It must "
+            "list each member as a granted_to = USER row; if it errors or lists none, the owner role cannot see "
+            "the role's grants. The named admins are unaffected.")
 
 
 def _row_mapping(row: object) -> dict:

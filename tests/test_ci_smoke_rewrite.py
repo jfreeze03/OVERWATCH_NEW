@@ -85,7 +85,8 @@ def test_only_the_account_level_statements_are_skipped():
     assert sorted(skipped) == ["migrations/V002__facts.sql", "migrations/V006__pipeline_sla.sql",
                                "migrations/V007__automation.sql", "migrations/V008__chargeback.sql",
                                "migrations/V045__task_monitoring_restored.sql",
-                               "migrations/V158__operator_backup_generations.sql"]
+                               "migrations/V158__operator_backup_generations.sql",
+                               "migrations/V175__admin_role_members_proc.sql"]
     assert len(skipped["migrations/V002__facts.sql"]) == 4      # CREATE + 2 ALTER WAREHOUSE + monitor
     for rel, (src, new, _why) in copies.items():
         # same line count; a line either matches the source after the substitutions or is a skipped one
