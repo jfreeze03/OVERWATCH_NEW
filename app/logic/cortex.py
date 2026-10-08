@@ -567,12 +567,13 @@ def coco_model_mix(win: pd.DataFrame | None, by: tuple[str, ...] = ()) -> pd.Dat
     """Per model (within each ``by`` group, e.g. per USAGE_DATE or per USER_NAME): the 15 measures summed, USERS,
     and the derived TOKENS / CACHE_HIT_PCT / CREDITS_PER_REQUEST / CREDITS_PER_1M_TOKENS / SHARE_PCT.
 
-    '(no model breakdown)' is folded into COCO_UNATTRIBUTED. Per group, a residual sum(REQUEST_TOKEN_CREDITS) -
-    sum(COCO_CREDITS) of at least COCO_RESIDUAL_MIN_CREDITS goes onto COCO_UNATTRIBUTED (positive) or
-    COCO_OVER_ATTRIBUTED (negative), creating the row if needed, so per group sum(COCO_CREDITS) equals
-    sum(REQUEST_TOKEN_CREDITS) within that minimum: the model rows add back to the request totals and nothing is
-    silently dropped. A pseudo row's USERS counts the users whose own residual points the same way; a pseudo row
-    below the minimum with no requests is dropped. Ratios on a pseudo row are NaN (its credits are a residual, not
+    '(no model breakdown)' is folded into COCO_UNATTRIBUTED. The residual is built per USER inside each group:
+    a user's sum(REQUEST_TOKEN_CREDITS) - sum(COCO_CREDITS) of at least COCO_RESIDUAL_MIN_CREDITS goes onto
+    COCO_UNATTRIBUTED (positive) or COCO_OVER_ATTRIBUTED (negative), creating the row if needed. So a pseudo row is
+    exactly the sum of its per-user drill (coco_model_users), mixed signs never net into one smaller row (both rows
+    can appear), and per group sum(COCO_CREDITS) equals sum(REQUEST_TOKEN_CREDITS) within the minimum per user:
+    the model rows add back to the request totals and nothing is silently dropped. A pseudo row's USERS counts the
+    users in it; a pseudo row below the minimum with no requests is dropped. Ratios on a pseudo row are NaN (its credits are a residual, not
     the price of its requests). Sorted by the ``by`` columns, then COCO_CREDITS descending."""
     cols = [*by, "MODEL_NAME", *_COCO_SUM, *_COCO_MIX_DERIVED]
     if win is None or win.empty:
@@ -586,20 +587,17 @@ def coco_model_mix(win: pd.DataFrame | None, by: tuple[str, ...] = ()) -> pd.Dat
     out = keyed[list(_COCO_SUM)].sum()
     out["USERS"] = keyed["USER_NAME"].nunique()
     out = out.reset_index()
-    # The per-group residual, and per group the users whose own residual points each way.
+    # The residual per USER inside each group (review r1: a group-level net let the summary row disagree with
+    # its drill -- mixed signs netted away, many sub-minimum users summed into a row with USERS 0 and no drill).
     pair = ["REQUEST_TOKEN_CREDITS", "COCO_CREDITS"]
-    tot = df.groupby(grp, dropna=False)[pair].sum()
-    res = (tot["REQUEST_TOKEN_CREDITS"] - tot["COCO_CREDITS"]).rename("_RESID").reset_index()
     per_user = df.groupby(list(dict.fromkeys([*grp, "USER_NAME"])), dropna=False)[pair].sum()
-    user_res = per_user["REQUEST_TOKEN_CREDITS"] - per_user["COCO_CREDITS"]
-    pos = (user_res >= COCO_RESIDUAL_MIN_CREDITS).groupby(level=grp, dropna=False).sum().rename("_POS")
-    neg = (user_res <= -COCO_RESIDUAL_MIN_CREDITS).groupby(level=grp, dropna=False).sum().rename("_NEG")
-    res = res[res["_RESID"].abs() >= COCO_RESIDUAL_MIN_CREDITS]
-    if not res.empty:
-        res = res.merge(pos.reset_index(), on=grp, how="left").merge(neg.reset_index(), on=grp, how="left")
-        _up = res["_RESID"] > 0
-        res["MODEL_NAME"] = pd.Series(COCO_UNATTRIBUTED, index=res.index).where(_up, COCO_OVER_ATTRIBUTED)
-        res["_RUSERS"] = res["_POS"].where(_up, res["_NEG"]).fillna(0)
+    user_res = (per_user["REQUEST_TOKEN_CREDITS"] - per_user["COCO_CREDITS"]).rename("_RESID").reset_index()
+    user_res = user_res[user_res["_RESID"].abs() >= COCO_RESIDUAL_MIN_CREDITS]
+    if not user_res.empty:
+        user_res["MODEL_NAME"] = (pd.Series(COCO_UNATTRIBUTED, index=user_res.index)
+                                  .where(user_res["_RESID"] > 0, COCO_OVER_ATTRIBUTED))
+        res = (user_res.groupby([*grp, "MODEL_NAME"], dropna=False)
+               .agg(_RESID=("_RESID", "sum"), _RUSERS=("USER_NAME", "nunique")).reset_index())
         out = out.merge(res[[*grp, "MODEL_NAME", "_RESID", "_RUSERS"]], on=[*grp, "MODEL_NAME"], how="outer")
         for col in _COCO_SUM:
             out[col] = out[col].fillna(0.0)

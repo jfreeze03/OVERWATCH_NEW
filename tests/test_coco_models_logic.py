@@ -135,6 +135,22 @@ def test_the_invariant_holds_per_group():
     assert math.isclose(over["COCO_CREDITS"], -0.2) and over["USERS"] == 1
 
 
+@pytest.mark.parametrize("pseudo", [COCO_UNATTRIBUTED, COCO_OVER_ATTRIBUTED])
+def test_a_pseudo_row_equals_the_sum_of_its_drill(pseudo):
+    """Review r1: mixed-sign residuals never net into one smaller row, and many sub-minimum gaps never sum into a
+    row with no users and an empty drill -- the summary row is the sum of coco_model_users for it."""
+    rows = [_row(_D1, "A", COCO_NO_BREAKDOWN, req_cr=10.0, cr=0.0),                  # +10 unattributed
+            _row(_D1, "B", "m", req_cr=1.0, cr=4.0)]                                   # -3 above the totals
+    rows += [_row(_D1, f"U{i}", "m", req_cr=1.0, cr=1.0 - COCO_RESIDUAL_MIN_CREDITS * 0.8) for i in range(300)]
+    win = coco_model_window(_frame(*rows), 30)
+    mix = coco_model_mix(win)
+    summary = mix[mix["MODEL_NAME"] == pseudo]
+    drill = coco_model_users(win, pseudo)
+    assert len(summary) == 1 and len(drill) == summary.iloc[0]["USERS"] == 1
+    assert math.isclose(summary.iloc[0]["COCO_CREDITS"], drill["COCO_CREDITS"].sum())
+    assert math.isclose(summary.iloc[0]["COCO_CREDITS"], 10.0 if pseudo == COCO_UNATTRIBUTED else -3.0)
+
+
 def test_a_residual_below_the_minimum_adds_no_row():
     win = coco_model_window(_frame(_row(_D1, "A", "m", req_cr=1.0, cr=1.0 - COCO_RESIDUAL_MIN_CREDITS / 2)), 30)
     mix = coco_model_mix(win)

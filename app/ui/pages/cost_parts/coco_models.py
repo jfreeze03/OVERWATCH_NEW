@@ -53,14 +53,16 @@ _SOURCE = ("SNOWFLAKE_COCO_USAGE_HISTORY (CREDITS_GRANULAR + TOKENS_GRANULAR by 
            "Desktop, 365d live, window cut in-app)")
 _MAX_ROWS = 200_000
 _IFACE_KEY = "coco_iface"
+_IFACE_OPTS_KEY = "coco_iface_opts"   # the option set the remembered pick was made against
 
 _MAIN_MODEL_NOTE = (
     "Main model = the model that carried the most credits in a request. One request can bill several models "
     "(for example a main model plus a smaller helper), so “Requests billing it” can add up to more than the "
     "request count, while “Main-model requests” adds up.")
 _SCOPE_NOTE = (
-    "Includes Cortex Code Desktop. AI users above (and the company showback and the CoCo spend tile) still read "
-    "Snowsight and the CLI only, so their Cortex Code spend is this panel's Snowsight + CLI part.")
+    "Includes Cortex Code Desktop. AI users above, the company showback and the CoCo spend tile still read "
+    "Snowsight and the CLI only (Desktop is not in them yet). For the same company and window, AI users' Cortex "
+    "Code spend matches this panel's Snowsight + CLI part.")
 
 
 def _usd(df: pd.DataFrame, cols: dict[str, str], ai_rate: float) -> pd.DataFrame:
@@ -102,17 +104,23 @@ def _render_failure(res: QueryResult) -> None:
 
 
 def _interfaces(full: pd.DataFrame) -> list[str]:
-    """The interface filter (zero queries): every interface in the window, all selected at first. A remembered
-    pick keeps only the interfaces still present (a company or window change can drop one); set before the
-    widget mounts, so no default= is passed."""
+    """The interface filter (zero queries): every interface in the window, all selected at first. When a company
+    or window change alters the option set, a pick that was ALL of the old options stays all (a newly present
+    interface joins it: review r1, a narrowed 'all' must never silently drop Desktop from every number), and a
+    strict subset the viewer chose keeps what is still present (all, if nothing is). Set before the widget
+    mounts, so no default= is passed."""
     options = sorted({str(s) for s in full["SOURCE"].dropna()})
     prev = st.session_state.get(_IFACE_KEY)
-    if not isinstance(prev, list):
+    prev_opts = st.session_state.get(_IFACE_OPTS_KEY)
+    if not isinstance(prev, list) or not isinstance(prev_opts, list):
         st.session_state[_IFACE_KEY] = list(options)
-    else:
-        kept = [s for s in prev if s in options]
-        if kept != prev:
+    elif prev_opts != options:
+        if set(prev) >= set(prev_opts):
+            st.session_state[_IFACE_KEY] = list(options)
+        else:
+            kept = [s for s in prev if s in options]
             st.session_state[_IFACE_KEY] = kept or list(options)
+    st.session_state[_IFACE_OPTS_KEY] = list(options)
     picked = st.multiselect("Interface", options, key=_IFACE_KEY,
                             help="Filters every number and table below; the Desktop share always reads all "
                                  "interfaces.")

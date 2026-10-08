@@ -381,7 +381,10 @@ def coco_model_usage_daily(company: str = "ALL") -> str:
       any gap to TOKEN_CREDITS becomes a visible '(not attributed to a model)' row in coco_model_mix, never a drop.
     * REQUESTS_USING: requests that billed this model. NOT additive across models (one request can bill several).
     * TOKENS_*: TOKENS_GRANULAR flattened on its own, aggregated to the same grain, then FULL OUTER JOINed (two
-      FLATTENs in one FROM multiply models x models; an inner join drops a model present on one side only).
+      FLATTENs in one FROM multiply models x models; an inner join drops a model present on one side only). Only
+      requests that also carry a CREDITS_GRANULAR breakdown lend tokens to a model (review r1): a request with
+      tokens but no credit breakdown puts its credits on '(no model breakdown)', so its tokens must not lower a
+      named model's credits per 1M tokens (its REQUEST_TOKENS still count on that row).
     * MODEL_NAME '(no model breakdown)' = a request with a NULL / empty CREDITS_GRANULAR (OUTER => TRUE keeps it);
       app.logic.cortex.COCO_NO_BREAKDOWN must equal this literal.
     * ROLE_NAME = METADATA:role_name, '(not recorded)' before the field existed.
@@ -467,6 +470,7 @@ tk_agg AS (
         SUM(IFF(IS_OBJECT(T.VALUE), 0, COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(T.VALUE)), 0))) AS TOKENS_OTHER
     FROM base B,
          LATERAL FLATTEN(INPUT => B.TOKENS_GRANULAR) T
+    WHERE ARRAY_SIZE(OBJECT_KEYS(B.CREDITS_GRANULAR)) > 0
     GROUP BY 1, 2, 3, 4, 5
 ),
 merged AS (

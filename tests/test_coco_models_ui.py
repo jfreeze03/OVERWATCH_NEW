@@ -134,3 +134,26 @@ def test_dollars_only_through_the_formula_at_the_ai_rate():
     assert "ACCOUNT_USAGE" not in src                          # live-scan budget 0; reach pinned in test_v451_trust
     for banned in ("st.info(", "st.success(", "st.warning(", "execute_statement", "st.button("):
         assert banned not in src, banned
+
+
+def test_the_interface_filter_widens_back_to_all(monkeypatch):
+    """Review r1: 'all' narrowed by a window with no Desktop must widen again when Desktop is back, while a
+    strict subset the viewer chose survives the change (the reproduced AppTest case: ['CLI'] stuck)."""
+    from app.ui.pages.cost_parts import coco_models as cm
+
+    state: dict = {}
+    fake_st = SimpleNamespace(session_state=state,
+                              multiselect=lambda _label, _options, key, **_k: state[key])
+    monkeypatch.setattr(cm, "st", fake_st)
+
+    def pick(*sources):
+        return cm._interfaces(pd.DataFrame({"SOURCE": list(sources)}))
+
+    assert pick("CLI", "Desktop", "Snowsight") == ["CLI", "Desktop", "Snowsight"]     # first paint: all
+    assert pick("CLI", "Snowsight") == ["CLI", "Snowsight"]                           # 7d: no Desktop
+    assert pick("CLI", "Desktop", "Snowsight") == ["CLI", "Desktop", "Snowsight"]     # back: Desktop rejoins
+    state[cm._IFACE_KEY] = ["CLI"]                                                    # the viewer narrows
+    assert pick("CLI", "Desktop", "Snowsight") == ["CLI"]                             # same options: kept
+    assert pick("CLI", "Snowsight") == ["CLI"]                                        # a strict pick survives
+    assert pick("CLI", "Desktop", "Snowsight") == ["CLI"]
+    assert pick("Desktop") == ["Desktop"]                                             # nothing left: all

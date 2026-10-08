@@ -92,6 +92,8 @@ def test_each_flatten_sits_alone_in_its_own_cte_and_no_lateral_is_left_of_a_join
     sql = _sql()
     assert "LATERAL FLATTEN(INPUT => B.CREDITS_GRANULAR, OUTER => TRUE) F" in sql   # no-breakdown requests kept
     assert "LATERAL FLATTEN(INPUT => B.TOKENS_GRANULAR) T" in sql
+    # review r1: a model's tokens come only from requests that also carry a credit breakdown
+    assert "WHERE ARRAY_SIZE(OBJECT_KEYS(B.CREDITS_GRANULAR)) > 0" in _cte(sql, "tk_agg")
     assert sql.count("LATERAL FLATTEN(") == 2
     assert _cte(sql, "cr").count("LATERAL") == 1 and _cte(sql, "tk_agg").count("LATERAL") == 1
     # 001072: the only LEFT JOIN is the users join on the merged CTE, never on a LATERAL
