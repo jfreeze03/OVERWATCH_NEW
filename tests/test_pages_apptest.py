@@ -44,7 +44,7 @@ def _stub_runtime(monkeypatch):
     from app.config import DEFAULT_SETTINGS
     from app.ui import ai_panel, attention, components, schema_gate
     from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security
-    from app.ui.pages.cost_parts import ai_chargeback, contract, optimize, spend
+    from app.ui.pages.cost_parts import ai_chargeback, coco_models, contract, optimize, spend
 
     monkeypatch.setattr(main_mod, "connection_available", lambda: True)
     monkeypatch.setattr(main_mod, "current_role", lambda: "SNOW_SYSADMINS")
@@ -54,7 +54,7 @@ def _stub_runtime(monkeypatch):
     monkeypatch.setattr(components, "load_settings", lambda _page: dict(settings))
 
     for module in (overview, control_room, cost, operations, alerts, security, admin,
-                   spend, contract, ai_chargeback, optimize, attention, schema_gate):
+                   spend, contract, ai_chargeback, coco_models, optimize, attention, schema_gate):
         if hasattr(module, "run"):
             monkeypatch.setattr(module, "run", _fake_run)
         if hasattr(module, "execute_statement"):

@@ -71,8 +71,10 @@ _DRILL_COVERAGE: dict[str, tuple[str, str, str]] = {
     # (cortex_sql.cortex_model_costs); USER grain exists only for Cortex Code (COCO below).
     "CORTEX": ("Function / model", "Cortex AI-functions usage", "Drill ready"),
     "AI": ("Function / model", "Cortex AI-functions usage", "Drill ready"),
-    # rec #48: Cortex Code / CoWork IS drilled to USER grain by the AI Chargeback tab.
-    "COCO": ("User / day", "FACT_AI_USAGE_DAILY (Cortex Code)", "Drill ready"),
+    # rec #48: Cortex Code / CoWork IS drilled to USER grain by the AI Chargeback tab; v4.612: and to MODEL by
+    # Chargeback & AI > Cortex Code models (cortex_sql.coco_model_usage_daily, all three interfaces).
+    "COCO": ("User / model / day", "FACT_AI_USAGE_DAILY (Cortex Code); models from SNOWFLAKE_COCO_USAGE_HISTORY",
+             "Drill ready"),
     # rec #42: AI_SERVICES aggregates Cortex functions PLUS Analyst / Search / Document AI /
     # Fine-tuning — none with a per-user drill.
     "AI_SERVICE": ("Service total", "AI services metering (no per-feature drill wired)",
@@ -168,7 +170,7 @@ _DRILL_BUILDERS: dict[str, tuple[str, ...]] = {
     "SNOWPARK_CONTAINER_SERVICES": ("cost_sql.compute_pool_usage",),
     "CORTEX": ("cortex_sql.cortex_model_costs",),
     "AI": ("cortex_sql.cortex_model_costs",),
-    "COCO": ("mart27_sql.ai_code_daily", "cortex_sql.cortex_code_user_daily"),
+    "COCO": ("mart27_sql.ai_code_daily", "cortex_sql.cortex_code_user_daily", "cortex_sql.coco_model_usage_daily"),
     "QUERY_ACCELERATION": ("cost_sql.qas_roi", "cost_sql.qas_eligible_queries"),
     "PIPE": ("cost_sql.object_cost_top", "cost_sql.object_cost_by_arm"),
     "SNOWPIPE": ("cost_sql.object_cost_top", "cost_sql.object_cost_by_arm"),
