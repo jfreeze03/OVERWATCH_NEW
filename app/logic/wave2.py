@@ -35,6 +35,15 @@ def _peer_ratio(values: pd.Series) -> pd.Series:
         ratios[i] = (arr[i] / med) if med > 0 else 0.0
     return pd.Series(ratios, index=values.index)
 
+
+def cache_hit_pct(cache_read: pd.Series, input_tokens: pd.Series) -> pd.Series:
+    """The ONE prompt-cache formula: cache_read / (cache_read + input) x 100, rounded to 0.1.
+    R1-104: no prompt tokens (cache_read + input == 0) has NO hit rate -- NaN renders '—', never 0.0%.
+    token_economics (per user) and the Cortex Code model folds (app.logic.cortex.coco_*) share it."""
+    denom = cache_read + input_tokens
+    return (cache_read / denom.where(denom > 0) * 100).round(1)
+
+
 def token_economics(frame: pd.DataFrame | None) -> pd.DataFrame:
     """Per-user prompt-cache economics from token-type grain rows
     (USER_NAME, TOKEN_TYPE, TOKENS): pivots input/output/cache-read/cache-write
@@ -65,9 +74,8 @@ def token_economics(frame: pd.DataFrame | None) -> pd.DataFrame:
     out["CACHE_READ"] = _series("cache_read_input", "cache_read", "cached", "cache_read_tokens")
     out["CACHE_WRITE"] = _series("cache_write_input", "cache_write", "cache_creation", "cache_write_tokens")
     out["TOTAL"] = pivot.sum(axis=1)
-    denom = out["CACHE_READ"] + out["INPUT"]
     # R1-104: no prompt tokens (cache_read + input == 0) has NO hit rate -- NaN renders '—', never 0.0%
-    out["CACHE_HIT_PCT"] = (out["CACHE_READ"] / denom.where(denom > 0) * 100).round(1)
+    out["CACHE_HIT_PCT"] = cache_hit_pct(out["CACHE_READ"], out["INPUT"])
     out = out.reset_index()
     return out.sort_values("TOTAL", ascending=False).reset_index(drop=True)[cols]
 

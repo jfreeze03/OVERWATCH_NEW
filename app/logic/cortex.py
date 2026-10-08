@@ -22,12 +22,13 @@ uses the configured Cortex rate; nothing is baked into SQL.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pandas as pd
 
 from .anomaly import robust_zscores
 from .formulas import ACCOUNT_TIMEZONE, account_today, safe_float
+from .wave2 import cache_hit_pct
 
 # A spike is UNUSUAL FOR THIS ACCOUNT, not just an expensive model. Score each
 # (user, source)'s credits-per-request against a robust median/MAD baseline over
@@ -487,3 +488,265 @@ def with_aggregate_budget_row(exceptions: pd.DataFrame, summary: dict,
     if exceptions is None or exceptions.empty:
         return head
     return pd.concat([head, exceptions], ignore_index=True)
+
+
+# ---------------------------------------------------------------------------
+# v4.612.0 (owner ask 2026-10-08: "track and drill down by user which models they select when using
+# coco"): the Cortex Code model folds behind Cost Intelligence > Chargeback & AI > Cortex Code models.
+#
+# cortex_sql.coco_model_usage_daily is ONE 365d read (all three interfaces, from
+# SNOWFLAKE_COCO_USAGE_HISTORY) at Central day x user x interface x role x model grain; every lens is a
+# fold of it here, so a click costs no query. Two request counts, never mixed: MAIN_REQUESTS counts each
+# request ONCE, on its main model (the model with the most credits in it) -- additive, the "which model
+# they select" proxy; REQUESTS_USING counts the requests that billed a model -- NOT additive (one request
+# can bill several models). The spend basis is REQUEST_TOKEN_CREDITS (each request's TOKEN_CREDITS, on its
+# main-model row); a model's own credits are its CREDITS_GRANULAR leaves (COCO_CREDITS), and coco_model_mix
+# puts any gap between the two on a visible pseudo-model row, so the model rows add back to the request
+# totals. Every ratio is guarded (.where(> 0) -> NaN, '—'), never a raw division.
+# ---------------------------------------------------------------------------
+
+#: The builder's MODEL_NAME for a request with a NULL / empty CREDITS_GRANULAR (must equal the SQL literal).
+COCO_NO_BREAKDOWN = "(no model breakdown)"
+#: Request credits the model leaves do not cover (requests with no breakdown included).
+COCO_UNATTRIBUTED = "(not attributed to a model)"
+#: Model leaves above the request totals (a negative residual).
+COCO_OVER_ATTRIBUTED = "(model credits above request totals)"
+COCO_PSEUDO_MODELS = frozenset({COCO_NO_BREAKDOWN, COCO_UNATTRIBUTED, COCO_OVER_ATTRIBUTED})
+#: A residual smaller than this many credits is rounding, not a row.
+COCO_RESIDUAL_MIN_CREDITS = 0.005
+_COCO_KEYS = ("USAGE_DATE", "USER_NAME", "SOURCE", "ROLE_NAME", "MODEL_NAME")
+_COCO_TOKENS = ("TOKENS_INPUT", "TOKENS_CACHE_READ", "TOKENS_CACHE_WRITE", "TOKENS_OUTPUT", "TOKENS_OTHER")
+#: The 15 additive measures of the builder (everything but the keys and FIRST_TS / LAST_TS).
+_COCO_SUM = ("REQUESTS_USING", "MAIN_REQUESTS", "REQUEST_TOKEN_CREDITS", "REQUEST_TOKENS",
+             "COCO_CREDITS", "COCO_CREDITS_INPUT", "COCO_CREDITS_CACHE_READ", "COCO_CREDITS_CACHE_WRITE",
+             "COCO_CREDITS_OUTPUT", "COCO_CREDITS_OTHER", *_COCO_TOKENS)
+_COCO_COLUMNS = (*_COCO_KEYS, *_COCO_SUM, "FIRST_TS", "LAST_TS")
+_COCO_MIX_DERIVED = ("USERS", "TOKENS", "CACHE_HIT_PCT", "CREDITS_PER_REQUEST", "CREDITS_PER_1M_TOKENS",
+                     "SHARE_PCT")
+_COCO_USER_COLS = ("USER_NAME", "TOKEN_CREDITS", "REQUESTS", "ACTIVE_DAYS", "MODELS_USED", "TOP_MODEL",
+                   "TOP_MODEL_SHARE_PCT", "MOST_USED_MODEL", "MOST_USED_SHARE_PCT", "INTERFACES",
+                   "CACHE_HIT_PCT", "FIRST_USED_AT", "LAST_USED_AT")
+
+
+def _coco_pseudo(models: pd.Series) -> pd.Series:
+    """True where a MODEL_NAME is one of the pseudo models (not a model anyone selected)."""
+    return models.astype(str).isin(COCO_PSEUDO_MODELS)
+
+
+def _account_wall(value: object) -> pd.Timestamp:
+    """One timestamp as tz-naive account (Central) wall time, or NaT: _account_day without the day cut
+    (quotas._account_ts's rule -- a tz-aware value converts, a naive one is account time already)."""
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return pd.NaT
+    if pd.isna(ts):
+        return pd.NaT
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(ACCOUNT_TIMEZONE).tz_localize(None)
+    return ts
+
+
+def coco_model_window(frame: pd.DataFrame | None, days: int,
+                      *, bounds: tuple | None = None) -> pd.DataFrame:
+    """coco_model_usage_daily rows inside the asked window -- the SAME _window_slice as the AI users tab, so the
+    two can never disagree by a day ('Last month' bounds included) -- with every measure numeric (NULL -> 0).
+    A missing measure column is NOT invented (no fabricated zeros): it raises, like any other contract break.
+    Empty in, or an empty slice, gives an empty frame with the builder's columns."""
+    win = _window_slice(frame if frame is not None else pd.DataFrame(), days, bounds=bounds)
+    if win is None or win.empty:
+        return pd.DataFrame(columns=list(_COCO_COLUMNS))
+    out = win.copy()
+    for col in _COCO_SUM:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+    out["MODEL_NAME"] = out["MODEL_NAME"].fillna(COCO_NO_BREAKDOWN).astype(str)
+    return out.reset_index(drop=True)
+
+
+def coco_model_mix(win: pd.DataFrame | None, by: tuple[str, ...] = ()) -> pd.DataFrame:
+    """Per model (within each ``by`` group, e.g. per USAGE_DATE or per USER_NAME): the 15 measures summed, USERS,
+    and the derived TOKENS / CACHE_HIT_PCT / CREDITS_PER_REQUEST / CREDITS_PER_1M_TOKENS / SHARE_PCT.
+
+    '(no model breakdown)' is folded into COCO_UNATTRIBUTED. Per group, a residual sum(REQUEST_TOKEN_CREDITS) -
+    sum(COCO_CREDITS) of at least COCO_RESIDUAL_MIN_CREDITS goes onto COCO_UNATTRIBUTED (positive) or
+    COCO_OVER_ATTRIBUTED (negative), creating the row if needed, so per group sum(COCO_CREDITS) equals
+    sum(REQUEST_TOKEN_CREDITS) within that minimum: the model rows add back to the request totals and nothing is
+    silently dropped. A pseudo row's USERS counts the users whose own residual points the same way; a pseudo row
+    below the minimum with no requests is dropped. Ratios on a pseudo row are NaN (its credits are a residual, not
+    the price of its requests). Sorted by the ``by`` columns, then COCO_CREDITS descending."""
+    cols = [*by, "MODEL_NAME", *_COCO_SUM, *_COCO_MIX_DERIVED]
+    if win is None or win.empty:
+        return pd.DataFrame(columns=cols)
+    df = win.copy()
+    df["MODEL_NAME"] = df["MODEL_NAME"].astype(str).replace({COCO_NO_BREAKDOWN: COCO_UNATTRIBUTED})
+    grp = list(by) if by else ["_ALL"]
+    if not by:
+        df["_ALL"] = 0
+    keyed = df.groupby([*grp, "MODEL_NAME"], dropna=False)
+    out = keyed[list(_COCO_SUM)].sum()
+    out["USERS"] = keyed["USER_NAME"].nunique()
+    out = out.reset_index()
+    # The per-group residual, and per group the users whose own residual points each way.
+    pair = ["REQUEST_TOKEN_CREDITS", "COCO_CREDITS"]
+    tot = df.groupby(grp, dropna=False)[pair].sum()
+    res = (tot["REQUEST_TOKEN_CREDITS"] - tot["COCO_CREDITS"]).rename("_RESID").reset_index()
+    per_user = df.groupby(list(dict.fromkeys([*grp, "USER_NAME"])), dropna=False)[pair].sum()
+    user_res = per_user["REQUEST_TOKEN_CREDITS"] - per_user["COCO_CREDITS"]
+    pos = (user_res >= COCO_RESIDUAL_MIN_CREDITS).groupby(level=grp, dropna=False).sum().rename("_POS")
+    neg = (user_res <= -COCO_RESIDUAL_MIN_CREDITS).groupby(level=grp, dropna=False).sum().rename("_NEG")
+    res = res[res["_RESID"].abs() >= COCO_RESIDUAL_MIN_CREDITS]
+    if not res.empty:
+        res = res.merge(pos.reset_index(), on=grp, how="left").merge(neg.reset_index(), on=grp, how="left")
+        _up = res["_RESID"] > 0
+        res["MODEL_NAME"] = pd.Series(COCO_UNATTRIBUTED, index=res.index).where(_up, COCO_OVER_ATTRIBUTED)
+        res["_RUSERS"] = res["_POS"].where(_up, res["_NEG"]).fillna(0)
+        out = out.merge(res[[*grp, "MODEL_NAME", "_RESID", "_RUSERS"]], on=[*grp, "MODEL_NAME"], how="outer")
+        for col in _COCO_SUM:
+            out[col] = out[col].fillna(0.0)
+        out["COCO_CREDITS"] = out["COCO_CREDITS"] + out["_RESID"].fillna(0.0)
+        out["USERS"] = out["_RUSERS"].where(out["_RUSERS"].notna(), out["USERS"])
+        out = out.drop(columns=["_RESID", "_RUSERS"])
+    idle = ((out["COCO_CREDITS"].abs() < COCO_RESIDUAL_MIN_CREDITS) & (out["MAIN_REQUESTS"] <= 0)
+            & (out["REQUESTS_USING"] <= 0))
+    out = out[~(_coco_pseudo(out["MODEL_NAME"]) & idle)].copy()
+    out["USERS"] = pd.to_numeric(out["USERS"], errors="coerce").fillna(0).astype(int)
+    named = ~_coco_pseudo(out["MODEL_NAME"])
+    out["TOKENS"] = out[list(_COCO_TOKENS)].sum(axis=1)
+    out["CACHE_HIT_PCT"] = cache_hit_pct(out["TOKENS_CACHE_READ"], out["TOKENS_INPUT"])
+    out["CREDITS_PER_REQUEST"] = (out["COCO_CREDITS"]
+                                  / out["REQUESTS_USING"].where(out["REQUESTS_USING"] > 0)).where(named)
+    out["CREDITS_PER_1M_TOKENS"] = (out["COCO_CREDITS"] * 1_000_000
+                                    / out["TOKENS"].where(out["TOKENS"] > 0)).where(named)
+    group_total = out.groupby(grp, dropna=False)["REQUEST_TOKEN_CREDITS"].transform("sum")
+    out["SHARE_PCT"] = out["COCO_CREDITS"] / group_total.where(group_total > 0) * 100
+    out = out.sort_values([*by, "COCO_CREDITS", "MODEL_NAME"],
+                          ascending=[True] * len(by) + [False, True])
+    return out[cols].reset_index(drop=True)
+
+
+def coco_user_rollup(win: pd.DataFrame | None) -> pd.DataFrame:
+    """One row per user, highest TOKEN_CREDITS first, uncapped: TOKEN_CREDITS (each request once) and REQUESTS
+    (main-model requests), ACTIVE_DAYS (days with a request), MODELS_USED (named models with credits), TOP_MODEL
+    (most credits; ties by name) with its share of the user's TOKEN_CREDITS, MOST_USED_MODEL (most main-model
+    requests -- the "which model they select" answer; ties by credits, then name) with its share of the user's
+    requests, INTERFACES (sorted, ', '-joined), CACHE_HIT_PCT and FIRST_USED_AT / LAST_USED_AT (account wall
+    time). A user whose requests carry no model breakdown has no TOP / MOST_USED model (NaN, '—')."""
+    if win is None or win.empty:
+        return pd.DataFrame(columns=list(_COCO_USER_COLS))
+    g = win.groupby("USER_NAME", dropna=False)
+    out = g.agg(TOKEN_CREDITS=("REQUEST_TOKEN_CREDITS", "sum"), REQUESTS=("MAIN_REQUESTS", "sum"),
+                _READ=("TOKENS_CACHE_READ", "sum"), _INPUT=("TOKENS_INPUT", "sum"),
+                FIRST_USED_AT=("FIRST_TS", "min"), LAST_USED_AT=("LAST_TS", "max"))
+    active = win[win["MAIN_REQUESTS"] > 0].groupby("USER_NAME")["USAGE_DATE"].nunique()
+    out["ACTIVE_DAYS"] = active.reindex(out.index).fillna(0).astype(int)
+    out["INTERFACES"] = g["SOURCE"].agg(lambda s: ", ".join(sorted({str(v) for v in s.dropna()})))
+    per_model = (win[~_coco_pseudo(win["MODEL_NAME"])]
+                 .groupby(["USER_NAME", "MODEL_NAME"])[["COCO_CREDITS", "MAIN_REQUESTS"]].sum().reset_index())
+    billed = per_model[per_model["COCO_CREDITS"] > 0]
+    out["MODELS_USED"] = (billed.groupby("USER_NAME")["MODEL_NAME"].nunique()
+                          .reindex(out.index).fillna(0).astype(int))
+    top = (billed.sort_values(["USER_NAME", "COCO_CREDITS", "MODEL_NAME"], ascending=[True, False, True])
+           .drop_duplicates("USER_NAME").set_index("USER_NAME"))
+    out["TOP_MODEL"] = top["MODEL_NAME"].reindex(out.index)
+    out["TOP_MODEL_SHARE_PCT"] = (top["COCO_CREDITS"].reindex(out.index)
+                                  / out["TOKEN_CREDITS"].where(out["TOKEN_CREDITS"] > 0) * 100)
+    picked = (per_model[per_model["MAIN_REQUESTS"] > 0]
+              .sort_values(["USER_NAME", "MAIN_REQUESTS", "COCO_CREDITS", "MODEL_NAME"],
+                           ascending=[True, False, False, True])
+              .drop_duplicates("USER_NAME").set_index("USER_NAME"))
+    out["MOST_USED_MODEL"] = picked["MODEL_NAME"].reindex(out.index)
+    out["MOST_USED_SHARE_PCT"] = (picked["MAIN_REQUESTS"].reindex(out.index)
+                                  / out["REQUESTS"].where(out["REQUESTS"] > 0) * 100)
+    out["CACHE_HIT_PCT"] = cache_hit_pct(out["_READ"], out["_INPUT"])
+    for col in ("FIRST_USED_AT", "LAST_USED_AT"):
+        out[col] = pd.to_datetime(out[col].map(_account_wall), errors="coerce")
+    out = out.reset_index().sort_values(["TOKEN_CREDITS", "USER_NAME"], ascending=[False, True])
+    return out[list(_COCO_USER_COLS)].reset_index(drop=True)
+
+
+def coco_breakdown(win: pd.DataFrame | None, dim: str) -> pd.DataFrame:
+    """Spend by one dimension (SOURCE = interface, or ROLE_NAME): TOKEN_CREDITS, REQUESTS (main-model), USERS,
+    MODELS (named models with credits) and SHARE_PCT of the frame's TOKEN_CREDITS. The rows add up to the
+    frame's totals (TOKEN_CREDITS and REQUESTS count each request once)."""
+    if dim not in ("SOURCE", "ROLE_NAME"):
+        raise ValueError(f"coco_breakdown: unsupported dimension {dim!r}")
+    cols = [dim, "TOKEN_CREDITS", "REQUESTS", "USERS", "MODELS", "SHARE_PCT"]
+    if win is None or win.empty:
+        return pd.DataFrame(columns=cols)
+    out = win.groupby(dim, dropna=False).agg(TOKEN_CREDITS=("REQUEST_TOKEN_CREDITS", "sum"),
+                                             REQUESTS=("MAIN_REQUESTS", "sum"),
+                                             USERS=("USER_NAME", "nunique"))
+    per_model = (win[~_coco_pseudo(win["MODEL_NAME"])]
+                 .groupby([dim, "MODEL_NAME"])["COCO_CREDITS"].sum().reset_index())
+    out["MODELS"] = (per_model[per_model["COCO_CREDITS"] > 0].groupby(dim)["MODEL_NAME"].nunique()
+                     .reindex(out.index).fillna(0).astype(int))
+    total = pd.Series(out["TOKEN_CREDITS"].sum(), index=out.index)
+    out["SHARE_PCT"] = out["TOKEN_CREDITS"] / total.where(total > 0) * 100
+    out = out.reset_index().sort_values(["TOKEN_CREDITS", dim], ascending=[False, True])
+    return out[cols].reset_index(drop=True)
+
+
+def coco_model_users(win: pd.DataFrame | None, model: str) -> pd.DataFrame:
+    """Who runs ``model``: coco_model_mix per USER_NAME filtered to it, plus USER_TOKEN_CREDITS (the user's whole
+    Cortex Code spend in the frame) and SHARE_OF_USER_PCT (this model's share of it). Picking a pseudo row lists
+    each user's own unattributed (or over-attributed) credits. Highest COCO_CREDITS first."""
+    cols = ["USER_NAME", "MODEL_NAME", *_COCO_SUM, *_COCO_MIX_DERIVED, "USER_TOKEN_CREDITS", "SHARE_OF_USER_PCT"]
+    target = COCO_UNATTRIBUTED if str(model) == COCO_NO_BREAKDOWN else str(model)
+    mix = coco_model_mix(win, by=("USER_NAME",))
+    if mix.empty:
+        return pd.DataFrame(columns=cols)
+    user_total = mix.groupby("USER_NAME")["REQUEST_TOKEN_CREDITS"].sum()
+    out = mix[mix["MODEL_NAME"].astype(str) == target].copy()
+    out["USER_TOKEN_CREDITS"] = out["USER_NAME"].map(user_total)
+    out["SHARE_OF_USER_PCT"] = (out["COCO_CREDITS"]
+                                / out["USER_TOKEN_CREDITS"].where(out["USER_TOKEN_CREDITS"] > 0) * 100)
+    out = out.sort_values(["COCO_CREDITS", "USER_NAME"], ascending=[False, True])
+    return out[cols].reset_index(drop=True)
+
+
+def coco_kpis(win: pd.DataFrame | None, full: pd.DataFrame | None = None) -> dict:
+    """The section's summary numbers, in credits. ``win`` is the window after the interface filter; ``full``
+    (default ``win``) is the window before it, which the interface split and the Desktop share always read.
+    spend counts each request once (TOKEN_CREDITS); named_model_credits is the named models' own leaves (the
+    reconciliation line's numerator); desktop_share_pct is None when the unfiltered window has no spend;
+    top_model / top_model_share_pct are None when no named model carries credits."""
+    w = win if win is not None else pd.DataFrame()
+    f = full if full is not None else w
+    out: dict = {"spend": 0.0, "requests": 0.0, "users": 0, "models_used": 0, "top_model": None,
+                 "top_model_share_pct": None, "named_model_credits": 0.0, "snowsight_cli": 0.0, "desktop": 0.0,
+                 "all_interfaces": 0.0, "desktop_share_pct": None}
+    if not w.empty:
+        out["spend"] = float(w["REQUEST_TOKEN_CREDITS"].sum())
+        out["requests"] = float(w["MAIN_REQUESTS"].sum())
+        out["users"] = int(w["USER_NAME"].nunique())
+        per_model = w[~_coco_pseudo(w["MODEL_NAME"])].groupby("MODEL_NAME")["COCO_CREDITS"].sum()
+        billed = per_model[per_model > 0].sort_index().sort_values(ascending=False, kind="mergesort")
+        out["models_used"] = len(billed)
+        out["named_model_credits"] = float(per_model.sum())
+        if len(billed):
+            out["top_model"] = str(billed.index[0])
+            if out["spend"] > 0:
+                out["top_model_share_pct"] = float(billed.iloc[0]) / out["spend"] * 100
+    if not f.empty:
+        src = f["SOURCE"].astype(str)
+        out["snowsight_cli"] = float(f.loc[src.isin(("Snowsight", "CLI")), "REQUEST_TOKEN_CREDITS"].sum())
+        out["desktop"] = float(f.loc[src.eq("Desktop"), "REQUEST_TOKEN_CREDITS"].sum())
+        out["all_interfaces"] = float(f["REQUEST_TOKEN_CREDITS"].sum())
+        if out["all_interfaces"] > 0:
+            out["desktop_share_pct"] = out["desktop"] / out["all_interfaces"] * 100
+    return out
+
+
+def coco_data_from(frame: pd.DataFrame | None) -> date | None:
+    """The earliest Central day in the 365-day read (None when it holds no dated row)."""
+    if frame is None or frame.empty or "USAGE_DATE" not in frame.columns:
+        return None
+    first = pd.to_datetime(frame["USAGE_DATE"], errors="coerce").min()
+    return None if pd.isna(first) else first.date()
+
+
+def coco_window_start(days: int, *, bounds: tuple | None = None) -> date:
+    """The first Central day _window_slice keeps: the bounds' start, else today - days."""
+    if bounds is not None:
+        return pd.Timestamp(bounds[0]).date()
+    return account_today() - timedelta(days=max(int(days or 1), 1))

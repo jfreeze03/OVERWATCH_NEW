@@ -145,7 +145,15 @@ def _stub_shaped(monkeypatch):
         overview,
         security,
     )
-    from app.ui.pages.cost_parts import ai_chargeback, compare, contract, optimize, spend, unit_costs
+    from app.ui.pages.cost_parts import (
+        ai_chargeback,
+        coco_models,
+        compare,
+        contract,
+        optimize,
+        spend,
+        unit_costs,
+    )
     from app.ui.pages.ops_parts import optimize_queue
 
     monkeypatch.setattr(main_mod, "connection_available", lambda: True)
@@ -162,7 +170,7 @@ def _stub_shaped(monkeypatch):
     for module in (main_mod, components, ai_panel, ds_render, security_center, workbench, attention,
                    schema_gate,
                    overview, control_room, cost, operations, alerts, security, admin, brief,
-                   ask, decision_studio, ai_chargeback, compare, contract, optimize, spend,
+                   ask, decision_studio, ai_chargeback, coco_models, compare, contract, optimize, spend,
                    unit_costs, optimize_queue):
         for fname, fstub in _READ_STUBS.items():
             if hasattr(module, fname):
@@ -284,6 +292,41 @@ def test_cost_chargeback_section_renders_shaped():
     blob = " ".join(m.value for m in at.markdown)
     assert "Company all-in showback" in blob, "the showback section header did not paint"
     assert "Department chargeback" in blob and "Query-tag governance" in blob
+
+
+def test_cost_coco_models_renders_shaped(monkeypatch):
+    """v4.612.0: Cost > Chargeback & AI > Cortex Code models is toggle-gated, so neither the page sweep nor the
+    Chargeback section test paints it. Drive the toggle ON with a selected user (By user), then a selected model
+    (By model), under shaped data: every fold and both detail panes execute, and a column the builder does not
+    return raises KeyError here. The shaped USAGE_DATE is 2026-08-15/16, so today is pinned inside the window."""
+    import app.logic.cortex as cortex_logic
+    monkeypatch.setattr(cortex_logic, "account_today", lambda: datetime.date(2026, 8, 20))
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Cost Intelligence")
+    at.session_state["flt_days"] = 30
+    at.session_state["cost_section"] = "Chargeback & AI"
+    at.session_state["coco_models_scan"] = True
+    at.session_state["coco_model_view"] = "By user"
+    at.session_state["_ow_md_sel_coco_by_user"] = "USER_NAME_0"
+    at.run()
+    assert not at.exception, f"cortex code models, by user (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error), \
+        "the Cortex Code models section raised mid-render (by user)"
+    blob = " ".join(m.value for m in at.markdown)
+    assert "Cortex Code models" in blob and "Spend by model" in blob, "the models section did not paint"
+    assert "USER_NAME_0" in blob, "the By user detail pane did not render the selected user"
+    assert any("Main model = " in str(c.value) for c in at.caption)
+    at.session_state["coco_model_view"] = "By model"
+    at.session_state["_ow_md_sel_coco_by_model"] = "MODEL_NAME_0"
+    at.run()
+    assert not at.exception, f"cortex code models, by model (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error), \
+        "the Cortex Code models section raised mid-render (by model)"
+    blob = " ".join(m.value for m in at.markdown)
+    assert "**MODEL_NAME_0**" in blob, "the By model detail pane did not render the selected model"
+    assert "Daily spend by interface" in blob
 
 
 def test_operations_optimize_renders_shaped():

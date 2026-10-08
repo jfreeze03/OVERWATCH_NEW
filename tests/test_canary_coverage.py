@@ -89,6 +89,12 @@ CANARY_EXEMPT: dict[str, dict[str, str]] = {
                                        "without the opt-in integration is unproven (owner probe first)"),
         "ml_forecast_daily": "reads the opt-in FORECAST_ML_DAILY (snowflake/ml_forecast_option.sql) only",
     },
+    # v4.612.0: cortex_sql joins the ratchet (every future cortex_sql builder needs a canary); its one uncanaried
+    # builder is the shared live AI-users scan, a twin.
+    "cortex_sql": {
+        "cortex_code_user_daily": ("live: the AI-users / CoCo-efficiency / Security shared live scan; it "
+                                   f"{_TWIN}"),
+    },
     "mart27_sql": {
         "ai_code_user_rollup": ("live: the Cost AI-users fact fallback (cost_parts/ai_chargeback.py). The v4.36.1 "
                                 "lock in test_v041_loader_pass keeps it out of canary.py, and it "
@@ -458,15 +464,14 @@ _TWINS: dict[str, Callable[[], tuple[str, ...]]] = {
         mart27_sql.ai_code_daily(7, "ALFA", bounds=(date(2026, 9, 1), date(2026, 10, 1)))),
     "mart27_sql.compare_pattern_costs_by_warehouse": lambda: (mart27_sql.compare_pattern_costs_by_warehouse(
         "2026-09-08", "2026-09-15", "2026-09-01", "2026-09-08", "WH_X"),),
-    # probe=True readers RUNBOOK names as twins (no ratchet covers their modules)
     "cortex_sql.cortex_code_user_daily": lambda: (cortex_sql.cortex_code_user_daily("ALFA"),),
+    # probe=True readers RUNBOOK names as twins (no ratchet covers their modules)
     "change_impact_sql.proc_redeploys": lambda: (change_impact_sql.proc_redeploys(30),),
     "workbench_sql.product_mapping_totals": lambda: (
         workbench_sql.product_mapping_totals(30, "ALFA"),
         workbench_sql.product_mapping_totals(30, "ALFA", bounds=(date(2026, 9, 1), date(2026, 10, 1)))),
 }
-_PROBE_TWINS = {"cortex_sql.cortex_code_user_daily", "change_impact_sql.proc_redeploys",
-                "workbench_sql.product_mapping_totals"}
+_PROBE_TWINS = {"change_impact_sql.proc_redeploys", "workbench_sql.product_mapping_totals"}
 
 
 def test_the_twin_map_is_every_twin_claim():

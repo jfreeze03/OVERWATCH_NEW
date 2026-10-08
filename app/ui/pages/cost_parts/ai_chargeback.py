@@ -107,7 +107,8 @@ _SHOWBACK_TABLE_NOTE = (
     "object-cost ledger's clustering, materialized-view refresh, search-optimization, serverless-task and "
     "Snowpipe credits, by the object's database; its query-compute arms are slices of warehouse compute "
     "and are left out so nothing counts twice. AI: Cortex Code token credits in Snowsight and the CLI, by "
-    "user (Cortex Code Desktop is not read, so it stays on the unattributed row). Storage: estimated from "
+    "user (Cortex Code Desktop is not loaded into this showback, so it stays on the unattributed row; Cortex "
+    "Code models below shows it per user). Storage: estimated from "
     "average daily database and fail-safe bytes, by database. Other metered: metering with no company key."
 )
 

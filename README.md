@@ -61,7 +61,7 @@ Intelligence + Operations). No username is hard-coded.
 | Overview | Exec glance: MTD spend vs the same days last month (budget pace only when `MONTHLY_BUDGET_USD` is set), month-end forecast, contract runway, alerts, platform score, real top actions. |
 | Control Room | DBA morning triage: ranked issue queue, source freshness, 24h failures, spend movers; track task-failure / warehouse-spend triage rows into Action Center (Track as work item). |
 | Alerts | Alert rules, open events, ack/resolve workflow, generated native ALERT SQL. |
-| Cost Intelligence | Service/warehouse/user attribution (with the grain-coverage ratio: measured and user-allocated credits as a share of metered), contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
+| Cost Intelligence | Service/warehouse/user attribution (with the grain-coverage ratio: measured and user-allocated credits as a share of metered), contract pacing, Cortex + storage (including Cortex Code models by user), savings ledger (estimated vs verified). |
 | Operations | Queries, tasks, warehouses, contention, the Optimize fix queue (a diagnosis and first fix per recurring query family, with one-click Track into Action Center), change impact, and Pipeline SLA with two built-in objectives (nightly cycle done by 07:00, tasks on cadence) — p95, failures, queue, spill, anomalies, post-change regression verdicts. |
 | Proof | Does OVERWATCH pay for itself: verified savings with per-item evidence, and the priced pipeline ahead. |
 | Security | MFA gaps (login-evidence based), failed logins, grants, recent DDL changes. |

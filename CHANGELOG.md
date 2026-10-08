@@ -1,5 +1,85 @@
 # Changelog
 
+## 4.612.0 - Cortex Code models by user (2026-10-08)
+
+The owner, 2026-10-08: "my boss addressed coco usage. We need to track and drill down by user which models they
+select when using coco." This release adds that view. App-only: no migration, no validate floor change, no new
+grant.
+
+- **Where.** Cost Intelligence ▸ Chargeback & AI ▸ **Cortex Code models**, directly under AI users. It is off on
+  first paint: turn on "Load Cortex Code models by user (live, all interfaces)". Every Cost Intelligence viewer sees
+  it read-only, the same as AI users. Nothing on it writes.
+- **What the boss can see.**
+  - Summary: Cortex Code spend for the window, users, models used, the top model and its share of spend, and
+    Desktop's share.
+  - Spend by model, and daily spend stacked by model (a model keeps its colour everywhere).
+  - **By user:** every user ranked by spend, with their most-used model (and its share of their requests), their
+    top model by dollars, how many models they used, their interfaces and cache-hit rate. Click a user for their
+    models (spend, main-model requests, requests billing it, credits per request, dollars by input / cache-read /
+    cache-write / output, tokens, cache hit), their daily spend by model, and the interfaces and roles they used.
+  - **By model:** every model with its share of spend, users, requests and $/1M tokens. Click a model to see who
+    runs it, how much of each user's Cortex Code spend it is, and its daily spend by interface.
+  - An Interface filter (Snowsight / CLI / Desktop) narrows every number and table except Desktop share, which
+    always reads all three. Every table exports to CSV as shown. The Window and Company filters apply (Last month included).
+- **How to read it.**
+  - Snowflake's usage view has no "selected model" column: each request lists every model it billed, often a
+    main model plus a small helper. **"Which model they select" is the main model**: the model that carried the most
+    credits in the request. *Main-model requests* count each request once and add up; *Requests billing it*
+    counts every request that touched the model and does not add up across models.
+  - Spend is each request's TOKEN_CREDITS, counted once (the AI users basis), times the AI rate
+    (AI_CREDIT_PRICE_USD), through formulas.credits_to_usd. The split by model comes from CREDITS_GRANULAR. Any part
+    of the request credits the model breakdown does not cover, requests with no breakdown at all included, is its
+    own **"(not attributed to a model)"** row, or "(model credits above request totals)" when the breakdown is
+    higher. So the model rows always add back to the request total, and the line under the charts shows how much
+    the named models cover.
+  - Roles come from the request's METADATA; "(not recorded)" is usage from before Snowflake recorded the role.
+- **Limits.** The trailing 365 days only (all the view keeps). Up to about 1 h behind Snowflake, plus up to 1 h
+  of cache: one read per company (about 25-60 s cold; probe C18 measures it), then every window, filter and click
+  reuses it. The read is capped at 200,000 rows and keeps the oldest days first; if the cap ever binds the panel
+  names the last day read and never reports "no usage" for a window it did not read.
+- **Desktop.** This panel reads Snowflake's unified Cortex Code view (SNOWFLAKE_COCO_USAGE_HISTORY), so Cortex Code
+  Desktop is included. AI users, the company all-in showback, the Spend "of which CoCo" tile and the
+  COST_AI_USER_RUNAWAY alert still read Snowsight + CLI only, and the panel says so: its Snowsight + CLI part is
+  what AI users reads. Folding Desktop into those is Phase 2 (V176 + v4.613), owner question 2 below.
+- **Small fixes riding along.** The AI users "Last run took…" hint now finds its live scan (it looked for
+  'cortex_users', which only the fact fallback's key contains). Three captions that the new panel would contradict:
+  Unit costs' "'n/a' model = Cortex Code … no per-model breakdown" now points at Cortex Code models; the showback
+  note says Desktop is not loaded into the showback and where to see it; the CoCo tile's help says Desktop is not
+  in the tile. The section's filter note lists Cortex Code models among the company-scoped panels.
+- **Before merging (owner-run, read-only): runbox `PROBES_COCO_MODELS_2026-10-08.sql`** (about 21 blocks, 10-14
+  minutes; as SNOW_ACCOUNTADMINS with no secondary roles, as the file sets). Paste back C2, C5, C7, C11, C13, C16,
+  C18 and Z1, with the elapsed times of C2 and C18. They check that the unified view equals the three
+  per-interface views, whether parent and child requests double count, the credit-leaf names the split reads, this
+  release's exact read (runtime and row count against the 200,000 cap) and that SNOW_SYSADMINS can read the view.
+  An error in a block is that block's answer. Also on runbox: `COCO_MODELS_BY_USER_CORRECTED.sql`, the boss's query
+  corrected (every credit leaf COALESCEd and read as a decimal, requests with no breakdown kept, the month cut on
+  the Central day, users keyed by USER_ID, USD at the AI rate).
+- **Check after deploying.** Last month, Company ALL: the By user total for LE7765 should equal the boss's 164.01
+  credits ($360.82) if his worksheet ran in Central time (probe C14 shows any time-zone shift), and the panel's
+  Snowsight + CLI part (the spend KPI's help) should equal AI users' Cortex Code spend to within cents.
+- **Deploy.** Merge order: PR #54 (4.610.2 / V175), then PR #55 (4.611.0), then this release; nothing here depends
+  on V175. `snow streamlit deploy --replace`, then re-run roles.sql's Streamlit block (every --replace drops it).
+  roles.sql already grants IMPORTED PRIVILEGES on SNOWFLAKE to SNOW_ACCOUNTADMINS and SNOW_SYSADMINS, which covers
+  the view.
+- **Owner questions.**
+  1. Do you or your boss need model history older than 365 days (year over year, or model-mix alerts)? That needs
+     a separate mart migration (FACT_COCO_MODEL_DAILY). It can only capture what the view still holds on the day
+     it is applied, so each day of delay loses the oldest day for good.
+  2. Once the probe confirms C16 (the unified view equals the three per-interface views) and C11 / C13 (no parent /
+     child double count), may V176 + v4.613 fold Desktop into AI users, the showback, the CoCo tile and
+     COST_AI_USER_RUNAWAY? Desktop-heavy users would then count toward the runaway rule and the quota
+     suggestions, so new alerts are possible.
+- **Rollback:** redeploy 4.611.0, then re-run roles.sql's Streamlit block. No SQL to undo.
+- **Repo.** New builder `cortex_sql.coco_model_usage_daily` (Central day x user x interface x role x model; canary
+  `cortex.coco_model_usage_daily`, a declared gap, and cortex_sql now joins the canary ratchet), pure folds
+  `app.logic.cortex.coco_*` (the prompt-cache formula is now `wave2.cache_hit_pct`, shared with token economics),
+  new module `app/ui/pages/cost_parts/coco_models.py` (live-scan budget 0; its reach, SNOWFLAKE_COCO_USAGE_HISTORY +
+  USERS, pinned in test_v451_trust), metric `coco_user_model_spend`, and the cost-coverage COCO row now reads
+  "User / model / day". Locks: tests/test_coco_models_sql.py (the 22-column contract and the SQL shape rules),
+  tests/test_coco_models_logic.py (the folds), tests/test_coco_models_ui.py (each failure kind's state and the
+  wiring), a shaped render of both lenses, and test_company_showback_sql: only this builder may read the unified
+  view until Phase 2.
+
 ## 4.611.0 - Roles alone decide who is an OVERWATCH admin (2026-10-07)
 
 The owner, 2026-10-07: "the hardcoded users like H21427, E22292 and the others need to be removed because their roles
