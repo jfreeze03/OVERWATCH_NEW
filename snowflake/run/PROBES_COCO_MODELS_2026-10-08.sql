@@ -172,6 +172,22 @@ FROM b, LATERAL FLATTEN(INPUT => b.TOKENS_GRANULAR, OUTER => TRUE) m
 GROUP BY 1, 2, 3, 4
 ORDER BY 1, 2, 5 DESC;
 
+-- C4c Do the two breakdowns travel together? 90 days, per INTERFACE: requests by whether CREDITS_GRANULAR and
+--     TOKENS_GRANULAR each carry at least one model.
+-- DECIDES: requests on (TRUE, TRUE) are the normal case. (FALSE, TRUE) = tokens without a credit breakdown: v4.612
+--    lends their tokens to no model (their credits sit on '(no model breakdown)'). (TRUE, FALSE) = credits without
+--    tokens: they raise that model's credits per 1M tokens; report their share of TOKEN_CREDITS.
+SELECT LOWER(c.INTERFACE) AS INTERFACE,
+       COALESCE(ARRAY_SIZE(OBJECT_KEYS(c.CREDITS_GRANULAR)), 0) > 0 AS HAS_CREDIT_BREAKDOWN,
+       COALESCE(ARRAY_SIZE(OBJECT_KEYS(c.TOKENS_GRANULAR)), 0) > 0 AS HAS_TOKEN_BREAKDOWN,
+       COUNT(*) AS REQUESTS,
+       ROUND(SUM(COALESCE(c.TOKEN_CREDITS, 0)), 4) AS TOKEN_CREDITS,
+       SUM(COALESCE(c.TOKENS, 0)) AS TOKENS
+FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWFLAKE_COCO_USAGE_HISTORY c
+WHERE c.USAGE_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+GROUP BY 1, 2, 3
+ORDER BY 1, 2 DESC, 3 DESC;
+
 -- C4b Models per request, 90 days (top 50 model sets).
 -- DECIDES: requests carrying 2+ model keys = one request bills several models (e.g. a main model plus a helper the
 --    product picks), so 'the model a user selected' is not the same as 'every model a request billed'. The v4.612
@@ -835,6 +851,7 @@ tk_agg AS (
         SUM(IFF(IS_OBJECT(T.VALUE), 0, COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(T.VALUE)), 0))) AS TOKENS_OTHER
     FROM base B,
          LATERAL FLATTEN(INPUT => B.TOKENS_GRANULAR) T
+    WHERE ARRAY_SIZE(OBJECT_KEYS(B.CREDITS_GRANULAR)) > 0
     GROUP BY 1, 2, 3, 4, 5
 ),
 merged AS (
