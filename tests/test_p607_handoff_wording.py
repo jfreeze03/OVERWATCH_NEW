@@ -89,20 +89,20 @@ def test_freshness_source_label_names_the_loader_stamps() -> None:
 
 def test_non_operator_captions_name_the_real_gate() -> None:
     # R1-325: every viewer who can open the app already holds SNOW_ACCOUNTADMINS / SNOW_SYSADMINS, so
-    # "requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS" explained nothing; the in-app gate is OPERATOR_USERS.
+    # "requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS" explained nothing; the in-app gate is a direct
+    # SNOW_PRI_GFR_PRD_ALFA_DSA grant (the only admin route since v4.611.0).
     admin = _captions("app/ui/pages/admin.py")
     alerts = _captions("app/ui/pages/alerts.py")
     # v4.610.0 review r1: the Admin settings caption names who can act now too (config.ADMIN_ACCESS_HINT, read here
-    # as '{}'); a SNOW_* role or the allowlist alone is no longer the whole story
+    # as '{}'); a SNOW_* role alone grants nothing in-app
     assert _one(admin, "Anyone can copy the SQL for review.") == (
         "Saving a setting is an in-app change. {} Anyone can copy the SQL for review.")
-    assert not [c for c in admin if "limited to operators (config OPERATOR_USERS)" in c]
-    # v4.610.0: the Alerts captions read config.ADMIN_ACCESS_HINT (the named admins + direct
-    # SNOW_PRI_GFR_PRD_ALFA_DSA members), which _literal_text reads as '{}'; tests/test_alert_rule_edit.py
-    # locks that they reference it
+    assert not [c for c in admin if "OPERATOR_USERS" in c]
+    # v4.610.0: the Alerts captions read config.ADMIN_ACCESS_HINT (direct SNOW_PRI_GFR_PRD_ALFA_DSA members),
+    # which _literal_text reads as '{}'; tests/test_alert_rule_edit.py locks that they reference it
     assert _one(alerts, "The SQL is copyable for review").startswith("{}")
     assert _one(alerts, "Waking snoozed events early is an in-app change.").endswith("{}")
-    assert not [c for c in alerts if "limited to operators (config OPERATOR_USERS)" in c]
+    assert not [c for c in alerts if "OPERATOR_USERS" in c]
     for text in admin + alerts:
         assert not text.startswith(("Executing requires SNOW_", "Un-snoozing requires SNOW_")), text
 

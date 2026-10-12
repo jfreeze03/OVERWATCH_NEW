@@ -157,7 +157,7 @@ def render() -> None:
     page_header("Cost Intelligence",
                 "Spend, contract runway, and proven savings.",
                 scope_note=f"{f['company']} · {f['window_label']}", icon_name="cost")
-    # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
+    # #3: operator gating from the VIEWER identity + ADMIN_ACCESS_ROLE membership, not CURRENT_ROLE().
     is_operator = _is_operator()
     # Six grouped sections instead of eight pills (CoCo density fix): each
     # group renders its related sub-panels under labeled section headers.

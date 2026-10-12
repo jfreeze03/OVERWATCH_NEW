@@ -45,6 +45,11 @@ or module added tomorrow is covered without anyone remembering to add it:
   `page_source` (a page shell + the parts package it owns), `migration_tip`,
   `changelog_entry` (one CHANGELOG section by heading). Import it as
   `from tests._source import ...`; new tests use it instead of a local `_src`
+- tests/_access.py — the shared admin-role roster script (not collected, v4.611.0):
+  `dsa_rows`, `script_dsa_roster` (an identified SiS viewer whose
+  SNOW_PRI_GFR_PRD_ALFA_DSA lookup answers a scripted member list). Roles alone
+  decide who is an admin, so a test makes an admin only through the roster,
+  never through a username; test_roles_only_access locks that
 
 migrations/ — per-migration lock modules (test_v027_* … test_v165_*): each
 locks its own migration's SQL contract (the newer ones its run-doc line too)

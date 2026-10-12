@@ -8,9 +8,9 @@ Two different questions, answered in two different places:
     config.ROLES_SQL_APP_GRANTEES to the roles roles.sql grants). Every remedy sentence is still split on that
     tuple, so a role the decision names but roles.sql does not grant (none today) would never be told to
     re-run roles.sql, which cannot add it;
-  * who can CHANGE things is decided in-app per viewer (app.core.session.viewer_access): the named
-    OPERATOR_USERS, or a DIRECT user grant of config.ADMIN_ACCESS_ROLE looked up live as the owner. Everyone
-    else who can open the app gets the view-only VIEWER_UNKNOWN_PROFILE.
+  * who can CHANGE things is decided in-app per viewer (app.core.session.viewer_access): a DIRECT user grant
+    of config.ADMIN_ACCESS_ROLE looked up live as the owner, the only admin route (no username is hard-coded,
+    owner 2026-10-07). Everyone else who can open the app gets the view-only VIEWER_UNKNOWN_PROFILE.
 
 These helpers turn the session's access snapshot (session.access_info) and the SHOW answer into plain
 rows and sentences. Pure: no Streamlit, no SQL, no server clock (``now`` is passed in).
@@ -80,7 +80,6 @@ _VIEW_PAGES = " and ".join(PAGES_BY_PROFILE.get(VIEWER_UNKNOWN_PROFILE, ()))
 
 #: How each viewer-access source reads on the tab (session.ACCESS_SOURCES plus the two unidentified paths).
 SOURCE_LABELS: dict[str, str] = {
-    "allowlist": "Named admin (config OPERATOR_USERS): no lookup needed",
     "role": f"Direct member of {ADMIN_ACCESS_ROLE} (live lookup)",
     "default": "Not an admin: the view-only default",
     "lookup_failed": "Admin-role lookup failed: read-only until it recovers",
@@ -92,9 +91,9 @@ SOURCE_LABELS: dict[str, str] = {
 #: What holding USAGE on the app means for each expected role (the grants table's MEANS column). Which
 #: role OWNS the app is read from the SHOW answer (app_grant_review's OWNER_MEANING), never assumed here.
 ROLE_MEANING: dict[str, str] = {
-    "SNOW_ACCOUNTADMINS": ("Opens the app. A holder is an admin only via OPERATOR_USERS or a direct admin-role "
+    "SNOW_ACCOUNTADMINS": (f"Opens the app. A holder is an admin only through a direct {ADMIN_ACCESS_ROLE} "
                            "grant; otherwise view-only."),
-    "SNOW_SYSADMINS": ("Opens the app. A holder is an admin only via OPERATOR_USERS or a direct admin-role "
+    "SNOW_SYSADMINS": (f"Opens the app. A holder is an admin only through a direct {ADMIN_ACCESS_ROLE} "
                        "grant; otherwise view-only."),
     ADMIN_ACCESS_ROLE: ("Opens the app. A DIRECT user member is an OVERWATCH admin: every page and every "
                         "in-app change. A role granted this role is not expanded."),
@@ -191,13 +190,13 @@ def roster_summary(info: Mapping, *, now: float) -> dict[str, str]:
                              f"(checked {_age(info.get('roster_at'), now)} ago, by {lookup}).")}
     if status == "lookup_failed":
         return {"state": "unavailable", "detail": detail,
-                "headline": (f"The admin-role lookup failed ({lookup}). Viewers not on "
-                             "OPERATOR_USERS are read-only until it recovers.")}
+                "headline": (f"The admin-role lookup failed ({lookup}). Every viewer, admins included, is "
+                             "read-only until it recovers.")}
     if status == "unverified":
         return {"state": "unavailable", "detail": detail,
                 "headline": (f"The admin-role lookup is unverified: {lookup} listed no USER grantee of "
                              f"{role}. That is a privilege gap or an empty role, never read as 'no members'. "
-                             "Viewers not on OPERATOR_USERS are read-only until it lists them.")}
+                             "Every viewer, admins included, is read-only until it lists them.")}
     return {"state": "not_checked", "detail": "",
             "headline": ("The admin-role lookup runs only on Streamlit-in-Snowflake, as the app owner. Off "
                          "SiS the role -> profile map decides access.")}
@@ -215,10 +214,11 @@ def lookup_check_hint(info: Mapping) -> str:
         return (f"Check: run {lookup} as the role that owns the app (USE SECONDARY ROLES NONE). An error means "
                 "that role cannot CALL it: re-run V175 as SNOW_ACCOUNTADMINS (the procedure must stay owned by that "
                 "role, which sees every grant), which re-creates it and grants USAGE to SNOW_SYSADMINS. If it lists no granted_to = USER row, the procedure's owner (the role that "
-                f"applied V175) cannot see {role}'s grants. The named admins are unaffected.")
+                f"applied V175) cannot see {role}'s grants. Until it answers, nobody can make an in-app "
+                "change.")
     return (f"Check: run SHOW GRANTS OF ROLE {role} as SNOW_ACCOUNTADMINS (USE SECONDARY ROLES NONE). It must "
             "list each member as a granted_to = USER row; if it errors or lists none, the owner role cannot see "
-            "the role's grants. The named admins are unaffected.")
+            "the role's grants. Until it answers, nobody can make an in-app change.")
 
 
 def _row_mapping(row: object) -> dict:

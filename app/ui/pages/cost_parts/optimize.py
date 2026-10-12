@@ -2745,7 +2745,7 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
             "Volume-confounded: query volume after the change sat outside 0.7–1.3x of baseline — dollars "
             "are not adjusted."))
 
-    # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
+    # #3: operator gating from the VIEWER identity + ADMIN_ACCESS_ROLE membership, not CURRENT_ROLE().
     is_operator = _is_operator()
 
     # Next-Fifty #5: manual rows the change scan ALSO booked + settled (one change counted twice). The

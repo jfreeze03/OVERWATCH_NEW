@@ -116,12 +116,14 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    INSERT/UPDATE/DELETE/MERGE/CALL on OVERWATCH except the viewer's own
    self-service rows (USER_PREFS, USER_WATCHLIST, APP_USAGE,
    APP_QUERY_TELEMETRY, matched as the exact object token after the prefix).
-   Admin = `config.OPERATOR_USERS` (allowlist, no lookup) or a direct USER
-   member of SNOW_PRI_GFR_PRD_ALFA_DSA (`session.viewer_access`, live
+   Admin = a direct USER member of SNOW_PRI_GFR_PRD_ALFA_DSA
+   (`config.ADMIN_ACCESS_ROLE`) and nothing else; no username is hard-coded
+   (owner 2026-10-07). Resolved by `session.viewer_access` (live
    `SHOW GRANTS OF ROLE`; once V175 is applied, `CALL SP_ADMIN_ROLE_MEMBERS()`,
-   a read outside the executor; fail closed, re-verified at write time in
-   `query._entitlement_refusal`; keep calling `_session.is_operator()` there,
-   it is the tests' monkeypatch seam). Cache invalidation is domain-scoped.
+   a read outside the executor); fail closed (a failed or empty lookup leaves
+   NO in-app admin), re-verified at write time in `query._entitlement_refusal`;
+   keep calling `_session.is_operator()` there, it is the tests' monkeypatch
+   seam. Cache invalidation is domain-scoped.
 10. **Formulas:** `app/logic/formulas.py` is the only place credits become
     dollars; `app/logic/metric_registry.py` is the semantic contract
     (BILLED/METERED/MEASURED/ALLOCATED/ESTIMATED + grain + lag). SQL builders
@@ -171,26 +173,31 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 
 ## Owner decisions (do not relitigate)
 
-- **Access = four roles** (2026-10-05; supersedes 2026-07-13's "Access =
-  SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period"). The owner asked for
+- **Access = four roles, decided by role only** (2026-10-05; amended
+  2026-10-07: "...their roles should show who gets access to what"; supersedes
+  2026-07-13's "Access = SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period"). The owner asked for
   SNOW_PRI_GFR_PRD_ALFA_DSA to have "admin and full rights" and for
   SNOW_PRI_GFR_PRD_ALFA_DTI to have "view access to all things that don't
   require admin", then approved the v4.610.0 spec (DTI = two pages). Direct
   USER grantees of DSA are OVERWATCH admins with FULL PARITY: the DBA page set
   (Admin and Ask), every in-app write and the account-level levers ALTER USER /
-  ALTER ACCOUNT SET (`config.ROLE_ADMIN_ACCOUNT_LEVERS = True`); a grant to a
-  role is not expanded. OPERATOR_USERS stay admins with no lookup, and
-  VIEWER_PROFILES can never pin DBA. Every other viewer who can open the app
-  (DTI members, SNOW_* holders not on the allowlist, an unidentified SiS
-  viewer) gets MONITOR = Cost Intelligence + Operations, read-only; DTI is
-  never looked up. Membership is `SHOW GRANTS OF ROLE` run as the owner (once
+  ALTER ACCOUNT SET (every admin has them); a grant to a role is not expanded.
+  There is no username allowlist, viewer pin or break-glass admin; do not
+  re-add one (v4.611.0). Every other viewer who can open the app (DTI members,
+  SNOW_* holders who are not direct DSA members, an unidentified SiS viewer)
+  gets MONITOR = Cost Intelligence + Operations, read-only; DTI is never
+  looked up. Membership is `SHOW GRANTS OF ROLE` run as the owner (once
   V175 is applied, `CALL SP_ADMIN_ROLE_MEMBERS()`: the same SHOW run as the
   procedure's owner, so it survives the SNOW_SYSADMINS owner switch), once
   per session (re-checked after 300 s; a failure, 'lookup_failed', or an
   empty USER set, 'unverified', is retried first after 60 s, the wait
   doubling with each further failure up to the 5-minute TTL) and FAILS
-  CLOSED; a role admin is re-verified at every privileged write (memo at
-  most 15 s). Trust delegation
+  CLOSED; every admin is re-verified at every privileged write (memo at
+  most 15 s). If the DSA lookup is down (privilege gap, missing or unusable
+  V175 procedure), nobody can change anything in-app until it recovers;
+  urgent changes go through a Snowsight worksheet as SNOW_ACCOUNTADMINS. A
+  SNOW_SYSADMINS cutover without V175 is worse: its SHOW can list SOME of
+  the members with status ok, silently demoting the rest (no error row). Trust delegation
   accepted: whoever can GRANT the DSA role can mint an OVERWATCH admin with
   account-level levers. SNOW_ACCOUNTADMINS + SNOW_SYSADMINS keep roles.sql's
   object grants; DSA/DTI get no worksheet grants (USAGE on the database,

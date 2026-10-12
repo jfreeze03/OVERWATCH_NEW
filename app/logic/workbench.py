@@ -531,10 +531,11 @@ OWNER_OTHER_CHOICE = "Other…"
 
 def owner_choices(roster: Sequence[str], *, current: str = "", viewer: str = "",
                   allow_unassigned: bool = True) -> tuple[list[str], int]:
-    """Selectbox options + default index for an owner picker. Roster = config.OPERATOR_USERS
-    (upper, de-duplicated). A current owner is ALWAYS selectable verbatim (a legacy 'DBA' or a
-    different-case username keeps its exact spelling, so opening the editor never reads as a
-    reassignment). Default: current owner, else the viewer if on the roster, else unassigned."""
+    """Selectbox options + default index for an owner picker. Roster = the direct members of
+    ADMIN_ACCESS_ROLE (session.admin_roster_users), upper-cased and de-duplicated. A current owner
+    is ALWAYS selectable verbatim (a legacy 'DBA' or a different-case username keeps its exact
+    spelling, so opening the editor never reads as a reassignment). Default: current owner, else the
+    viewer if on the roster, else unassigned."""
     cur = str(current or "").strip()
     if cur.upper() == UNASSIGNED_OWNER:
         cur = ""

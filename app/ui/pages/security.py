@@ -2,9 +2,8 @@
 
 Navigation profiles filter pages, not data. Under owner's-rights SiS every
 viewer runs as the app owner, so Snowflake RBAC only decides who can open the
-app, and writes are gated to OVERWATCH admins: config.OPERATOR_USERS plus, since
-the owner decision of 2026-10-05, direct members of SNOW_PRI_GFR_PRD_ALFA_DSA
-(resolved live in-app). The page reports the account's
+app, and writes are gated to OVERWATCH admins (direct members of
+SNOW_PRI_GFR_PRD_ALFA_DSA, resolved live in-app). The page reports the account's
 RBAC posture and grants or revokes nothing, and says so out loud (old-app
 review point).
 """

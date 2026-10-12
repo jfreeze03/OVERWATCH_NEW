@@ -1,14 +1,15 @@
-"""v4.610.0 role-based access (owner decision 2026-10-05).
+"""v4.610.0 role-based access (owner decision 2026-10-05); roles only since v4.611.0 (owner 2026-10-07).
 
 The owner asked (2026-10-05) for SNOW_PRI_GFR_PRD_ALFA_DSA to be OVERWATCH ADMIN with full parity, and for
 SNOW_PRI_GFR_PRD_ALFA_DTI to be VIEW-ONLY on exactly two pages (Cost Intelligence and Operations). This
-supersedes the 2026-07-13 "Access = SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period" decision.
+supersedes the 2026-07-13 "Access = SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, period" decision. On 2026-10-07 the
+owner removed the hard-coded usernames ("their roles should show who gets access to what"): no username list
+exists, and every identified SiS viewer pays the lookup.
 
-Resolution, first match wins, for an identified Streamlit-in-Snowflake viewer:
-  1. OPERATOR_USERS (the named admins): DBA + operator, source 'allowlist'. No SQL runs.
-  2. a DIRECT USER grantee of SNOW_PRI_GFR_PRD_ALFA_DSA (SHOW GRANTS OF ROLE, run as the owner): DBA +
+Resolution for an identified Streamlit-in-Snowflake viewer, two outcomes:
+  1. a DIRECT USER grantee of SNOW_PRI_GFR_PRD_ALFA_DSA (SHOW GRANTS OF ROLE, run as the owner): DBA +
      operator, source 'role'. A ROLE grantee is not expanded.
-  3. otherwise MONITOR (read-only, two pages): source 'default' when the lookup answered, 'lookup_failed'
+  2. otherwise MONITOR (read-only, two pages): source 'default' when the lookup answered, 'lookup_failed'
      when it raised, 'unverified' when it returned no USER grantee (a privilege gap reads as empty).
 DTI is never looked up: only a role holding USAGE opens the app (the decision names four; roles.sql grants the two
 SNOW_* roles until the owner's pending change lands), so every identified viewer who is not
@@ -35,7 +36,6 @@ import app.core.query as q
 import app.core.session as sess
 from app.data import access_sql
 
-_ADMIN = cfg.OPERATOR_USERS[0]
 _DSA_USER = "DSA_PERSON1"
 _DTI_USER = "DTI_PERSON1"
 
@@ -100,8 +100,6 @@ def test_access_roles_are_pinned():
     assert cfg.VIEW_ACCESS_ROLE == "SNOW_PRI_GFR_PRD_ALFA_DTI"
     assert cfg.APP_ACCESS_ROLES == ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS",
                                     "SNOW_PRI_GFR_PRD_ALFA_DSA", "SNOW_PRI_GFR_PRD_ALFA_DTI")
-    # owner 2026-10-05: DSA gets FULL parity, account-level levers (ALTER USER / ALTER ACCOUNT SET) included
-    assert cfg.ROLE_ADMIN_ACCOUNT_LEVERS is True
 
 
 def test_monitor_is_exactly_cost_intelligence_and_operations():
@@ -127,24 +125,12 @@ def test_failed_lookup_retry_backs_off_to_the_ttl():
         assert cfg.access_retry_s(odd) == cfg.ACCESS_RETRY_S
 
 
-def test_viewer_profiles_hold_no_admin_pin_and_no_etl_pins():
-    # OPERATOR_USERS alone means admin; a DBA pin is forbidden (it would be a second, drifting admin list)
-    assert not {v for v in cfg.VIEWER_PROFILES.values() if v in cfg.OPERATOR_PROFILES}
-    for etl in ("GRTHOMP1", "SUDEVAX", "TV5073", "VS4229"):
-        assert etl.upper() not in {k.upper() for k in cfg.VIEWER_PROFILES}
-    for profile in cfg.VIEWER_PROFILES.values():
-        assert profile in cfg.PAGES_BY_PROFILE
-
-
-def test_a_dba_pin_is_ignored_structurally(monkeypatch):
-    monkeypatch.setattr(cfg, "VIEWER_PROFILES", {"SNEAKY": "DBA", "PINNED": "READER"})
-    assert cfg.resolve_viewer_profile("sneaky") is None      # never DBA through a pin
-    assert cfg.resolve_viewer_profile("pinned") == "READER"
-
-
-def test_admin_access_hint_names_both_routes():
-    assert "OPERATOR_USERS" in cfg.ADMIN_ACCESS_HINT
-    assert cfg.ADMIN_ACCESS_ROLE in cfg.ADMIN_ACCESS_HINT
+def test_admin_access_hint_names_the_role_only():
+    # v4.611.0 (owner 2026-10-07): roles alone decide, so the hint names the role and no username route
+    hint = cfg.ADMIN_ACCESS_HINT
+    assert cfg.ADMIN_ACCESS_ROLE in hint
+    for gone in ("operator_users", "allowlist", "named admin"):
+        assert gone not in hint.lower(), gone
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +181,7 @@ def test_role_grant_members_accepts_snowpark_rows_and_quoted_keys_and_frames():
 
 # ---------------------------------------------------------------------------
 # Holistic 4.610 #1: membership is an EXACT name match. Two Snowflake users whose names differ only by case
-# are different users; neither rides the other's DSA grant (the allowlist keeps its intentional folding).
+# are different users; neither rides the other's DSA grant.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("member, viewer", [("jdoe", "JDOE"), ("JDOE", "jdoe"), ("JDoe", "jdoe")])
 def test_a_case_colliding_user_is_not_a_role_admin(env, member, viewer):
@@ -216,25 +202,19 @@ def test_the_exact_name_is_a_role_admin(env, name):
     assert sess.reverify_role_admin() is True
 
 
-def test_the_allowlist_keeps_its_case_folding(env):
-    # OPERATOR_USERS is hand-typed: folding is intentional there, and it never consults the roster
+def test_case_folding_grants_nothing_without_an_exact_roster_row(env):
+    # v4.611.0: no hand-typed list folds case any more; a name the roster does not list exactly is not an admin
     env.rows = _rows(("USER", "someone_else"))
-    env.viewer = _ADMIN.lower()
-    assert (sess.viewer_access()["source"], sess.is_operator()) == ("allowlist", True)
-    assert env.shows == 0
-
-
-# ---------------------------------------------------------------------------
-# Precedence
-# ---------------------------------------------------------------------------
-def test_allowlisted_admin_is_operator_and_issues_no_show(env):
-    env.viewer = _ADMIN.lower()
+    env.viewer = "formerly_named"
     a = sess.viewer_access()
-    assert (a["profile"], a["operator"], a["source"]) == ("DBA", True, "allowlist")
-    assert sess.is_operator() is True and sess.active_profile("") == "DBA"
-    assert env.shows == 0
+    assert (a["profile"], a["operator"], a["source"]) == ("MONITOR", False, "default")
+    assert sess.is_operator() is False
+    assert env.shows == 1
 
 
+# ---------------------------------------------------------------------------
+# The two outcomes
+# ---------------------------------------------------------------------------
 def test_direct_dsa_member_is_admin(env):
     a = sess.viewer_access()
     assert (a["profile"], a["operator"], a["source"]) == ("DBA", True, "role")
@@ -257,22 +237,13 @@ def test_nested_role_grantee_is_not_expanded(env):
     assert sess.viewer_access()["operator"] is False
 
 
-def test_a_non_dba_pin_applies_to_a_non_member_but_dsa_wins(env, monkeypatch):
-    monkeypatch.setattr(cfg, "VIEWER_PROFILES", {_DTI_USER: "READER", _DSA_USER: "READER"})
-    env.viewer = _DTI_USER
-    assert sess.viewer_access()["profile"] == "READER"
-    st.session_state.clear()
-    env.viewer = _DSA_USER
-    assert (sess.viewer_access()["profile"], sess.is_operator()) == ("DBA", True)
-
-
 def test_lookup_failure_fails_closed_and_logs_once(env):
     env.raise_ = RuntimeError("Insufficient privileges to operate on role")
     a = sess.viewer_access()
     assert (a["profile"], a["operator"], a["source"]) == ("MONITOR", False, "lookup_failed")
     assert "Insufficient privileges" in a["error"]
     assert sess.is_operator() is False
-    # retried after ACCESS_RETRY_S, not before; one APP_ERROR_LOG row per session
+    # retried after ACCESS_RETRY_S, not before; one APP_ERROR_LOG row per outage
     env.clock.t += cfg.ACCESS_RETRY_S - 1
     sess.viewer_access()
     assert env.shows == 1
@@ -308,7 +279,7 @@ def test_a_persistent_failure_backs_off_then_a_success_resets_it(env, fail):
         assert sess.viewer_access()["source"] in sess.ACCESS_UNAVAILABLE_SOURCES
         assert env.shows == n + 1, (n, env.shows)
     assert st.session_state["_ow_access_roster"]["fails"] == 6
-    assert len(env.errors) == 1                  # still one APP_ERROR_LOG row per session
+    assert len(env.errors) == 1                  # still one APP_ERROR_LOG row for this outage
     # recovery resets the streak
     env.raise_, env.rows = None, _rows(("USER", _DSA_USER))
     env.clock.t += cfg.ACCESS_TTL_S + 1
@@ -321,6 +292,8 @@ def test_a_persistent_failure_backs_off_then_a_success_resets_it(env, fail):
     env.clock.t += cfg.ACCESS_RETRY_S + 1
     sess.viewer_access()
     assert env.shows == shows + 1               # the new outage starts at ACCESS_RETRY_S again
+    # v4.611.0: the good lookup re-armed the error row, so the second outage logged its own (and only one)
+    assert len(env.errors) == 2
 
 
 def test_an_empty_user_set_is_unverified_not_member(env):
@@ -457,11 +430,11 @@ def test_access_info_snapshot(env):
     info = sess.access_info()
     assert info["viewer"] == _DSA_USER and info["source"] == "role" and info["operator"] is True
     assert info["admin_role"] == cfg.ADMIN_ACCESS_ROLE and info["view_role"] == cfg.VIEW_ACCESS_ROLE
-    assert info["account_levers"] is True
     assert info["roster_status"] == "ok"
     assert info["admin_users"] == (_DSA_USER, "OTHER_DSA")             # sorted
     assert info["nested_roles"] == ("SOME_NESTED_ROLE",)
-    assert tuple(info["allowlist"]) == tuple(cfg.OPERATOR_USERS)
+    # v4.611.0: no username list and no lever flag to report
+    assert "allowlist" not in info and "account_levers" not in info
     assert info["age_s"] == 0
     assert info["ttl_s"] == cfg.ACCESS_TTL_S and info["retry_s"] is None      # a good roster: no retry pending
 
@@ -487,14 +460,15 @@ def test_access_info_retry_is_the_backoff_in_force(env, fail):
     assert info["roster_status"] == "ok" and info["retry_s"] is None
 
 
-def test_access_info_roster_for_an_allowlisted_admin_is_lazy(env):
-    env.viewer = _ADMIN
-    assert sess.access_info()["roster_status"] == "not_checked"
-    assert env.shows == 0
-    info = sess.access_info(roster=True)
+def test_access_info_reports_the_roster_its_own_resolution_ran(env):
+    # v4.611.0: every identified SiS viewer's resolution runs the lookup, so the roster is there after exactly
+    # one, and roster=True adds none within the TTL
+    info = sess.access_info()
     assert info["roster_status"] == "ok" and _DSA_USER in info["admin_users"]
     assert env.shows == 1
-    assert info["source"] == "allowlist"                    # the roster never changes an admin's source
+    info = sess.access_info(roster=True)
+    assert info["roster_status"] == "ok" and info["source"] == "role"
+    assert env.shows == 1
 
 
 def test_recheck_access_clears_only_this_sessions_memo(env):
@@ -629,16 +603,6 @@ def test_role_admin_write_refused_when_re_verification_fails(wired, monkeypatch,
     assert s.log == [] and len(errs) == 1
 
 
-def test_allowlisted_admin_write_never_re_verifies(wired, monkeypatch):
-    def _boom() -> bool:
-        raise AssertionError("an allowlisted admin must not pay a SHOW per write")
-
-    monkeypatch.setattr(sess, "is_operator", lambda: True)
-    monkeypatch.setattr(sess, "access_source", lambda: "allowlist")
-    monkeypatch.setattr(sess, "reverify_role_admin", _boom)
-    assert q.execute_statement("ALTER USER U SET DISABLED = TRUE", page="Operations")[0] is True
-
-
 def test_off_sis_operator_writes_without_a_lookup(wired, monkeypatch):
     def _boom() -> bool:
         raise AssertionError("off-SiS (local dev) has no owner's-rights role to re-verify")
@@ -649,24 +613,25 @@ def test_off_sis_operator_writes_without_a_lookup(wired, monkeypatch):
     assert q.execute_statement("ALTER WAREHOUSE WH_X SUSPEND", page="Operations")[0] is True
 
 
-@pytest.mark.parametrize("source", ["default", "lookup_failed", "unverified", "no_identity", "", "not_a_source"])
+@pytest.mark.parametrize("source", ["default", "lookup_failed", "unverified", "no_identity", "", "not_a_source",
+                                    "allowlist"])
 def test_operator_with_a_non_admin_source_is_refused(wired, monkeypatch, source):
     """is_operator() and access_source() are two reads of the access memo, and the memo can expire between
     them, so the second read can come back as a non-admin source while the first said 'operator'. The
-    executor allows only 'allowlist' and 'off_sis' outright, re-verifies 'role', and refuses every other
-    source. It never reasons 'not role, so allowlist'."""
+    executor allows only off_sis outright, re-verifies role, and refuses every other source (a stale
+    allowlist included: the username route is gone since v4.611.0). It never reasons 'not role, so allow'."""
     s, errs = wired
-
-    def _boom() -> bool:
-        raise AssertionError("only a role-sourced admin re-verifies")
+    rechecks: list[int] = []
 
     monkeypatch.setattr(sess, "is_operator", lambda: True)
     monkeypatch.setattr(sess, "access_source", lambda: source)
-    monkeypatch.setattr(sess, "reverify_role_admin", _boom)
+    # recording, not raising: the executor swallows a raising re-check and refuses anyway (review r1)
+    monkeypatch.setattr(sess, "reverify_role_admin", lambda: rechecks.append(1) or True)
     for stmt in ("ALTER WAREHOUSE WH_X SUSPEND", "ALTER USER U SET DISABLED = TRUE",
                  "UPDATE DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE SET NOTE = 'x'"):
         ok, msg = q.execute_statement(stmt, page="Operations")
-        assert ok is False and "operator entitlement required" in msg, (source, stmt)
+        assert ok is False and msg == q._ENTITLEMENT_REFUSAL, (source, stmt)
+    assert rechecks == [], source            # only a role-sourced admin re-verifies
     assert s.log == [] and len(errs) == 3
 
 
@@ -708,21 +673,25 @@ def test_end_to_end_memo_expiring_between_the_two_reads_never_fails_open(env, wi
     assert s.log == []
 
 
-@pytest.mark.parametrize("stmt, allowed", [
-    ("ALTER USER U SET DISABLED = TRUE", False),
-    ("ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = 7200", False),
-    ("ALTER WAREHOUSE WH_X SUSPEND", True),
-])
-def test_account_levers_follow_the_parity_flag(wired, monkeypatch, stmt, allowed):
+def test_every_admin_runs_the_account_levers_after_re_verifying(wired, monkeypatch):
+    # owner 2026-10-05 full parity, with no flag since v4.611.0: every admin (source 'role') runs the
+    # account-level levers, each after a live re-verification
+    s, _ = wired
+    calls = {"n": 0}
+
+    def _reverify() -> bool:
+        calls["n"] += 1
+        return True
+
     monkeypatch.setattr(sess, "is_operator", lambda: True)
     monkeypatch.setattr(sess, "access_source", lambda: "role")
-    monkeypatch.setattr(sess, "reverify_role_admin", lambda: True)
-    assert q.execute_statement(stmt, page="Operations")[0] is True          # parity (the shipped value)
-    monkeypatch.setattr(cfg, "ROLE_ADMIN_ACCOUNT_LEVERS", False)
-    ok, msg = q.execute_statement(stmt, page="Operations")
-    assert ok is allowed
-    if not allowed:
-        assert "OPERATOR_USERS" in msg
+    monkeypatch.setattr(sess, "reverify_role_admin", _reverify)
+    stmts = ("ALTER USER U SET DISABLED = TRUE", "ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = 7200",
+             "ALTER WAREHOUSE WH_X SUSPEND")
+    for stmt in stmts:
+        assert q.execute_statement(stmt, page="Operations")[0] is True, stmt
+    assert s.log == list(stmts)
+    assert calls["n"] == 3
 
 
 def test_end_to_end_revoked_dsa_member_cannot_write(env, wired, monkeypatch):
@@ -855,10 +824,16 @@ def _unavailable_caption() -> str:
     return ACCESS_CHECK_UNAVAILABLE
 
 
+def _why_read_only(at) -> list:
+    """The sidebar's v4.611.0 outage panel(s): the 'Why read-only?' expander."""
+    return [e for e in at.sidebar.expander if str(e.label) == "Why read-only?"]
+
+
 def test_app_role_admin_gets_the_dba_surface(sis_app):
-    _, options, captions = _run_app()
+    at, options, captions = _run_app()
     assert "Admin" in options and "Alerts" in options and "Ask" in options
     assert _unavailable_caption() not in captions
+    assert not _why_read_only(at)                     # the outage panel only shows during an outage
 
 
 def test_app_retry_connection_forgets_the_access_memo(sis_app, monkeypatch):
@@ -899,35 +874,53 @@ def test_app_failed_lookup_is_read_only_and_says_so(sis_app):
     assert sorted(options) == ["Cost Intelligence", "Operations"]
     assert _unavailable_caption() in captions
     assert at.session_state["_ow_page"] == "Cost Intelligence"
+    # v4.611.0: with no in-app admin during an outage, the sidebar says what failed and what to check
+    panel = _why_read_only(at)
+    assert len(panel) == 1
+    text = " ".join(str(c.value) for c in panel[0].caption)
+    codes = " ".join(str(c.value) for c in panel[0].code)
+    assert access_sql.show_grants_of_role_sql(cfg.ADMIN_ACCESS_ROLE) in text     # the lookup statement
+    assert "Insufficient privileges" in codes                                      # the error, as code
+    assert "Check:" in text and "Refresh data" in text and "SNOW_ACCOUNTADMINS" in text
+    assert _DSA_USER not in text + codes                                           # no member names
 
 
 def test_app_view_only_viewer_sees_two_pages_without_the_outage_caption(sis_app):
     sis_app["viewer"] = _DTI_USER
-    _, options, captions = _run_app()
+    at, options, captions = _run_app()
     assert sorted(options) == ["Cost Intelligence", "Operations"]
     assert _unavailable_caption() not in captions
+    assert not _why_read_only(at)
 
 
 @pytest.mark.parametrize("outage", ["failed", "unverified"])
 def test_app_view_only_viewer_during_an_outage_is_told_only_what_is_true(sis_app, outage):
     """holistic 4.610 #2/#13: during an outage the app cannot tell a DTI member from a DSA member, so a view-only
     viewer sees the caption too. It is deliberate, and its wording must hold for them: it says who is held
-    read-only (admins) and never promises this viewer changes once the lookup recovers."""
+    read-only (every admin, since v4.611.0 removed the username bypass) and never promises this viewer changes
+    once the lookup recovers."""
     sis_app["viewer"] = _DTI_USER
     if outage == "failed":
         sis_app["raise"] = RuntimeError("Insufficient privileges")
     else:
         sis_app["rows"] = _rows(("ROLE", "ONLY_A_ROLE"))
-    _, options, captions = _run_app()
+    at, options, captions = _run_app()
     assert sorted(options) == ["Cost Intelligence", "Operations"]
     caption = _unavailable_caption()
     assert caption in captions
     assert caption.startswith("Admin access check unavailable")
-    # only the admins BY ROLE are held read-only; the named admins never wait on the lookup (final review)
-    assert f"admins by role ({cfg.ADMIN_ACCESS_ROLE}) are read-only until it recovers" in caption
-    assert caption.endswith("named admins are unaffected.")
+    # v4.611.0: no admin bypasses the lookup, so EVERY admin is held read-only during an outage
+    assert cfg.ADMIN_ACCESS_ROLE in caption
+    assert "read-only until it recovers" in caption
+    assert "named admin" not in caption.lower()
+    assert "OPERATOR_USERS" not in caption
     assert "OVERWATCH admins are read-only" not in caption
     assert caption != "Access check unavailable — read-only until it recovers."
+    # every viewer gets the 'Why read-only?' panel, and it names no role grantee
+    panel = _why_read_only(at)
+    assert len(panel) == 1
+    text = " ".join(str(c.value) for c in panel[0].caption) + " ".join(str(c.value) for c in panel[0].code)
+    assert "ONLY_A_ROLE" not in text
 
 
 def _jump_app_run(monkeypatch):

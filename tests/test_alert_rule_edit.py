@@ -19,7 +19,7 @@ is_operator + confirm_gate (type the RULE_ID) + the C48 latch:
 * a rule whose scan never reads THRESHOLD_NUM offers only Enabled (locked against the latest scan procs);
 * a SECURITY rule switched off or loosened warns first, and every edit is listed under Recent rule changes;
 * everyone else keeps the generate-only preview, and every non-admin caption names who can act now
-  (config.ADMIN_ACCESS_HINT: the named admins and direct SNOW_PRI_GFR_PRD_ALFA_DSA members).
+  (config.ADMIN_ACCESS_HINT: direct SNOW_PRI_GFR_PRD_ALFA_DSA members).
 """
 
 from __future__ import annotations
@@ -112,8 +112,8 @@ def test_a_float_artifact_writes_and_audits_the_value_the_column_stores(monkeypa
     # SET / the audit hold; NUMBER(18,4) stored 0.1000, so the INSERT ... SELECT pinned on 0.10000000000000009
     # matched no row and the receipt still said 'audited'
     from app.ui.pages import alerts
-    monkeypatch.setattr(alerts, "viewer_name", lambda: "H21427")
-    monkeypatch.setattr(alerts, "identity_sql", lambda: "'H21427'")
+    monkeypatch.setattr(alerts, "viewer_name", lambda: "DSA_PERSON1")
+    monkeypatch.setattr(alerts, "identity_sql", lambda: "'DSA_PERSON1'")
     for raw, literal in ((_STEP_DOWN_FROM_1_1, "0.1000"), (_STEP_DOWN_FROM_2_3, "1.3000")):
         upd = alerts._rule_change_sql("COST_BUDGET_PACE", 1.1, True, raw, True)
         audit = alerts._rule_audit_sql("COST_BUDGET_PACE", 1.1, True, raw, True)
@@ -147,8 +147,8 @@ def test_the_update_is_a_compare_and_set_on_each_changed_column():
 
 def test_the_audit_row_is_an_append_only_insert_naming_the_viewer_with_old_and_new(monkeypatch):
     from app.ui.pages import alerts
-    monkeypatch.setattr(alerts, "viewer_name", lambda: "H21427")
-    monkeypatch.setattr(alerts, "identity_sql", lambda: "'H21427'")
+    monkeypatch.setattr(alerts, "viewer_name", lambda: "DSA_PERSON1")
+    monkeypatch.setattr(alerts, "identity_sql", lambda: "'DSA_PERSON1'")
     upd = alerts._rule_change_sql("COST_X", 30.0, True, 45.0, False)
     audit = alerts._rule_audit_sql("COST_X", 30.0, True, 45.0, False)
     assert audit.startswith("INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT "
@@ -156,10 +156,10 @@ def test_the_audit_row_is_an_append_only_insert_naming_the_viewer_with_old_and_n
     assert "UPDATE" not in audit.split(" SELECT ", 1)[0] and "DELETE" not in audit
     assert "SELECT 'RULE:COST_X', 'RULE_EDIT', " in audit
     assert "threshold 30 -> 45" in audit and "Enabled on -> off" in audit
-    assert "by H21427" in audit and audit.rstrip(";").endswith(
+    assert "by DSA_PERSON1" in audit and audit.rstrip(";").endswith(
         "FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE RULE_ID = 'COST_X' AND THRESHOLD_NUM = 45.0000 "
         "AND ENABLED = FALSE")
-    assert ", 'H21427' FROM " in audit               # ACTED_BY = identity_sql(), not the owner's CURRENT_USER()
+    assert ", 'DSA_PERSON1' FROM " in audit               # ACTED_BY = identity_sql(), not the owner's CURRENT_USER()
     # PROOF_SQL is the UPDATE itself (quoted), so the trail shows exactly what ran
     assert alerts.sql_literal(upd.rstrip(";"), max_len=4000) in audit
     # 'RULE:' + a 60-char RULE_ID fits ALERT_AUDIT.EVENT_ID VARCHAR(80)
@@ -596,13 +596,13 @@ def test_switching_off_or_loosening_a_security_rule_warns_first(monkeypatch):
 
 
 def test_recent_rule_changes_list_the_audit_rows(monkeypatch):
-    edits = pd.DataFrame({"ACTED_AT": [pd.Timestamp("2026-10-05 09:00")], "ACTED_BY": ["H21427"],
+    edits = pd.DataFrame({"ACTED_AT": [pd.Timestamp("2026-10-05 09:00")], "ACTED_BY": ["DSA_PERSON1"],
                           "RULE_ID": ["SEC_ADMIN_GRANT"],
-                          "CHANGE": ["rule SEC_ADMIN_GRANT: Enabled on -> off — by H21427"]})
+                          "CHANGE": ["rule SEC_ADMIN_GRANT: Enabled on -> off — by DSA_PERSON1"]})
     at, _ex = _rules_app(monkeypatch, operator=False, extra={"alert_rule_edits": _ok(edits)})
     assert any("Recent rule changes" in m.value for m in at.markdown)
     frames = [d.value for d in at.dataframe]
-    assert any("H21427" in f.astype(str).to_string() for f in frames)
+    assert any("DSA_PERSON1" in f.astype(str).to_string() for f in frames)
 
 
 def test_no_rule_changes_yet_is_a_quiet_no_data_state(monkeypatch):
@@ -647,9 +647,9 @@ _ADMIN_HINTED = (("app/ui/pages/alerts.py", 3), ("app/ui/pages/operations.py", 1
 
 def test_non_admin_captions_name_who_can_act_now():
     # Every in-app "who may do this" caption on Alerts, Emergency, Optimization and Admin settings reads
-    # config.ADMIN_ACCESS_HINT (the named admins + direct SNOW_PRI_GFR_PRD_ALFA_DSA members) instead of the
-    # allowlist alone, or a SNOW_* role that grants nothing in-app.
-    assert "OPERATOR_USERS" in ADMIN_ACCESS_HINT and ADMIN_ACCESS_ROLE in ADMIN_ACCESS_HINT
+    # config.ADMIN_ACCESS_HINT (direct SNOW_PRI_GFR_PRD_ALFA_DSA members) instead of a username list, or a
+    # SNOW_* role that grants nothing in-app. v4.611.0: roles alone decide, so the hint names no username route.
+    assert "OPERATOR_USERS" not in ADMIN_ACCESS_HINT and ADMIN_ACCESS_ROLE in ADMIN_ACCESS_HINT
     for rel, n in _ADMIN_HINTED:
         tree = ast.parse(read(rel))
         hinted = [node for node in ast.walk(tree)

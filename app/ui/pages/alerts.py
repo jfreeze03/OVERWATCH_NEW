@@ -365,7 +365,7 @@ def _apply_rule_change(rule_id: str, cur_threshold: float | None, cur_enabled: b
     """Run an OVERWATCH admin's rule edit and say what happened: (outcome, message). v4.610.0.
 
     1. The compare-and-set UPDATE (_rule_change_sql) through execute_statement_count, whose executor re-checks
-       the viewer's admin entitlement itself (an ALERT_CONFIG write is privileged; a role-sourced admin is
+       the viewer's admin entitlement itself (an ALERT_CONFIG write is privileged; every admin is
        re-verified live). Snowflake's row count says whether it matched. 0 is a 'conflict' and nothing more is
        written: the rule moved, went away, or ANOTHER edit already applied these values (review r1: an identical
        concurrent edit read as held and left a second, false RULE_EDIT row).
@@ -2040,7 +2040,7 @@ def render() -> None:
         applies=("company",),
         note="Headline counts are the current open queue; the global Window does not limit them.",
     )
-    # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
+    # #3: operator gating from the VIEWER identity + ADMIN_ACCESS_ROLE membership, not CURRENT_ROLE().
     is_operator = _is_operator()
 
     company = f["company"]
@@ -2275,8 +2275,8 @@ def render() -> None:
                         if _thr_chg and _new_q is not None and not _new_q:
                             st.warning("A threshold of 0 makes most rules fire on every row they evaluate "
                                        "(a '>= 0' test is always true) — check this is what you mean.")
-                        # review r1 (hardening): any admin may re-tune a SECURITY rule (the owner chose full
-                        # parity for the role's admins), so say what that costs before the typed confirm
+                        # review r1 (hardening): any admin (a direct ADMIN_ACCESS_ROLE member) may re-tune a
+                        # SECURITY rule, so say what that costs before the typed confirm
                         if _rule_family(rules.df, rule_id) == "SECURITY" and ((_en_chg and not enabled) or _thr_chg):
                             st.warning(f"{rule_id} is a SECURITY rule: switching it off or changing its threshold "
                                        "changes which security events page anyone. Every in-app edit is audited "

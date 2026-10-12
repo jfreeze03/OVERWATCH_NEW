@@ -1,4 +1,4 @@
-"""v4.610.0 Admin ▸ App access (owner decision 2026-10-05).
+"""v4.610.0 Admin ▸ App access (owner decision 2026-10-05); roles only since v4.611.0 (owner 2026-10-07).
 
 The tab answers "who can open OVERWATCH, and who can change things in it":
   * the viewer's own resolved access (profile, operator, how it was decided, when);
@@ -12,7 +12,9 @@ The tab answers "who can open OVERWATCH, and who can change things in it":
     nothing is pending; the pending / held-ahead wording for a role roles.sql does not grant is still covered,
     by pinning the managed set to the two SNOW_* roles (_manage_only_snow);
   * plain guidance.
-Read-only apart from the memo clear: the tab issues no write.
+Read-only apart from the memo clear: the tab issues no write. Since v4.611.0 no username is an admin: the
+fixture's DSA_PERSON1 reaches Admin through a scripted DSA roster, and during an outage nobody reaches the tab
+(the sidebar's 'Why read-only?' panel carries the diagnostic instead).
 """
 
 from __future__ import annotations
@@ -33,7 +35,6 @@ from app.data import access_sql
 from app.logic import access_review as ar
 from tests._source import read
 
-_ADMIN = cfg.OPERATOR_USERS[0]
 _DSA_USER = "DSA_PERSON1"
 _DTI_USER = "DTI_PERSON1"
 _APP = f"{cfg.OVERWATCH_DB}.{cfg.CORE_SCHEMA}.{cfg.APP_STREAMLIT_NAME}"
@@ -173,6 +174,7 @@ def test_grant_review_table_says_what_each_role_means_and_what_to_do():
     assert "view-only" in by[cfg.VIEW_ACCESS_ROLE]["MEANS"].lower()
     for role in cfg.APP_ACCESS_ROLES:
         assert ar.ROLE_MEANING[role]
+        assert "OPERATOR_USERS" not in ar.ROLE_MEANING[role], role      # v4.611.0: roles alone decide
 
 
 def test_ownership_is_read_from_the_answer_never_hardcoded():
@@ -510,6 +512,9 @@ def test_roster_summary_failure_and_empty_are_unavailable():
     assert unv["state"] == "unavailable" and "unverified" in unv["headline"].lower()
     assert "privilege gap" in unv["headline"]          # never "no members"
     assert "no members" not in unv["headline"].lower().replace("never read as 'no members'", "")
+    # v4.611.0: no admin bypasses the lookup, so both say every viewer is read-only
+    for s in (failed, unv):
+        assert "Every viewer" in s["headline"] and "OPERATOR_USERS" not in s["headline"], s["headline"]
 
 
 def test_roster_summary_not_checked_off_sis():
@@ -521,6 +526,8 @@ def test_every_access_source_has_a_plain_label():
     for source in (*sess.ACCESS_SOURCES, "no_identity", "off_sis"):
         assert ar.source_label(source) and ar.source_label(source) != source
     assert ar.source_label("something_new") == "something_new"
+    # v4.611.0: the username route is retired, with no label
+    assert "allowlist" not in sess.ACCESS_SOURCES and "allowlist" not in ar.SOURCE_LABELS
 
 
 def test_resolved_clock_is_central():
@@ -540,9 +547,10 @@ def _caption_args(rel: str) -> list[ast.AST]:
             and node.func.attr == "caption" and node.args]
 
 
-def test_settings_caption_names_both_admin_routes():
+def test_settings_caption_names_the_admin_role():
     src = read("app/ui/pages/admin.py")
     assert "limited to operators (config OPERATOR_USERS)" not in src
+    assert "OPERATOR_USERS" not in src                       # v4.611.0: no username route to name
     hits = [a for a in _caption_args("app/ui/pages/admin.py")
             if "ADMIN_ACCESS_HINT" in ast.unparse(a) and "copy the SQL" in ast.unparse(a)]
     assert len(hits) == 1, "the Settings non-operator caption must lead with config.ADMIN_ACCESS_HINT"
@@ -692,6 +700,10 @@ def test_role_admin_sees_own_access_the_roster_and_the_app_grants(access_app, mo
     assert not _pending_words_in(text), _pending_words_in(text)
     # the guidance
     assert "GRANT ROLE " + cfg.ADMIN_ACCESS_ROLE in text
+    # v4.611.0: the roster IS the admin list; no username route is named anywhere on the tab
+    assert "OPERATOR_USERS" not in text and "named admin" not in text.lower()
+    assert "ALSO_NAMED_ADMIN" not in frames
+    assert "no username is hard-coded" in text
     # a role roles.sql does not grant (pinned) that holds USAGE anyway (a hand-made grant) warns about its next
     # run (holistic 4.610 #7)
     _manage_only_snow(monkeypatch)
@@ -703,29 +715,27 @@ def test_role_admin_sees_own_access_the_roster_and_the_app_grants(access_app, mo
     assert "-20011" in warn and "roles.sql does not grant" in warn
 
 
-def test_allowlisted_admin_with_a_failed_lookup_sees_it_failed(access_app):
-    access_app["viewer"] = _ADMIN
+def test_recheck_during_an_outage_drops_the_admin_and_the_sidebar_says_why(access_app):
+    """v4.611.0: no username bypasses the lookup, so an outage makes every admin read-only and nobody can open
+    this tab meanwhile. The diagnostic moves to the sidebar's 'Why read-only?' panel, which every viewer sees."""
+    from app.main import ACCESS_CHECK_UNAVAILABLE
+
+    at = _open_access(access_app)
     access_app["raise"] = RuntimeError("SQL access control error: Insufficient privileges")
-    at = _open_access(access_app)
-    text = _text(at)
-    assert ar.source_label("allowlist") in text                 # the named admin is unaffected
-    assert "lookup failed" in text.lower()
-    assert any("Insufficient privileges" in str(c.value) for c in at.code)   # the error one click away
-    assert "direct user members" not in text
-
-
-def test_allowlisted_admin_with_an_empty_roster_sees_unverified_never_clean(access_app):
-    access_app["viewer"] = _ADMIN
-    access_app["rows"] = _role_rows(("ROLE", "SOME_NESTED_ROLE"))
-    at = _open_access(access_app)
-    text, frames = _text(at), _frames(at)
-    assert "unverified" in text.lower() and "privilege gap" in text
-    assert "0 direct user members" not in text
-    assert "SOME_NESTED_ROLE" in frames                          # still reported, still not expanded
+    next(b for b in at.button if str(b.key or "") == "adm_access_recheck").click()
+    at.run()
+    assert not at.exception, at.exception
+    options = [o for r in at.radio if str(getattr(r, "key", "") or "").startswith("_ow_nav_") for o in r.options]
+    assert sorted(options) == sorted(cfg.PAGES_BY_PROFILE[cfg.VIEWER_UNKNOWN_PROFILE])
+    assert at.session_state["_ow_page"] != "Admin"
+    assert ACCESS_CHECK_UNAVAILABLE in [str(c.value) for c in at.sidebar.caption]
+    panel = [e for e in at.sidebar.expander if str(e.label) == "Why read-only?"]
+    assert len(panel) == 1
+    assert any("Insufficient privileges" in str(c.value) for c in panel[0].code)   # the error, one click away
+    assert "lookup failed" in " ".join(str(c.value) for c in panel[0].caption).lower()
 
 
 def test_app_grant_drift_says_what_to_do(access_app, monkeypatch):
-    access_app["viewer"] = _ADMIN
     access_app["grants"] = pd.concat([_snow_only_frame(), _grant_frame(("USAGE", "ROLE", "PUBLIC"))],
                                      ignore_index=True)
     at = _open_access(access_app)
@@ -749,7 +759,6 @@ def test_app_grant_drift_says_what_to_do(access_app, monkeypatch):
 
 
 def test_app_grants_empty_or_failed_is_unavailable(access_app):
-    access_app["viewer"] = _ADMIN
     access_app["grants"] = pd.DataFrame()
     at = _open_access(access_app)
     assert any("unverified" in str(e.value).lower() for e in at.error)
@@ -808,7 +817,7 @@ def test_recheck_note_names_the_window_that_actually_applies():
 
     unavailable = sess.ACCESS_UNAVAILABLE_SOURCES
     ttl, retry = cfg.ACCESS_TTL_S, cfg.ACCESS_RETRY_S
-    for source in ("allowlist", "role", "default"):
+    for source in ("role", "default"):
         note = ar.recheck_note(source, sis=True, unavailable=unavailable)
         assert hd(ttl) in note and hd(retry) not in note, (source, note)
     for source in unavailable:                   # a failed / empty lookup backs off from ACCESS_RETRY_S to the TTL
@@ -817,7 +826,7 @@ def test_recheck_note_names_the_window_that_actually_applies():
         assert f"after {hd(retry)}" in note and f"every {hd(ttl)}" in note, (source, note)
     assert ar.retry_schedule() == f"after {hd(retry)}, then {hd(2 * retry)}, {hd(4 * retry)}, then every {hd(ttl)}"
     # nothing is memoized for an unidentified viewer, or anywhere off Streamlit-in-Snowflake
-    for source, sis in (("no_identity", True), ("off_sis", False), ("default", False), ("allowlist", False)):
+    for source, sis in (("no_identity", True), ("off_sis", False), ("default", False)):
         note = ar.recheck_note(source, sis=sis, unavailable=unavailable)
         assert "every run" in note and hd(ttl) not in note, (source, sis, note)
 
@@ -854,6 +863,13 @@ def test_how_access_works_says_what_roles_sql_does_today(access_app, monkeypatch
     assert not _pending_words_in(_text(at)), _pending_words_in(_text(at))
     make = [line for line in lines if "**Make someone an admin**" in line]
     assert len(make) == 1 and make[0].endswith("can create an OVERWATCH admin."), make
+    # v4.611.0: the admins are the direct members of the DSA role, and only them
+    admins = [line for line in lines if "**Admins**" in line]
+    assert len(admins) == 1, admins
+    assert f"DIRECT user members of `{cfg.ADMIN_ACCESS_ROLE}`, and only them" in admins[0], admins[0]
+    assert not [line for line in lines if "named admin" in line.lower()]
+    lookup = [line for line in lines if "**When the lookup fails or lists nobody**" in line]
+    assert len(lookup) == 1 and "admins included" in lookup[0] and "Snowsight" in lookup[0], lookup
 
     # a role roles.sql does not grant (pinned): named as pending, with what that means for its members
     _manage_only_snow(monkeypatch)
@@ -926,11 +942,18 @@ def test_admin_reach_note_wording(monkeypatch):
     assert "until" not in held and "another role" not in held
 
 
-def test_remove_an_admin_guidance_names_the_allowlist_exception(access_app):
+def test_remove_an_admin_guidance_has_no_exception(access_app):
+    # v4.611.0 (owner 2026-10-07): REVOKE alone removes an admin; no username list outlives it
+    from app.logic.formulas import humanize_duration as hd
+
     at = _open_access(access_app)
     bullets = [line for e in at.markdown for line in str(e.value).splitlines() if "Remove an admin" in line]
     assert len(bullets) == 1, bullets
-    assert "OPERATOR_USERS" in bullets[0] and "stays an admin" in bullets[0]
+    b = bullets[0]
+    assert f"REVOKE ROLE {cfg.ADMIN_ACCESS_ROLE} FROM USER" in b
+    assert hd(cfg.WRITE_RECHECK_S) in b and hd(cfg.ACCESS_TTL_S) in b and "no redeploy" in b
+    for gone in ("OPERATOR_USERS", "stays an admin", "named admin", "allowlist"):
+        assert gone not in b, gone
 
 
 def _assert_owner_is_not_locked_out(at) -> str:
@@ -946,7 +969,6 @@ def _assert_owner_is_not_locked_out(at) -> str:
 
 
 def test_missing_usage_for_the_owner_never_claims_its_members_are_locked_out(access_app, monkeypatch):
-    access_app["viewer"] = _ADMIN
     access_app["grants"] = _grant_frame(("OWNERSHIP", "ROLE", "SNOW_ACCOUNTADMINS"),
                                         ("USAGE", "ROLE", "SNOW_SYSADMINS"))
     warn = _assert_owner_is_not_locked_out(_open_access(access_app))

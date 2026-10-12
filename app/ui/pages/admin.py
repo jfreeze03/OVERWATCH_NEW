@@ -20,7 +20,6 @@ from app.config import (
     APP_VERSION,
     APP_WAREHOUSE,
     DEFAULT_SETTINGS,
-    ROLE_ADMIN_ACCOUNT_LEVERS,
     ROLES_SQL_APP_GRANTEES,
     THRESHOLDS,
     VIEW_ACCESS_ROLE,
@@ -1150,7 +1149,7 @@ def _settings_tab(is_operator: bool) -> None:
                            else "New value is read by the next validate.sql run." if key in _DEPLOY_GATE_SETTINGS
                            else "New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
-        # v4.610.0: name both admin routes (the allowlist and a direct admin-role grant).
+        # the admin route: a direct ADMIN_ACCESS_ROLE grant (config.ADMIN_ACCESS_HINT)
         st.caption(f"Saving a setting is an in-app change. {ADMIN_ACCESS_HINT} "
                    "Anyone can copy the SQL for review.")
 
@@ -1177,8 +1176,8 @@ def _access_tab() -> None:
         + (f"grants {managed} today ({', '.join(pending)}: an owner-side change still pending)" if pending
            else "grants all four")
         + ". Changing things is decided in the app, per "
-        f"viewer: the named admins (config OPERATOR_USERS) and DIRECT user members of {ADMIN_ACCESS_ROLE} "
-        "are admins, and everyone else who can open the app gets the view-only pages. Red here means a check "
+        f"viewer: DIRECT user members of {ADMIN_ACCESS_ROLE} are admins, and everyone else who can open the "
+        "app gets the view-only pages. Red here means a check "
         "could not answer, which is never read as 'nobody'."
     )
     # module-attribute calls: the session seams the access tests drive
@@ -1210,9 +1209,8 @@ def _access_tab() -> None:
     ])
     st.caption(f"Decided by: {access_review.source_label(source)}. Pages: {', '.join(pages) or '—'}. "
                f"Resolved at {clock}.")
-    st.caption("Account-level levers (disable or re-enable a user, ALTER ACCOUNT SET): "
-               + ("role admins have them too, full parity with the named admins (owner decision 2026-10-05)."
-                  if ROLE_ADMIN_ACCOUNT_LEVERS else "limited to the named admins (config OPERATOR_USERS)."))
+    st.caption("Account-level levers (disable or re-enable a user, ALTER ACCOUNT SET): every admin has them "
+               "(owner decision 2026-10-05).")
 
     summary = access_review.roster_summary(info, now=time.time())
     section_header(f"Admin role · {ADMIN_ACCESS_ROLE}",
@@ -1229,7 +1227,7 @@ def _access_tab() -> None:
             "Re-check now clears only your own session's access memo and runs one fresh lookup. It cannot "
             "shorten anyone else's wait: each viewer's session re-resolves on its own within "
             f"{humanize_duration(ACCESS_TTL_S)} (a failed lookup is retried {access_review.retry_schedule()}), "
-            "and every in-app change by an admin-by-role first re-verifies the membership (an answer at most "
+            "and every in-app change by an admin first re-verifies the membership (an answer at most "
             f"{humanize_duration(WRITE_RECHECK_S)} old).")
     if receipt:
         st.caption(str(receipt.get("text") or ""))
@@ -1241,13 +1239,11 @@ def _access_tab() -> None:
                     hint=access_review.lookup_check_hint(info))
     else:
         st.caption(summary["headline"])
-    allowlist = tuple(str(u).upper() for u in (info.get("allowlist") or ()))
     users = tuple(info.get("admin_users") or ())
     if summary["state"] == "ok" and users:
-        members = pd.DataFrame({"USER_NAME": list(users),
-                                # the allowlist folds case by design (hand-typed); roster names are exact
-                                "ALSO_NAMED_ADMIN": ["Yes" if str(u).upper() in allowlist else "No" for u in users]})
+        members = pd.DataFrame({"USER_NAME": list(users)})
         styled_table(with_user_names(members, _PAGE, user_col="USER_NAME", display_col="Name"))
+        st.caption("These direct members are the OVERWATCH admins; no username is hard-coded in the app.")
     nested = tuple(info.get("nested_roles") or ())
     if nested:
         styled_table(pd.DataFrame({
@@ -1258,8 +1254,6 @@ def _access_tab() -> None:
     elif summary["state"] == "ok":
         empty_state("clean", f"No role is granted {ADMIN_ACCESS_ROLE}: every holder is a direct user grant, "
                              "so nothing is left unexpanded.")
-    st.caption("Named admins (config OPERATOR_USERS: admins with no lookup, so a failed lookup never locks "
-               f"them out): {', '.join(allowlist) or 'none'}.")
 
     section_header("Who can open the app · USAGE on the Streamlit", "", "security")
     res = run(access_sql.show_grants_on_app_sql(), page=_PAGE, key="adm_app_grants", tier="live",
@@ -1342,23 +1336,23 @@ def _access_tab() -> None:
            "them holds USAGE on the database, schema and app, their members open the app only through another "
            "role that holds it; once they do, roles.sql's current proof block raises -20011 on its next run."
            if pending else ""),
-        "- **Admins** (every page, every in-app change): the named admins in config `OPERATOR_USERS`, and DIRECT "
-        f"user members of `{ADMIN_ACCESS_ROLE}`. A role granted `{ADMIN_ACCESS_ROLE}` is not expanded: its "
+        f"- **Admins** (every page, every in-app change): DIRECT user members of `{ADMIN_ACCESS_ROLE}`, and "
+        f"only them (no username is hard-coded). A role granted `{ADMIN_ACCESS_ROLE}` is not expanded: its "
         "members are not admins.",
         f"- **Everyone else who can open the app** (`{VIEW_ACCESS_ROLE}` members, `SNOW_*` holders who are not "
-        f"named admins, and a viewer the app cannot identify): the view-only {VIEWER_UNKNOWN_PROFILE} pages, "
-        f"{view_pages}. No changes.",
+        f"direct members of `{ADMIN_ACCESS_ROLE}`, and a viewer the app cannot identify): the view-only "
+        f"{VIEWER_UNKNOWN_PROFILE} pages, {view_pages}. No changes.",
         f"- **Make someone an admin**: `GRANT ROLE {ADMIN_ACCESS_ROLE} TO USER <username>;` It applies to their "
         f"next session, or within {humanize_duration(ACCESS_TTL_S)} in an open one. Whoever can grant this role "
         "can create an OVERWATCH admin." + access_review.admin_reach_note(admin_role_usage),
         f"- **Remove an admin**: `REVOKE ROLE {ADMIN_ACCESS_ROLE} FROM USER <username>;` Their in-app changes stop "
         f"within {humanize_duration(WRITE_RECHECK_S)} (every change re-verifies); their pages follow within "
-        f"{humanize_duration(ACCESS_TTL_S)}. A named admin in config OPERATOR_USERS stays an admin (no lookup) "
-        "until removed from that allowlist and redeployed.",
-        "- **When the lookup fails or lists nobody**: admins-by-role are read-only until it recovers (it fails "
-        "closed, never open), every non-admin's sidebar says 'Admin access check unavailable' (the app cannot "
-        f"tell who is a member meanwhile), and it is retried {access_review.retry_schedule()} while it keeps "
-        "failing. The named admins are unaffected.",
+        f"{humanize_duration(ACCESS_TTL_S)}. REVOKE alone removes an admin; no redeploy.",
+        "- **When the lookup fails or lists nobody**: every viewer, admins included, is read-only until it "
+        "recovers (it fails closed, never open, and no username bypasses it); every viewer's sidebar says "
+        "'Admin access check unavailable' with what failed and what to check; this page cannot be opened "
+        "meanwhile, so fix it in Snowsight as SNOW_ACCOUNTADMINS and press Refresh data to re-check; it is "
+        f"retried {access_review.retry_schedule()} while it keeps failing.",
     ]))
 
 
@@ -2667,7 +2661,7 @@ def _setup_progress_tab() -> None:
 def render() -> None:
     f = filters()
     page_header("Admin", "Deployment health: installed, current, and internally consistent.", icon_name="admin")
-    # #3: operator gating resolves the VIEWER identity against the allowlist, not
+    # #3: operator gating resolves the VIEWER identity against ADMIN_ACCESS_ROLE membership, not
     # CURRENT_ROLE() (which is the app owner's role for every viewer under owner's-rights
     # SiS). Falls back to the role->profile check off-SiS. `profile` still drives page nav.
     is_operator = _is_operator()

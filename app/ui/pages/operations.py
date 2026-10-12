@@ -4866,7 +4866,7 @@ def render() -> None:
     f = filters()
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
+    # #3: operator gating from the VIEWER identity + ADMIN_ACCESS_ROLE membership, not CURRENT_ROLE().
     is_operator = _is_operator()
     page_header("Operations", "Queries, tasks, warehouses, contention, change impact, releases, pipeline SLAs, and emergency levers.", icon_name="operations",
                 scope_note=f"{f['company']} · {f['window_label']}")

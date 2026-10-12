@@ -14,9 +14,8 @@ hardcoded (owner decision, 2026-07). Rules:
 
 This scoping is a shared-account convenience filter, not a security boundary:
 under owner's-rights Streamlit-in-Snowflake, RBAC decides who can open the app
-and writes are gated to OVERWATCH admins (config.OPERATOR_USERS plus, since the
-owner decision of 2026-10-05, direct members of SNOW_PRI_GFR_PRD_ALFA_DSA,
-resolved live in-app). The same rules
+and writes are gated to OVERWATCH admins (direct members of
+SNOW_PRI_GFR_PRD_ALFA_DSA, resolved live in-app). The same rules
 are seeded into ``DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE`` by V001 and
 ``tests/test_companies.py`` keeps code and seed in sync.
 """

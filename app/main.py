@@ -79,11 +79,11 @@ from app.ui.pages import (  # noqa: E402
 # This removes the inconsistent emoji CoCo flagged, cleanly.
 
 # v4.610.0: the sidebar caption while the admin-role lookup cannot answer (session.viewer_access). Every
-# viewer not on OPERATOR_USERS sees it: without the lookup the app cannot tell a DSA member from a DTI one.
-# So it says who is held read-only (the admins by role, never the named admins, who need no lookup) and
-# never promises a view-only viewer changes on recovery (holistic 4.610 #2/#13).
-ACCESS_CHECK_UNAVAILABLE = (f"Admin access check unavailable — admins by role ({ADMIN_ACCESS_ROLE}) are read-only "
-                            "until it recovers; named admins are unaffected.")
+# identified SiS viewer sees it while the lookup cannot answer: no admin bypasses the lookup (v4.611.0, owner
+# 2026-10-07), and the app cannot tell a DSA member from a DTI one meanwhile. It names who is held read-only
+# and promises a view-only viewer nothing (holistic 4.610 #2/#13).
+ACCESS_CHECK_UNAVAILABLE = ("Admin access check unavailable — OVERWATCH admins (direct members of "
+                            f"{ADMIN_ACCESS_ROLE}) are read-only until it recovers.")
 
 _RENDERERS = {
     "Overview": overview.render,
@@ -97,6 +97,28 @@ _RENDERERS = {
     "Brief": brief.render,
     "Ask": ask.render,   # grounded Q&A (app/logic/ask + app/ui/pages/ask.py)
 }
+
+
+def _access_outage_detail() -> None:
+    """v4.611.0: the 'Why read-only?' sidebar panel, shown only while the admin-role lookup cannot answer.
+
+    With no username allowlist there is no in-app admin during an outage, and Admin ▸ App access cannot be
+    opened, so the diagnostic lives here, for every viewer: what failed (the lookup's own verdict and the
+    Snowflake error), what to check, and how to recover. It reads the session's memos (access_info with
+    roster=False: no extra lookup) and names no member and no role grantee."""
+    from app.core import session as _session
+    from app.logic import access_review
+
+    info = _session.access_info()
+    summary = access_review.roster_summary(info, now=time.time())
+    with st.expander("Why read-only?"):
+        st.caption(summary["headline"])
+        err = str(info.get("roster_error") or "")
+        if err:
+            st.code(err[:300], language=None)
+        st.caption(access_review.lookup_check_hint(info))
+        st.caption("Fix it in Snowsight as SNOW_ACCOUNTADMINS, then press Refresh data to re-check now (it "
+                   f"also retries on its own: {access_review.retry_schedule()}).")
 
 
 def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
@@ -124,11 +146,12 @@ def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
                 'margin-top:6px;display:inline-block;padding:1px 9px;border-radius:999px;'
                 'color:var(--ow-ink-mute);border:1px solid var(--ow-ink-mute)">'
                 '🔒 Read-only</div>', unsafe_allow_html=True)
-            # v4.610.0: the admin-role lookup failed or listed nobody, so an admin by role is
-            # read-only for now (fail closed). Say why instead of silently hiding their controls. A
-            # view-only viewer sees it too (membership is unknown meanwhile); the wording holds for both.
+            # v4.610.0: the admin-role lookup failed or listed nobody, so every admin is read-only for
+            # now (fail closed). Say why instead of silently hiding their controls. A view-only viewer
+            # sees it too (membership is unknown meanwhile); the wording holds for both.
             if access_source() in ACCESS_UNAVAILABLE_SOURCES:
                 st.caption(ACCESS_CHECK_UNAVAILABLE)
+                _access_outage_detail()
         if connected:
             from app.ui.components import last_refreshed_note
             st.markdown(
@@ -902,8 +925,8 @@ def main() -> None:
     # Page visibility keys on the VIEWER (st.user), NOT current_role() — under
     # owner's-rights SiS the role is the app owner's for every viewer, so a
     # role-based profile would show every viewer the owner's DBA pages. See
-    # session.active_profile() / viewer_access(): admins (OPERATOR_USERS or a direct
-    # ADMIN_ACCESS_ROLE grant) -> DBA; everyone else -> the view-only MONITOR pair, whose
+    # session.active_profile() / viewer_access(): admins (a direct ADMIN_ACCESS_ROLE
+    # grant) -> DBA; everyone else -> the view-only MONITOR pair, whose
     # landing page (pages[0]) is Cost Intelligence. An unknown profile name falls to the
     # least-privileged surface, never a wider one.
     profile = active_profile(role)
@@ -931,7 +954,7 @@ def main() -> None:
         if st.button("Retry connection"):
             st.cache_resource.clear()
             st.session_state.pop("_ow_current_role", None)
-            # v4.610.0: a lookup that failed during the outage must not hold an admin-by-role read-only
+            # v4.610.0: a lookup that failed during the outage must not hold an admin read-only
             # for its retry window once the connection is back (this viewer's memo only).
             from app.core.session import forget_access
             forget_access()

@@ -1547,13 +1547,14 @@ def severity_sort(df, sev_col: str = "SEVERITY", time_col: str = "RAISED_AT"):
 
 
 def owner_picker(label: str, *, key: str, current: str = "", default_to_viewer: bool = True) -> str:
-    """Owner selectbox seeded from config.OPERATOR_USERS + 'Other…' (free text) + '(unassigned)'
-    (Next-Fifty #20). Returns the owner string to write ('' = unassigned). A team label such as
-    'DBA' names nobody, so it is never the default."""
-    from app.config import OPERATOR_USERS
+    """Owner selectbox seeded from the direct members of ADMIN_ACCESS_ROLE (session.admin_roster_users:
+    this session's last good admin lookup, no extra query; empty off SiS) + 'Other…' (free text) +
+    '(unassigned)' (Next-Fifty #20). Returns the owner string to write ('' = unassigned). A team label
+    such as 'DBA' names nobody, so it is never the default."""
+    from app.core import session as _session
     from app.core.identity import viewer_name
     from app.logic.workbench import OWNER_OTHER_CHOICE, owner_choices, resolve_owner
-    options, idx = owner_choices(OPERATOR_USERS, current=current,
+    options, idx = owner_choices(_session.admin_roster_users(), current=current,
                                  viewer=viewer_name() if default_to_viewer else "")
     choice = st.selectbox(label, options, index=idx, key=key,
                           help="Assign a person so the item is someone's commitment. Team labels "
