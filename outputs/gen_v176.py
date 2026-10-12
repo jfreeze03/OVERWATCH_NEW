@@ -13,12 +13,14 @@ tests/test_proc_lineage.py -- and emits, in order:
   guard (-20176, v < 175) -> marker + SP_ALERT_SCAN re-derived from V174 -> SCHEMA_VERSION 176.
 
 SP_ALERT_SCAN, byte-identical to V174 except arm [27] SEC_ADMIN_GRANT, three insertions:
-  C27  an uncorrelated CTE rt after ag: the users holding a no-grantor SYSTEM$MANAGED grant whose name is exactly
-       STPLATSTREAMLIT + digits (same view as the admin grant, so no cross-view latency race; not time-bounded:
-       a few rows per deploy);
+  C27  an uncorrelated CTE rt after ag: one row per user name holding a no-grantor SYSTEM$MANAGED grant whose name is
+       exactly STPLATSTREAMLIT + digits, with that grant's time (MARK_FROM / MARK_TO; same view as the admin grant,
+       so no cross-view latency race; not time-bounded: a few rows per deploy);
   R27  a LEFT JOIN rt on GRANTEE_NAME and one WHERE NOT COALESCE(...) after the JOIN's ON clause: a row is skipped
        only when (a) GRANTED_BY IS NULL, (b) REGEXP_LIKE(name, 'STPLATSTREAMLIT[0-9]+'), (c) the role is
-       SNOW_ACCOUNTADMINS or SNOW_SYSADMINS and (d) rt matched -- any NULL keeps the row (fails open, toward alerting);
+       SNOW_ACCOUNTADMINS or SNOW_SYSADMINS and (d) rt matched the same user within 60 s of the admin grant (the
+       same deploy: a user re-created later under an old runtime name does not inherit the marker, review r1) --
+       any NULL keeps the row (fails open, toward alerting);
   H27  a two-line V176 note above the arm's BEGIN.
 The ag CTE (PRIOR_GRANTS' full history) is untouched; [18] and [26] are unchanged (the runtime users have no
 LOGIN_HISTORY, probe S4); the RETURN labels, the 14-block tally and every other arm are unchanged. The predicate text
@@ -95,11 +97,12 @@ PREDICATE = (f"NOT COALESCE(g.GRANTED_BY IS NULL AND REGEXP_LIKE(g.GRANTEE_NAME,
 C27_OLD = ("                           'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', 'SNOW_PRI_GFR_PRD_ALFA_DSA')\n"
            "        )\n")
 RT_CTE = ("        rt AS (\n"
-          "            SELECT DISTINCT GRANTEE_NAME\n"
+          "            SELECT GRANTEE_NAME, MIN(CREATED_ON) AS MARK_FROM, MAX(CREATED_ON) AS MARK_TO\n"
           "            FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS\n"
           f"            WHERE ROLE = '{MARKER_ROLE}'\n"
           "              AND GRANTED_BY IS NULL\n"
           f"              AND REGEXP_LIKE(GRANTEE_NAME, '{PATTERN}')\n"
+          "            GROUP BY GRANTEE_NAME\n"
           "        )\n")
 C27_NEW = ("                           'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', 'SNOW_PRI_GFR_PRD_ALFA_DSA')\n"
            "        ),\n" + RT_CTE)
@@ -107,7 +110,8 @@ C27_NEW = ("                           'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', '
 # ---- R27: the LEFT JOIN and the filter, right after the JOIN's ON clause ----------------------------------------
 R27_OLD = "         AND g.CREATED_ON >= DATEADD('hour', -26, CURRENT_TIMESTAMP())\n"
 JOIN_RT = ("        LEFT JOIN rt\n"
-           "          ON rt.GRANTEE_NAME = g.GRANTEE_NAME\n")
+           "          ON rt.GRANTEE_NAME = g.GRANTEE_NAME\n"
+           "         AND g.CREATED_ON BETWEEN DATEADD('second', -60, rt.MARK_FROM) AND DATEADD('second', 60, rt.MARK_TO)\n")
 R27_NEW = R27_OLD + JOIN_RT + f"        WHERE {PREDICATE}\n"
 
 # ---- H27: the note ------------------------------------------------------------------------------------------------
@@ -191,11 +195,14 @@ HEADER = f"""-- {NAME}
 --       (a) GRANTED_BY IS NULL: Snowflake made the grant (a GRANT run by any person or role records its grantor);
 --       (b) the grantee name is exactly STPLATSTREAMLIT followed by digits (REGEXP_LIKE: anchored, case-sensitive);
 --       (c) the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS (the app owner, today and after the planned switch);
---       (d) the same user also holds a no-grantor {MARKER_ROLE} grant in the same view (GRANTS_TO_USERS): a
---           system-only role no customer statement can grant, read from the view the admin grant comes from, so
---           there is no cross-view latency race (USERS.TYPE would be one).
---     (d) is an uncorrelated CTE (rt, not time-bounded: a few rows per deploy) plus a LEFT JOIN on GRANTEE_NAME;
---     the filter is one NOT COALESCE(..., FALSE) after the JOIN. The ag CTE is untouched, so PRIOR_GRANTS still
+--       (d) the same user also got a no-grantor {MARKER_ROLE} grant within 60 s of the admin grant, in the same
+--           view (GRANTS_TO_USERS): a system-only role no customer statement can grant, made in the same deploy
+--           (the live pair lands milliseconds apart), read from the view the admin grant comes from, so there is no
+--           cross-view latency race (USERS.TYPE would be one). The 60 s tie means a user re-created later under an
+--           old runtime name (the names are public) does not inherit that deploy's marker (review r1).
+--     (d) is an uncorrelated CTE (rt: one row per name with MARK_FROM / MARK_TO, not time-bounded: a few rows per
+--     deploy) plus a LEFT JOIN on GRANTEE_NAME and the 60 s window; the filter is one NOT COALESCE(..., FALSE)
+--     after the JOIN. The ag CTE is untouched, so PRIOR_GRANTS still
 --     counts the full history. Plus a two-line V176 note above the arm's BEGIN.
 --   Unchanged: the admin-role list, titles, details, keys and severity; every other arm, [18] SEC_NEW_ADMIN_NETWORK
 --   and [26] SEC_LOGIN_TAKEOVER included (these users have no LOGIN_HISTORY); sweeps, gates, the RETURN labels and
@@ -230,15 +237,15 @@ $$;
 
 MARK = ("-- >>> derived:SP_ALERT_SCAN  (from V174; [27] SEC_ADMIN_GRANT skips a grant with no grantor of "
         "SNOW_ACCOUNTADMINS or SNOW_SYSADMINS to a Snowflake Streamlit runtime user STPLATSTREAMLIT<digits> that "
-        f"also holds a no-grantor {MARKER_ROLE} grant -- owner 2026-10-12, V176)\n")
+        f"also got a no-grantor {MARKER_ROLE} grant within 60 s of it -- owner 2026-10-12, V176)\n")
 
 DESCRIPTION = (
     "Owner 2026-10-12: app deploys no longer page Teams. SP_ALERT_SCAN re-derived from V174, byte-identical except "
     "arm [27] SEC_ADMIN_GRANT (plus a two-line note), which skips a grant row only when all four hold: GRANTED_BY "
     "IS NULL, the grantee is exactly STPLATSTREAMLIT followed by digits (the Snowflake Streamlit runtime user made on "
-    "each deploy), the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, and the same user holds a no-grantor grant of "
-    "the Snowflake system-only managed role in GRANTS_TO_USERS (an uncorrelated CTE and a LEFT JOIN; any NULL keeps "
-    "the row). Every other grant still raises; the PRIOR_GRANTS history, the role list, the RETURN labels, the "
+    "each deploy), the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, and the same user got a no-grantor grant of "
+    "the Snowflake system-only managed role within 60 seconds of it in GRANTS_TO_USERS (the same deploy; an "
+    "uncorrelated CTE and a LEFT JOIN on name and that window; any NULL keeps the row). Every other grant still raises; the PRIOR_GRANTS history, the role list, the RETURN labels, the "
     "tallies, every other arm and SP_ALERT_SCAN_DAILY are unchanged. No task change, no new object, no procedure run "
     "at apply time.")
 assert len(DESCRIPTION) <= 4000 and "'" not in DESCRIPTION and "$" not in DESCRIPTION
@@ -350,9 +357,10 @@ WHERE g.CREATED_ON >= DATEADD('day', -30, CURRENT_TIMESTAMP())
 ORDER BY V176_VERDICT, g.CREATED_ON DESC
 LIMIT 500;
 
--- P176.2 the runtime-user SEC_ADMIN_GRANT events still open: resolve them after the apply. In Alerts > Events, filter
---        rule SEC_ADMIN_GRANT, turn on Bulk select, tick only these rows (title STPLATSTREAMLIT<digits>, detail 'by ?')
---        and resolve as EXPECTED with the note: Streamlit runtime user system grant on app deploy (GRANTED_BY NULL);
+-- P176.2 the runtime-user SEC_ADMIN_GRANT events still open: resolve them after the apply. In Alerts > Open events
+--        (Group by rule off), turn on Bulk select and tick only the rows whose TITLE and RAISED_AT match this grid
+--        (this query already checked the rule, the runtime name and the no-grantor 'by ?' detail), then resolve
+--        as EXPECTED with the note: Streamlit runtime user system grant on app deploy (GRANTED_BY NULL);
 --        excluded from SEC_ADMIN_GRANT by V176. EXPECTED, not NOISE: NOISE would count against the rule's precision.
 --        Nothing is re-sent to Teams. HAS_SYSTEM_MANAGED_COGRANT FALSE = V176 would still raise that grant: check it first.
 WITH {RT_SQL}
@@ -389,23 +397,24 @@ assert "'rule SEC_ADMIN_GRANT - other rules unaffected'" in hourly and "'ALERT_S
 assert hourly.count("'alert scan ' || (14 - :fails) || '/14 rule blocks ok'") == 2
 _V176_3_WITH = (
     "WITH " + AG_SQL + ",\n" + RT_SQL + ",\n"
-    "dep AS (\n"                                             # the runtime users of the deploys since the apply
-    "    SELECT DISTINCT GRANTEE_NAME\n"
+    "dep AS (\n"                                             # the runtime grants of the deploys since the apply
+    "    SELECT DISTINCT GRANTEE_NAME, CREATED_ON\n"
     "    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS\n"
     "    WHERE GRANTED_BY IS NULL\n"
     f"      AND REGEXP_LIKE(GRANTEE_NAME, '{PATTERN}')\n"
     f"      AND ROLE IN ({_q_owner})\n"
     f"      AND CREATED_ON >= {APPLIED_176}\n"
     "),\n"
-    "missed AS (\n"                                          # every grant V176 still raises, 3h or older
+    "missed AS (\n"                                          # every grant V176 still raises, 4h or older
     "    SELECT g.GRANTEE_NAME || ' (' || g.ROLE || ')' AS GRANT_NAME,\n"
     f"           {_KEY} AS DEDUPE_KEY\n"
     "    FROM ag g\n"
     "    " + JOIN_SQL.replace("\n", "\n    ") + "\n"
     f"    WHERE g.CREATED_ON >= {APPLIED_176}\n"
-    "      AND g.CREATED_ON <= DATEADD('hour', -3, CURRENT_TIMESTAMP())\n"
+    "      AND g.CREATED_ON <= DATEADD('hour', -4, CURRENT_TIMESTAMP())\n"
     f"      AND {PREDICATE}\n"
     ")\n")
+_JOIN_V3 = JOIN_SQL.replace("\n", "\n" + " " * 18)                  # the arm's own name + 60 s join, re-indented
 _NO_DEPLOY = ("WHEN (SELECT COUNT(*) FROM dep) = 0\n"
               "            THEN 'WAIT: no deploy since the apply on record yet (GRANTS_TO_USERS lags up to ~2h)'")
 
@@ -463,21 +472,21 @@ SELECT 'V176.2 no rule_block_failed of any rule since the apply',
 
 -- V176.3 about 3h after the next app deploy (the live test; WAIT until one is on record): the deploy's runtime grant is
 --        on record with no grantor, carries the {MARKER_ROLE} co-grant and raised NO SEC_ADMIN_GRANT event. The
---        last row is the positive control: every admin grant V176 still raises, made since the apply and 3h or older,
---        DID raise one (a person's grant to a runtime user included). A FAIL there with the rule enabled is a real miss.
+--        last row is the positive control: every admin grant V176 still raises, made since the apply and 4h or older
+--        (GRANTS_TO_USERS can land ~2h late and the hourly read varies), DID raise one (a person's grant to a runtime
+--        user included). A FAIL that persists on a re-run an hour later, with the rule enabled, is a real miss.
 {_V176_3_WITH}SELECT 'V176.3 a deploy since the apply is on record' AS CHECK_NAME,
        CASE {_NO_DEPLOY}
-            ELSE 'OK (' || (SELECT COUNT(*) FROM dep) || ' runtime user(s))' END AS RESULT
+            ELSE 'OK (' || (SELECT COUNT(DISTINCT GRANTEE_NAME) FROM dep) || ' runtime user(s))' END AS RESULT
 UNION ALL
 SELECT 'V176.3 each runtime user since the apply has the {MARKER_ROLE} co-grant',
        CASE {_NO_DEPLOY}
             ELSE (SELECT IFF(COUNT(*) = 0, 'OK',
-                             'CHECK: ' || LISTAGG(DISTINCT d.GRANTEE_NAME, ', ') || ' lack it, so SEC_ADMIN_GRANT '
-                             || 'still raises them; re-check in 2h (the co-grant row may land later), else the '
-                             || 'runtime grant changed shape')
-                  FROM dep d
-                  LEFT JOIN rt
-                    ON rt.GRANTEE_NAME = d.GRANTEE_NAME
+                             'CHECK: ' || LISTAGG(DISTINCT g.GRANTEE_NAME, ', ') || ' lack it within 60 s of the '
+                             || 'admin grant, so SEC_ADMIN_GRANT still raises them; re-check in 2h (the co-grant '
+                             || 'row may land later), else the runtime grant changed shape')
+                  FROM dep g
+                  {_JOIN_V3}
                   WHERE rt.GRANTEE_NAME IS NULL) END
 UNION ALL
 SELECT 'V176.3 no SEC_ADMIN_GRANT event for a no-grantor runtime grant since the apply',

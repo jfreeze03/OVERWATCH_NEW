@@ -61,16 +61,20 @@ _A26 = ("    -- [26] SEC_LOGIN_TAKEOVER", "    -- [27] SEC_ADMIN_GRANT")
 _A27 = ("    -- [27] SEC_ADMIN_GRANT", "    IF (MOD(ct_hour, 3) = 2) THEN   -- V157 cadence gate: [22]")
 _MARK = ("-- >>> derived:SP_ALERT_SCAN  (from V174; [27] SEC_ADMIN_GRANT skips a grant with no grantor of "
          "SNOW_ACCOUNTADMINS or SNOW_SYSADMINS to a Snowflake Streamlit runtime user STPLATSTREAMLIT<digits> that also "
-         f"holds a no-grantor {_MANAGED} grant -- owner 2026-10-12, V176)\n")
+         f"got a no-grantor {_MANAGED} grant within 60 s of it -- owner 2026-10-12, V176)\n")
 _PREDICATE = ("NOT COALESCE(g.GRANTED_BY IS NULL AND REGEXP_LIKE(g.GRANTEE_NAME, 'STPLATSTREAMLIT[0-9]+') "
               "AND (g.ROLE = 'SNOW_ACCOUNTADMINS' OR g.ROLE = 'SNOW_SYSADMINS') AND rt.GRANTEE_NAME IS NOT NULL, FALSE)")
 _RT = ("        rt AS (\n"
-       "            SELECT DISTINCT GRANTEE_NAME\n"
+       "            SELECT GRANTEE_NAME, MIN(CREATED_ON) AS MARK_FROM, MAX(CREATED_ON) AS MARK_TO\n"
        "            FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS\n"
        f"            WHERE ROLE = '{_MANAGED}'\n"
        "              AND GRANTED_BY IS NULL\n"
        "              AND REGEXP_LIKE(GRANTEE_NAME, 'STPLATSTREAMLIT[0-9]+')\n"
+       "            GROUP BY GRANTEE_NAME\n"
        "        )\n")
+_JOIN = ("        LEFT JOIN rt\n"
+         "          ON rt.GRANTEE_NAME = g.GRANTEE_NAME\n"
+         "         AND g.CREATED_ON BETWEEN DATEADD('second', -60, rt.MARK_FROM) AND DATEADD('second', 60, rt.MARK_TO)\n")
 
 # ---------------------------------------------------------------------------------------------------------------
 # Test-side copies of every declared insertion (independent of outputs/gen_v176.py): (V174 text, V176 text, slice)
@@ -80,9 +84,7 @@ _DELTAS: list[tuple[str, str, tuple[str, str]]] = [
      "                           'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', 'SNOW_PRI_GFR_PRD_ALFA_DSA')\n        ),\n" + _RT,
      _A27),
     ("         AND g.CREATED_ON >= DATEADD('hour', -26, CURRENT_TIMESTAMP())\n",
-     "         AND g.CREATED_ON >= DATEADD('hour', -26, CURRENT_TIMESTAMP())\n"
-     "        LEFT JOIN rt\n"
-     "          ON rt.GRANTEE_NAME = g.GRANTEE_NAME\n"
+     "         AND g.CREATED_ON >= DATEADD('hour', -26, CURRENT_TIMESTAMP())\n" + _JOIN +
      f"        WHERE {_PREDICATE}\n", _A27),
     ("    --      makes the user an OVERWATCH admin (in-app writes and the account levers), so it raises too.\n"
      "    BEGIN\n",
@@ -214,7 +216,7 @@ def test_v176_part_b_checks_the_v176_body_with_quote_free_fragments(tmp_path):
     assert "CONTEXT LIKE 'rule SEC_ADMIN_GRANT %'" in v2 and "'alert scan 14/14 rule blocks ok'" in v2
     v3 = part_b[part_b.index("-- V176.3 "):]
     assert v3.count(_PREDICATE) == 1 and f"RAISED_AT >= DATEADD('minute', 30, {a176})" in v3
-    assert "AND g.CREATED_ON <= DATEADD('hour', -3, CURRENT_TIMESTAMP())" in v3
+    assert "AND g.CREATED_ON <= DATEADD('hour', -4, CURRENT_TIMESTAMP())" in v3
     assert v3.count("WHEN (SELECT COUNT(*) FROM dep) = 0") == 3            # the deploy rows WAIT until one is on record
     for check in ("'V176.1 SCHEMA_VERSION has 176'", "'V176.1 SEC_ADMIN_GRANT is enabled'", "WHERE VERSION = 176"):
         assert check in part_b, check
@@ -239,8 +241,8 @@ def test_v176_first_line_guard_and_version():
     flat = " ".join(ln.lstrip("- ") for ln in header.splitlines())
     for phrase in ("Whenever I deploy the app, this keeps popping up in Teams. I want to turn this off.",
                    "re-derived from V174", "(a) GRANTED_BY IS NULL", "(b) the grantee name is exactly STPLATSTREAMLIT",
-                   "(c) the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS", f"(d) the same user also holds a no-grantor "
-                   f"{_MANAGED} grant in the same view", "it fails open", "The ag CTE is untouched",
+                   "(c) the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS", f"(d) the same user also got a no-grantor "
+                   f"{_MANAGED} grant within 60 s of the admin grant", "does not inherit that deploy's marker", "it fails open", "The ag CTE is untouched",
                    "[26] SEC_LOGIN_TAKEOVER included", "PREFLIGHT P176.2", "PART B V176.1-V176.3",
                    "Rolling back V176", "resolve them as EXPECTED"):
         assert phrase in flat, phrase
@@ -331,7 +333,7 @@ def test_v176_every_declared_insertion_is_real(i):
 def test_v176_changes_only_arm_27_and_adds_one_predicate():
     arm = _between(_H, *_A27)
     assert arm.count(_PREDICATE) == 1 and _H.count(_PREDICATE) == 1 and arm.count(_RT) == 1
-    assert arm.count("        LEFT JOIN rt\n          ON rt.GRANTEE_NAME = g.GRANTEE_NAME\n") == 1
+    assert arm.count(_JOIN) == 1
     assert _H.count(f"'{_PATTERN}'") == 2 and _H.count(f"'{_MANAGED}'") == 1
     # [18] and [26] are V174's byte for byte (probe S4: the runtime users have no LOGIN_HISTORY)
     for span in (_A18, _A26):
@@ -345,8 +347,10 @@ def test_v176_changes_only_arm_27_and_adds_one_predicate():
     ag = _between(arm, "        ag AS (\n", "        ),\n        rt AS (")
     assert ag == _between(_between(_H174, *_A27), "        ag AS (\n", "        )\n") and "STPLAT" not in ag
     assert arm.index(_RT) < arm.index("        FROM cfg c\n") < arm.index(_PREDICATE) < arm.index(") b (RULE_ID")
-    # an uncorrelated CTE: rt names only GRANTS_TO_USERS' own columns, no outer alias and no time bound
-    assert not re.search(r"\b(?:g|c|b|e)\.", _RT) and "CREATED_ON" not in _RT and "DATEADD" not in _RT
+    # an uncorrelated CTE: rt names only GRANTS_TO_USERS' own columns, no outer alias and no time bound; CREATED_ON
+    # only feeds the MARK_FROM / MARK_TO the join's 60 s window reads (review r1)
+    assert not re.search(r"\b(?:g|c|b|e)\.", _RT) and "DATEADD" not in _RT and "CURRENT_TIMESTAMP" not in _RT
+    assert _RT.count("CREATED_ON") == 2 and "MIN(CREATED_ON) AS MARK_FROM, MAX(CREATED_ON) AS MARK_TO" in _RT
     # no new clock literal, no THRESHOLD_NUM read, no EXISTS / IN subquery added
     clocks = re.compile(r"(?:HOUR|DAYOFWEEKISO)\([\w.]+\) (?:>=|<|>|<=|=) \d+")
     assert sorted(clocks.findall(_H)) == sorted(clocks.findall(_H174))

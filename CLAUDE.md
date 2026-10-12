@@ -236,9 +236,10 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   ACCOUNTADMIN + `security_sql.ADMIN_HOLDER_ROLES` (SNOW_ACCOUNTADMINS, SNOW_SYSADMINS, SNOW_PRI_GFR_PRD_ALFA_DSA);
   `tests/test_security_alert_parity.py` binds both lists to the latest SP_ALERT_SCAN. Since V176 (owner 2026-10-12:
   every app deploy paged Teams) [27] skips a grant only when it has no grantor, the grantee is exactly
-  STPLATSTREAMLIT + digits, the role is SNOW_ACCOUNTADMINS / SNOW_SYSADMINS and the same user holds a no-grantor
-  SYSTEM$MANAGED grant (an uncorrelated rt CTE + LEFT JOIN; any NULL keeps the row); the same parity test binds
-  that predicate to `security_sql._not_streamlit_runtime_grant` / `_streamlit_runtime_users` (admin_grant_context,
+  STPLATSTREAMLIT + digits, the role is SNOW_ACCOUNTADMINS / SNOW_SYSADMINS and the same user got a no-grantor
+  SYSTEM$MANAGED grant within 60 s of it (an uncorrelated rt CTE + a LEFT JOIN on name and that window; any NULL
+  keeps the row); the same parity test binds that predicate and join to `security_sql._not_streamlit_runtime_grant` /
+  `_streamlit_runtime_users` / `_streamlit_runtime_join` (admin_grant_context,
   the app twin). [18] and [26] do not carry it (no runtime-user logins). SP_INCIDENT_AUTODECLARE never
   declares for SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT (a hard-coded crit-CTE exclusion, V162 owner
   decision), and its [attach] links them only to an incident that already holds the same user (V162

@@ -50,15 +50,16 @@ def test_streamlit_runtime_grant_skip_is_one_predicate_in_the_arm_and_the_app():
     takeover, grant = _arms()
     frag = security_sql._not_streamlit_runtime_grant("g", "rt")
     cte = security_sql._streamlit_runtime_users()
+    join = f"LEFT JOIN rt ON {security_sql._streamlit_runtime_join('g', 'rt')}"
     assert grant.count(frag) == 1 and "STPLAT" not in takeover
     scan = _latest_proc_bodies()["SP_ALERT_SCAN"]
     assert "STPLAT" not in _arm(scan, "    -- [18] SEC_NEW_ADMIN_NETWORK", "    -- [20] SEC_NEW_EXPOSURE")
     flat = " ".join(grant.split())
-    assert flat.count(f"rt AS ( {cte} )") == 1 and flat.count("LEFT JOIN rt ON rt.GRANTEE_NAME = g.GRANTEE_NAME") == 1
+    assert flat.count(f"rt AS ( {cte} )") == 1 and flat.count(join) == 1
     for company in ("ALL", "ALFA"):
         app = security_sql.admin_grant_context(90, company)
         assert app.count(frag) == 1 and app.count(cte) == 1
-        assert " ".join(app.split()).count("LEFT JOIN rt ON rt.GRANTEE_NAME = g.GRANTEE_NAME") == 1
+        assert " ".join(app.split()).count(join) == 1
     # the owner pair is watched by the alert and read by the panel (ELEVATED_ROLES), so the skip has something to skip
     assert set(security_sql.STREAMLIT_RUNTIME_OWNER_ROLES) < set(security_sql.ALERT_ADMIN_ROLES)
     assert set(security_sql.STREAMLIT_RUNTIME_OWNER_ROLES) < set(security_sql.ELEVATED_ROLES)

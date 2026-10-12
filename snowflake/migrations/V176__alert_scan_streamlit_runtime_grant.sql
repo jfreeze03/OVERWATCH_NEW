@@ -17,11 +17,14 @@
 --       (a) GRANTED_BY IS NULL: Snowflake made the grant (a GRANT run by any person or role records its grantor);
 --       (b) the grantee name is exactly STPLATSTREAMLIT followed by digits (REGEXP_LIKE: anchored, case-sensitive);
 --       (c) the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS (the app owner, today and after the planned switch);
---       (d) the same user also holds a no-grantor SYSTEM$MANAGED grant in the same view (GRANTS_TO_USERS): a
---           system-only role no customer statement can grant, read from the view the admin grant comes from, so
---           there is no cross-view latency race (USERS.TYPE would be one).
---     (d) is an uncorrelated CTE (rt, not time-bounded: a few rows per deploy) plus a LEFT JOIN on GRANTEE_NAME;
---     the filter is one NOT COALESCE(..., FALSE) after the JOIN. The ag CTE is untouched, so PRIOR_GRANTS still
+--       (d) the same user also got a no-grantor SYSTEM$MANAGED grant within 60 s of the admin grant, in the same
+--           view (GRANTS_TO_USERS): a system-only role no customer statement can grant, made in the same deploy
+--           (the live pair lands milliseconds apart), read from the view the admin grant comes from, so there is no
+--           cross-view latency race (USERS.TYPE would be one). The 60 s tie means a user re-created later under an
+--           old runtime name (the names are public) does not inherit that deploy's marker (review r1).
+--     (d) is an uncorrelated CTE (rt: one row per name with MARK_FROM / MARK_TO, not time-bounded: a few rows per
+--     deploy) plus a LEFT JOIN on GRANTEE_NAME and the 60 s window; the filter is one NOT COALESCE(..., FALSE)
+--     after the JOIN. The ag CTE is untouched, so PRIOR_GRANTS still
 --     counts the full history. Plus a two-line V176 note above the arm's BEGIN.
 --   Unchanged: the admin-role list, titles, details, keys and severity; every other arm, [18] SEC_NEW_ADMIN_NETWORK
 --   and [26] SEC_LOGIN_TAKEOVER included (these users have no LOGIN_HISTORY); sweeps, gates, the RETURN labels and
@@ -52,7 +55,7 @@ BEGIN
 END;
 $$;
 
--- >>> derived:SP_ALERT_SCAN  (from V174; [27] SEC_ADMIN_GRANT skips a grant with no grantor of SNOW_ACCOUNTADMINS or SNOW_SYSADMINS to a Snowflake Streamlit runtime user STPLATSTREAMLIT<digits> that also holds a no-grantor SYSTEM$MANAGED grant -- owner 2026-10-12, V176)
+-- >>> derived:SP_ALERT_SCAN  (from V174; [27] SEC_ADMIN_GRANT skips a grant with no grantor of SNOW_ACCOUNTADMINS or SNOW_SYSADMINS to a Snowflake Streamlit runtime user STPLATSTREAMLIT<digits> that also got a no-grantor SYSTEM$MANAGED grant within 60 s of it -- owner 2026-10-12, V176)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -862,11 +865,12 @@ BEGIN
                            'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', 'SNOW_PRI_GFR_PRD_ALFA_DSA')
         ),
         rt AS (
-            SELECT DISTINCT GRANTEE_NAME
+            SELECT GRANTEE_NAME, MIN(CREATED_ON) AS MARK_FROM, MAX(CREATED_ON) AS MARK_TO
             FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
             WHERE ROLE = 'SYSTEM$MANAGED'
               AND GRANTED_BY IS NULL
               AND REGEXP_LIKE(GRANTEE_NAME, 'STPLATSTREAMLIT[0-9]+')
+            GROUP BY GRANTEE_NAME
         )
         SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
         FROM (
@@ -895,6 +899,7 @@ BEGIN
          AND g.CREATED_ON >= DATEADD('hour', -26, CURRENT_TIMESTAMP())
         LEFT JOIN rt
           ON rt.GRANTEE_NAME = g.GRANTEE_NAME
+         AND g.CREATED_ON BETWEEN DATEADD('second', -60, rt.MARK_FROM) AND DATEADD('second', 60, rt.MARK_TO)
         WHERE NOT COALESCE(g.GRANTED_BY IS NULL AND REGEXP_LIKE(g.GRANTEE_NAME, 'STPLATSTREAMLIT[0-9]+') AND (g.ROLE = 'SNOW_ACCOUNTADMINS' OR g.ROLE = 'SNOW_SYSADMINS') AND rt.GRANTEE_NAME IS NOT NULL, FALSE)
 
         ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
@@ -1365,5 +1370,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 176 AS VERSION,
-       'Owner 2026-10-12: app deploys no longer page Teams. SP_ALERT_SCAN re-derived from V174, byte-identical except arm [27] SEC_ADMIN_GRANT (plus a two-line note), which skips a grant row only when all four hold: GRANTED_BY IS NULL, the grantee is exactly STPLATSTREAMLIT followed by digits (the Snowflake Streamlit runtime user made on each deploy), the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, and the same user holds a no-grantor grant of the Snowflake system-only managed role in GRANTS_TO_USERS (an uncorrelated CTE and a LEFT JOIN; any NULL keeps the row). Every other grant still raises; the PRIOR_GRANTS history, the role list, the RETURN labels, the tallies, every other arm and SP_ALERT_SCAN_DAILY are unchanged. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
+       'Owner 2026-10-12: app deploys no longer page Teams. SP_ALERT_SCAN re-derived from V174, byte-identical except arm [27] SEC_ADMIN_GRANT (plus a two-line note), which skips a grant row only when all four hold: GRANTED_BY IS NULL, the grantee is exactly STPLATSTREAMLIT followed by digits (the Snowflake Streamlit runtime user made on each deploy), the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, and the same user got a no-grantor grant of the Snowflake system-only managed role within 60 seconds of it in GRANTS_TO_USERS (the same deploy; an uncorrelated CTE and a LEFT JOIN on name and that window; any NULL keeps the row). Every other grant still raises; the PRIOR_GRANTS history, the role list, the RETURN labels, the tallies, every other arm and SP_ALERT_SCAN_DAILY are unchanged. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 176);

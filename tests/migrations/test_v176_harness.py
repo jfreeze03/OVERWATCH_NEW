@@ -133,6 +133,26 @@ def test_a_runtime_shaped_grant_without_the_system_managed_co_grant_raises(label
     assert row["TITLE"].endswith(f"granted to {_RUNTIME} - first time"), label
 
 
+def test_a_user_recreated_under_an_old_runtime_name_raises():
+    """Review r1: the runtime names are public (alerts, Teams), and the marker is matched to the SAME deploy. A deploy
+    20 days ago, then a user re-created under that name and given a no-grantor SNOW_ACCOUNTADMINS grant an hour ago
+    (no new SYSTEM$MANAGED): V176 raises it, as V174 does; the old deploy's marker does not cover it."""
+    old = _deploy(at=_NOW - timedelta(days=20))
+    later = v162h._grant(_RUNTIME, "SNOW_ACCOUNTADMINS", _NOW - timedelta(hours=1), by=None)
+    (row,) = v162h._run(_ARM27, _NOW, grants=[*old, later])
+    assert row["TITLE"].startswith(f"Admin role SNOW_ACCOUNTADMINS granted to {_RUNTIME}")
+    assert v162h._run(_ARM27_174, _NOW, grants=[*old, later])[0]["DEDUPE_KEY"] == row["DEDUPE_KEY"]
+
+
+@pytest.mark.parametrize("gap_s, skipped", [(0, True), (59, True), (-59, True), (61, False), (-61, False)])
+def test_the_marker_must_be_within_a_minute_of_the_admin_grant(gap_s, skipped):
+    at = _NOW - timedelta(hours=2)
+    grants = [v162h._grant(_RUNTIME, "SNOW_ACCOUNTADMINS", at, deleted=at + timedelta(seconds=6), by=None),
+              v162h._grant(_RUNTIME, _MANAGED, at + timedelta(seconds=gap_s), deleted=at + timedelta(seconds=6),
+                           by=None)]
+    assert (v162h._run(_ARM27, _NOW, grants=grants) == []) is skipped
+
+
 @pytest.mark.parametrize("user", [
     "stplatstreamlit98004567325",       # a quoted lower-case name: REGEXP_LIKE is case-sensitive
     "STPLATSTREAMLIT",                  # no digits
@@ -441,10 +461,15 @@ def test_part_b_v176_3_catches_a_missing_co_grant_and_an_old_body(tmp_path):
     assert no_co[_C4] == "OK"                    # it raised, as the fail-open rule says
     old = _v176_3(tmp_path, _deploy(at=v162h._at(v162h._WED, 11)), scan=_ARM27_174)
     assert old[_C2] == "OK" and old[_C3] == (f"FAIL: Admin role SNOW_ACCOUNTADMINS granted to {_RUNTIME} - first time")
+    # review r1: a SYSTEM$MANAGED grant to the same name, but not from the same deploy, is no co-grant either
+    at = v162h._at(v162h._WED, 11)
+    late = _v176_3(tmp_path, [v162h._grant(_RUNTIME, "SNOW_ACCOUNTADMINS", at, by=None),
+                              v162h._grant(_RUNTIME, _MANAGED, at + timedelta(minutes=5), by=None)])
+    assert late[_C2].startswith(f"CHECK: {_RUNTIME} lack it within 60 s") and late[_C3].startswith("FAIL: Admin role")
 
 
 def test_part_b_v176_3_positive_control_catches_a_real_miss(tmp_path):
-    """A person's admin grant made after the apply and 3h or older must have raised; one that did not is a FAIL
+    """A person's admin grant made after the apply and 4h or older must have raised; one that did not is a FAIL
     (here: a scan that skipped it, simulated by never scanning); a younger one is not judged yet."""
     _, pb = _gen(tmp_path)
     applied, now = v162h._at(v162h._WED, 9), v162h._at(v162h._WED, 15, 30)

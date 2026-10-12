@@ -613,7 +613,8 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > re-derives SP_ALERT_SCAN from V174 and changes only arm [27] SEC_ADMIN_GRANT: a grant row is skipped only when it has
 > no grantor, the grantee is exactly STPLATSTREAMLIT followed by digits (the Streamlit runtime user Snowflake creates on
 > each `snow streamlit deploy --replace`), the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, and the same user also
-> holds Snowflake's own no-grantor `SYSTEM$MANAGED` grant; any other grant raises exactly as before. No task change;
+> got Snowflake's own no-grantor `SYSTEM$MANAGED` grant within 60 seconds of it (the same deploy; a user re-created
+> later under an old runtime name does not count); any other grant raises exactly as before. No task change;
 > nothing runs at apply time. Before it, the read-only PREFLIGHT P176.1a / P176.1b show what the arm raises today and
 > after V176 over the last 26h and 30 days (every skipped row should be a runtime user), and P176.2 lists the
 > runtime-user SEC_ADMIN_GRANT events still open: after the apply, resolve those as EXPECTED in Alerts (bulk select).

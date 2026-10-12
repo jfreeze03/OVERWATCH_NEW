@@ -18,13 +18,14 @@ playbook).
   2. the user's name is exactly STPLATSTREAMLIT followed by digits (case-sensitive; look-alikes such as a
      lower-case name, extra letters before or after, or no digits do not match);
   3. the role is SNOW_ACCOUNTADMINS, or SNOW_SYSADMINS once that role owns the app;
-  4. the same user also holds Snowflake's own `SYSTEM$MANAGED` role with no grantor. No customer statement can grant
-     that role, and it sits in the same Snowflake view as the admin grant, so the check never races another view's
-     delay.
+  4. the same user also got Snowflake's own `SYSTEM$MANAGED` role with no grantor, within 60 seconds of the admin
+     grant (the same deploy; the two land milliseconds apart). No customer statement can grant that role, it sits in
+     the same Snowflake view as the admin grant (so the check never races another view's delay), and the 60-second
+     tie means a user re-created later under an old runtime name does not inherit that deploy's marker.
   If any of the four is unknown (a blank value), the grant still raises: the check fails toward alerting.
 - **Why it is safe.** To slip a real admin grant past it, someone would have to meet all four: a person who grants an
   admin role to a user named STPLAT... is recorded as the grantor, so it raises; a look-alike name fails condition 2;
-  and condition 4 needs a role only Snowflake grants. (Real users with a blank grantor exist here, probe S3: they fail
+  and condition 4 needs a role only Snowflake grants, at the same moment as the admin grant. (Real users with a blank grantor exist here, probe S3: they fail
   conditions 2 and 4 and keep raising.)
 - **What still alerts, exactly as before:** any admin grant made by a person or role, whatever the user is called;
   any other admin role given to a runtime user; a no-grantor grant to any other user (real users have a few of
@@ -43,8 +44,9 @@ playbook).
   3. PART B: V176.1 right away; V176.2 after the next hourly scan (55+ minutes after the apply); V176.3 about 3 hours
      after your next deploy. That deploy is the live test: its runtime grant is on record and no Teams line appears.
   4. Resolve the 3 open runtime-user SEC_ADMIN_GRANT events (2026-10-05 to 10-12; P176.2 lists them) in Alerts ▸
-     Events: filter rule SEC_ADMIN_GRANT, Bulk select only the STPLATSTREAMLIT rows whose detail says "by ?", and
-     resolve as **EXPECTED** with the note "Streamlit runtime user system grant on app deploy (GRANTED_BY NULL);
+     Open events (Group by rule off): turn on Bulk select, tick only the rows whose title and time match P176.2's
+     list (P176.2 already checked the rule, the runtime name and the "by ?" detail), and resolve as **EXPECTED** with
+     the note "Streamlit runtime user system grant on app deploy (GRANTED_BY NULL);
      excluded from SEC_ADMIN_GRANT by V176". Use EXPECTED, not NOISE: NOISE would count against the rule's precision.
      Nothing is re-sent to Teams.
   No redeploy is needed for V176. Deploying 4.613.0 only updates the timing-check panel, its help and the playbook

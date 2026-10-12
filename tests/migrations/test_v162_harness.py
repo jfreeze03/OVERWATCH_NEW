@@ -62,7 +62,7 @@ _ARM27 = _between(_H, "    -- [27] SEC_ADMIN_GRANT", "    IF (MOD(ct_hour, 3) = 
 # -- clocks ---------------------------------------------------------------------------------------------------
 _EPOCH = datetime(1970, 1, 1)
 _CT, _UTC = ZoneInfo("America/Chicago"), ZoneInfo("UTC")
-_UNIT_MS = {"minute": 60_000, "hour": 3_600_000, "day": 86_400_000}
+_UNIT_MS = {"second": 1_000, "minute": 60_000, "hour": 3_600_000, "day": 86_400_000}
 
 
 def _ms(d: datetime) -> int:

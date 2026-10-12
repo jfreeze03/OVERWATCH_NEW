@@ -64,20 +64,33 @@ OFF_HOURS_WEEKEND_ISO: tuple[int, ...] = (6, 7)
 # STPLATSTREAMLIT + digits) and grant it, itself (GRANTED_BY NULL), the app owner's role and the system-only
 # SYSTEM$MANAGED role. A grant is skipped only when all four hold: no grantor, that exact name (REGEXP_LIKE anchors
 # the whole name and is case-sensitive), an owner role below, and a no-grantor SYSTEM$MANAGED grant to the same user
-# in the same view. Any NULL keeps the row (fails open, toward alerting). tests/test_security_alert_parity.py binds
+# in the same view made within STREAMLIT_RUNTIME_MARK_WINDOW_S of it (the same deploy: a user re-created later under
+# an old runtime name does not inherit the marker, review r1). Any NULL keeps the row (fails open, toward alerting). tests/test_security_alert_parity.py binds
 # these to the LATEST SP_ALERT_SCAN arm [27]. The holder inventory and the grant change logs keep listing these
 # grants on purpose (real access while held; the audit trail).
 STREAMLIT_RUNTIME_USER_PATTERN = "STPLATSTREAMLIT[0-9]+"
 STREAMLIT_RUNTIME_OWNER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
 STREAMLIT_RUNTIME_MARKER_ROLE = "SYSTEM$MANAGED"
+#: How close (seconds) the SYSTEM$MANAGED grant must be to the admin grant (probe S2: milliseconds apart).
+STREAMLIT_RUNTIME_MARK_WINDOW_S = 60
 
 
 def _streamlit_runtime_users() -> str:
-    """The ``rt`` CTE body: users holding a no-grantor SYSTEM$MANAGED grant under the runtime name (uncorrelated,
-    not time-bounded: a few rows per deploy)."""
-    return (f"SELECT DISTINCT GRANTEE_NAME FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS "
+    """The ``rt`` CTE body: one row per runtime-named user holding a no-grantor SYSTEM$MANAGED grant, with that
+    grant's time (MARK_FROM / MARK_TO; uncorrelated, not time-bounded: a few rows per deploy)."""
+    return (f"SELECT GRANTEE_NAME, MIN(CREATED_ON) AS MARK_FROM, MAX(CREATED_ON) AS MARK_TO "
+            f"FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS "
             f"WHERE ROLE = {sql_literal(STREAMLIT_RUNTIME_MARKER_ROLE)} AND GRANTED_BY IS NULL "
-            f"AND REGEXP_LIKE(GRANTEE_NAME, {sql_literal(STREAMLIT_RUNTIME_USER_PATTERN)})")
+            f"AND REGEXP_LIKE(GRANTEE_NAME, {sql_literal(STREAMLIT_RUNTIME_USER_PATTERN)}) GROUP BY GRANTEE_NAME")
+
+
+def _streamlit_runtime_join(grant: str = "g", marker: str = "rt") -> str:
+    """The LEFT JOIN condition tying the ``marker`` (rt) row to the ``grant`` row: the same user, and the admin grant
+    made within STREAMLIT_RUNTIME_MARK_WINDOW_S of the SYSTEM$MANAGED grant (the same deploy). Equality key plus a
+    range, no subquery."""
+    w = int(STREAMLIT_RUNTIME_MARK_WINDOW_S)
+    return (f"{marker}.GRANTEE_NAME = {grant}.GRANTEE_NAME AND {grant}.CREATED_ON BETWEEN "
+            f"DATEADD('second', -{w}, {marker}.MARK_FROM) AND DATEADD('second', {w}, {marker}.MARK_TO)")
 
 
 def _not_streamlit_runtime_grant(grant: str = "g", marker: str = "rt") -> str:
@@ -1399,7 +1412,7 @@ SELECT g.ROLE AS ADMIN_ROLE, g.GRANTEE_NAME AS USER_NAME,
        HOUR(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS HOUR_OF_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g
 LEFT JOIN rt
-  ON rt.GRANTEE_NAME = g.GRANTEE_NAME
+  ON {_streamlit_runtime_join("g", "rt")}
 WHERE {where}
 ORDER BY g.CREATED_ON DESC
 LIMIT 500
