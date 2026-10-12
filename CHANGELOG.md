@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.610.2 - V175: the admin-access lookup as an owner-run procedure (2026-10-07)
+
+The owner decided on 2026-10-06 that SNOW_SYSADMINS will own and run OVERWATCH_APP instead of SNOW_ACCOUNTADMINS.
+The admin-access lookup (who holds SNOW_PRI_GFR_PRD_ALFA_DSA) runs SHOW GRANTS OF ROLE as the app owner, and SHOW lists
+only what the current role can see. If SNOW_SYSADMINS sees fewer DSA grantees than SNOW_ACCOUNTADMINS does, every
+DSA-only admin would silently become read-only at the cutover. This release makes the lookup independent of the app
+owner. The owner switch itself is a later release.
+
+- **V175 creates `SP_ADMIN_ROLE_MEMBERS()`.** It is EXECUTE AS OWNER, so it runs as the role that applies V175
+  (SNOW_ACCOUNTADMINS). It runs the same SHOW GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA and returns its granted_to
+  and grantee_name. The role is hard-coded (no argument), so it cannot list any other role. It is created WITH COPY
+  GRANTS, so a later re-create keeps its grants, and V175 grants USAGE on it to SNOW_SYSADMINS in the same file, so
+  a re-run re-grants. Guarded on V174 (-20175); read-only; nothing runs at apply time.
+- **The app CALLs it once V175 is applied** (`schema_gate.has_migration(175)`, from the startup schema read, so no
+  extra statement) and runs SHOW before that. One build works before and after the apply, under either owner. The
+  CALL is a read collected outside the write executor: it is what decides admin entitlement, so it needs none, and
+  it invalidates no cache. Every fail-closed path is unchanged: a failed CALL is `lookup_failed`, an answer with no
+  USER row is `unverified`, and neither ever makes an admin. The named admins (OPERATOR_USERS) never need the lookup.
+  Once a session has seen V175 applied it keeps the CALL: a later unreadable SCHEMA_VERSION never drops it back to
+  SHOW, which after the owner switch could list fewer users with no error. A schema check that raises is logged once
+  per session.
+- **Admin ▸ App access names the statement that ran** in its lookup verdict, healthy or not ("Lookup OK: ... by CALL
+  ..."), so the switch is visible in the app. Its "Check:" hint matches the statement (for the CALL: which role to run
+  it as, and that an error means re-run V175 as SNOW_ACCOUNTADMINS, never as SNOW_SYSADMINS, whose copy would answer
+  as itself). The error-log context and the 'unverified' message name it too.
+- **When to apply.** Needed before the cutover when the SNOW_SYSADMINS preflight's S2 lists fewer DSA users than
+  Z2; harmless before then (under today's owner the CALL lists what SHOW lists). Runbox: `V175_ADMIN_ROLE_MEMBERS.sql`
+  with `PREFLIGHT_V175.sql` and `PART_B_V175.sql`.
+- **Repo.** The CI smoke replay skips V175's GRANT (a production account role; the pattern names this one grant, so
+  any other GRANT still stops the smoke). validate.sql floor V001..V175 plus an SP_ADMIN_ROLE_MEMBERS presence row;
+  teardown drops the procedure;
+  Admin ▸ Migrations expects V175; DEPLOYMENT, README, RUNBOOK §12 ("Rolling back V175": do not drop it while the
+  version row exists) and the rebuild bundle follow. Tests lock the role literal to `config.ADMIN_ACCESS_ROLE`, COPY
+  GRANTS and the SNOW_SYSADMINS grant, the CALL/SHOW switch on the gate, and that a failed CALL never makes an admin.
+
 ## 4.610.1 - roles.sql grants the two access roles (2026-10-06)
 
 The owner asked on 2026-10-06 for `roles.sql` to include SNOW_PRI_GFR_PRD_ALFA_DSA and SNOW_PRI_GFR_PRD_ALFA_DTI.

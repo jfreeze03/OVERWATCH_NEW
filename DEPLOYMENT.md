@@ -190,6 +190,7 @@ snowflake/migrations/V171__ops_selfwatch_digest_refgaps_seed.sql
 snowflake/migrations/V172__detection_scans_company_and_accuracy.sql
 snowflake/migrations/V173__alert_scan_supported_subquery_and_div0.sql
 snowflake/migrations/V174__alert_scan_dsa_admin_role.sql
+snowflake/migrations/V175__admin_role_members_proc.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -588,6 +589,20 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > NAME); V174.2 after the first hourly scan whose heartbeat lands 55+ minutes after the apply (14/14, no
 > rule_block_failed for the three arms; a WAIT means re-run after the next scan); V174.3 once V174.2 reads OK lists the
 > DSA events raised since the apply: review each in Alerts. Rollback: RUNBOOK §12, "Rolling back V174".
+
+> **V175 (owner decision 2026-10-06: the admin-access lookup survives the SNOW_SYSADMINS owner switch):** apply
+> V175 after V174 (it guards on V174, error -20175), as SNOW_ACCOUNTADMINS (the role that owns the OVERWATCH
+> schema), any time; no repairs. It creates SP_ADMIN_ROLE_MEMBERS(), an EXECUTE AS OWNER procedure that runs SHOW
+> GRANTS OF ROLE SNOW_PRI_GFR_PRD_ALFA_DSA (the role is hard-coded) and returns its granted_to and grantee_name,
+> WITH COPY GRANTS, and grants USAGE on it to SNOW_SYSADMINS. App 4.610.2+ CALLs it for the admin-access lookup once
+> the version row exists (within 4 h, the schema cache) and runs SHOW before that, so deploy and apply in either
+> order. SHOW answers as the app owner, the CALL as the procedure's owner: it is NEEDED before the cutover when the
+> SNOW_SYSADMINS preflight's S2 lists fewer DSA users than Z2 (without it every DSA-only admin is read-only under a
+> SNOW_SYSADMINS-owned app; the named admins never are). It is harmless before then: under today's owner the CALL
+> lists what SHOW lists. Nothing runs at apply time. Before it, the read-only PREFLIGHT P175.1 lists DSA's direct
+> users as SNOW_ACCOUNTADMINS sees them and P175.2 confirms SNOW_SYSADMINS exists. After it: PART B V175.1 (version
+> row, procedure, USAGE for SNOW_SYSADMINS) and V175.2 (the CALL lists P175.1's users). Admin ▸ App access names the
+> CALL in its lookup verdict once a lookup has run on it. Rollback: RUNBOOK §12, "Rolling back V175".
 
 > **V164 verify (actionable Teams lines + CRITICAL escalation — OWNER SMOKE TEST: the send, the ARRAY
 > handling and the nested cursor loop are runtime-only):**

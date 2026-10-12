@@ -13,8 +13,8 @@
 -- that ran and stopped), which is the real dead-man signal on re-runs / DR.
 
 WITH checks AS (
-    SELECT 'V001..V174 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 174) = 174,
+    SELECT 'V001..V175 applied' AS CHECK_NAME,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 175) = 175,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',
@@ -171,6 +171,13 @@ WITH checks AS (
     SELECT 'INCIDENT_PROPOSALS classifies EXH / ALL as account-level (V170)',
            IFF(CONTAINS(GET_DDL('VIEW', 'DBA_MAINT_DB.OVERWATCH.INCIDENT_PROPOSALS'), '''EXH'', ''ALL'''),
                'OK', 'FAIL: INCIDENT_PROPOSALS is older than V170 — re-run V170')
+    UNION ALL
+    -- V175: the admin-access lookup the app CALLs once the version row exists. Missing = every DSA-only admin
+    -- is read-only (the lookup fails closed); the named admins are unaffected.
+    SELECT 'SP_ADMIN_ROLE_MEMBERS present (V175)',
+           IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
+                 WHERE PROCEDURE_SCHEMA = 'OVERWATCH' AND PROCEDURE_NAME = 'SP_ADMIN_ROLE_MEMBERS') = 1,
+               'OK', 'FAIL: SP_ADMIN_ROLE_MEMBERS is missing — re-run V175')
 )
 SELECT * FROM checks
 ORDER BY 1;

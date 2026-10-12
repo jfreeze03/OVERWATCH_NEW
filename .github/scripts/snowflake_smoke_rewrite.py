@@ -8,6 +8,8 @@ session uses:
 * V002 creates WH_ALFA_ADMIN, sets its STATEMENT_TIMEOUT_IN_SECONDS to 300 (live: 1800) and attaches
   the 30-credit SUSPEND resource monitor OVERWATCH_RM that V045 only detaches 40 files later;
 * V006-V008 grant to OVERWATCH_MONITOR / OVERWATCH_OPERATOR, the roles roles.sql retired;
+* V175 grants USAGE on SP_ADMIN_ROLE_MEMBERS() to SNOW_SYSADMINS, a production account role (the
+  clone's copy needs no grant: nothing in the smoke CALLs it as SNOW_SYSADMINS);
 * tasks are defined with ``WAREHOUSE = WH_ALFA_ADMIN`` (production compute), the chain RESUMEs them
   and V158 starts one with EXECUTE TASK. The roots are ``CREATE TASK IF NOT EXISTS`` in V002-V004, so
   in a clone they keep the CLONED definition, whose body still CALLs DBA_MAINT_DB procedures: a resumed
@@ -99,6 +101,9 @@ _NEUTRALIZE: tuple[tuple[str, re.Pattern[str]], ...] = (
      re.compile(r"^(GRANT|REVOKE)\b.*\b(TO|FROM) ROLE OVERWATCH_(MONITOR|OPERATOR)\b")),
     ("EXECUTE TASK starts a task run, suspended or not",
      re.compile(r"^EXECUTE TASK\b")),
+    ("grant to the production role SNOW_SYSADMINS (V175: USAGE on SP_ADMIN_ROLE_MEMBERS only)",
+     re.compile(r"^GRANT USAGE ON PROCEDURE DBA_MAINT_DB\.OVERWATCH\.SP_ADMIN_ROLE_MEMBERS\(\)"
+                r" TO ROLE SNOW_SYSADMINS ?;?$")),
 )
 
 # Anything here that survives the rewrite in CODE (comments and '...' strings ignored, $$ bodies

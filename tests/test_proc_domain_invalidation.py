@@ -16,12 +16,16 @@ from app.data import mart_sql, security_sql
 _ROOT = Path(__file__).resolve().parents[1]
 _MIG = _ROOT / "snowflake" / "migrations"
 _KNOWN = {"SP_ALERT_LIFECYCLE", "SP_ALERT_SNOOZE", "SP_ALERT_CLEAR_SCOPE", "SP_INCIDENT_DECLARE",
-          "SP_ACTION_LIFECYCLE", "SP_VERIFY_EXPERIMENT", "SP_CHANGE_IMPACT_SCAN", "SP_WAREHOUSE_CHANGE_SCAN"}
+          "SP_ACTION_LIFECYCLE", "SP_VERIFY_EXPERIMENT", "SP_CHANGE_IMPACT_SCAN", "SP_WAREHOUSE_CHANGE_SCAN",
+          "SP_ADMIN_ROLE_MEMBERS"}
 _APP_CALL_RE = re.compile(r"""CALL \{core_object\(['"](SP_[A-Z0-9_]+)['"]\)\}"""
                           r"""|CALL DBA_MAINT_DB\.OVERWATCH\.(SP_[A-Z0-9_]+)\s*\(""")
 _DML_RE = re.compile(r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+"
                      r"DBA_MAINT_DB\.OVERWATCH\.([A-Z0-9_]+)", re.IGNORECASE)
 _NO_APP_READ = {"OW_ACTION_INTENTS"}      # written by the alert procs, never read by the app
+# READ-ONLY procs the app CALLs outside the write executor (so no cache domain to invalidate): V175's admin-access
+# lookup, collected by session._admin_role_rows. Locked below to stay write-free.
+_READ_ONLY_CALLS = {"SP_ADMIN_ROLE_MEMBERS"}
 # display-only copyable Snowsight SQL (rendered as markdown in the alert drawer, never executed)
 _DISPLAY_ONLY = {"app/logic/playbooks.py"}
 
@@ -64,8 +68,17 @@ def _latest_proc_body(proc: str) -> str:
 def test_every_called_proc_is_classified():
     found = _called_procs()
     assert found >= _KNOWN, f"the CALL grep went blind: missing {_KNOWN - found}"
-    unmapped = found - set(q._PROC_DOMAINS)
+    unmapped = found - set(q._PROC_DOMAINS) - _READ_ONLY_CALLS
     assert not unmapped, f"add these CALLed procs to query._PROC_DOMAINS: {unmapped}"
+
+
+def test_read_only_calls_write_nothing_and_skip_the_executor():
+    for proc in _READ_ONLY_CALLS:
+        assert proc not in q._PROC_DOMAINS, proc
+        body = "\n".join(line.split("--", 1)[0] for line in _latest_proc_body(proc).splitlines())
+        assert not _DML_RE.search(body), proc
+        assert not re.search(r"\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE)\b", body, re.IGNORECASE), proc   # unqualified too
+        assert not re.search(r"\b(?:CALL|EXECUTE\s+IMMEDIATE|CREATE|ALTER|DROP|GRANT)\b", body, re.IGNORECASE), proc
 
 
 def test_proc_domain_values_are_known_domains_or_global():
