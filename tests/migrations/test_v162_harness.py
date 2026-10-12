@@ -165,6 +165,9 @@ def _connect(tables: dict, now: int) -> sqlite3.Connection:
         "TO_VARCHAR": (-1, _to_varchar),
         "SPLIT_PART": (3, _nullsafe(lambda s, d, n: (str(s).split(d) + [""] * int(n))[int(n) - 1])),
         "UUID_STRING": (0, lambda: str(uuid.uuid4())),
+        # V176's runtime-user skip: Snowflake's REGEXP_LIKE anchors the whole subject and is case-sensitive by
+        # default -- re.fullmatch, NULL-safe (the test_v157 shim)
+        "REGEXP_LIKE": (2, _nullsafe(lambda s, p: int(re.fullmatch(p, str(s)) is not None))),
     }
     for name, (narg, fn) in funcs.items():
         con.create_function(name, narg, fn)

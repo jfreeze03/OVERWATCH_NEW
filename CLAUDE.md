@@ -234,7 +234,12 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   [26] on (the next free is [30]; [17], [18] and [22] already collide). Since V174 the [26]/[27] admin list is
   eight roles (`security_sql.ALERT_ADMIN_ROLES`: V162's seven + SNOW_PRI_GFR_PRD_ALFA_DSA, last) and [18] watches
   ACCOUNTADMIN + `security_sql.ADMIN_HOLDER_ROLES` (SNOW_ACCOUNTADMINS, SNOW_SYSADMINS, SNOW_PRI_GFR_PRD_ALFA_DSA);
-  `tests/test_security_alert_parity.py` binds both lists to the latest SP_ALERT_SCAN. SP_INCIDENT_AUTODECLARE never
+  `tests/test_security_alert_parity.py` binds both lists to the latest SP_ALERT_SCAN. Since V176 (owner 2026-10-12:
+  every app deploy paged Teams) [27] skips a grant only when it has no grantor, the grantee is exactly
+  STPLATSTREAMLIT + digits, the role is SNOW_ACCOUNTADMINS / SNOW_SYSADMINS and the same user holds a no-grantor
+  SYSTEM$MANAGED grant (an uncorrelated rt CTE + LEFT JOIN; any NULL keeps the row); the same parity test binds
+  that predicate to `security_sql._not_streamlit_runtime_grant` / `_streamlit_runtime_users` (admin_grant_context,
+  the app twin). [18] and [26] do not carry it (no runtime-user logins). SP_INCIDENT_AUTODECLARE never
   declares for SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT (a hard-coded crit-CTE exclusion, V162 owner
   decision), and its [attach] links them only to an incident that already holds the same user (V162
   review fix). Add-ons, sweeps and the [hb] heartbeats never increment `fails`
@@ -243,7 +248,8 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   MOD(ct_hour, 4) = 1, the hourly [22] only when MOD(ct_hour, 3) = 2; a gate wraps an UNCHANGED arm
   and a gated-off arm counts as ok. `app/logic/quotas.runaway_days` is the app twin of daily arm [28]:
   re-derive either side only with `tests/test_ai_runaway_parity.py` green (or change both together).
-- Current definers (re-derive forward from THESE): SP_ALERT_SCAN = V174 (V174 changed only the admin-role
+- Current definers (re-derive forward from THESE): SP_ALERT_SCAN = V176 (V176 changed only hourly [27]
+  SEC_ADMIN_GRANT: it skips Snowflake's own Streamlit runtime grant; V174 before it changed only the admin-role
   lists of hourly [18], [26] and [27], appending SNOW_PRI_GFR_PRD_ALFA_DSA), SP_ALERT_SCAN_DAILY = V173
   (arm numbers unchanged; the next free is still [30]; V173 changed only hourly [18]'s dedupe guard and daily
   [24]'s two divisions), SP_INCIDENT_AUTODECLARE = V162, SP_NOTIFY_WEBHOOK =

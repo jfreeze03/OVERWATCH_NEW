@@ -51,6 +51,16 @@ def test_every_admin_holder_reader_counts_dsa_members_and_never_dti():
             assert _DTI not in scoped
 
 
+def test_the_inventories_keep_the_streamlit_runtime_users():
+    """V176 skips Snowflake's own Streamlit runtime grant in the SEC_ADMIN_GRANT alert and its timing-check twin only:
+    an access inventory lists every holder (real access while held) and the change logs keep the audit trail."""
+    for company in ("ALL", "ALFA"):
+        for sql in (security_sql.admin_role_holders(company), security_sql.recent_grant_changes(7, company),
+                    security_sql.new_network_logins(7, company), security_sql.new_network_logins_fact(7, company)):
+            assert "STPLATSTREAMLIT" not in sql and "SYSTEM$MANAGED" not in sql
+    assert "STPLATSTREAMLIT" in security_sql.admin_grant_context(90)
+
+
 def test_alert_admin_roles_never_carry_dti_and_no_tier_repeats_a_role():
     # DSA's arrival in ALERT_ADMIN_ROLES is V174's (test_security_alert_parity + test_v174 pin it); whatever
     # the list holds, the view-only role is never in it and no tier lists a role twice

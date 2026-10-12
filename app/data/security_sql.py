@@ -49,6 +49,8 @@ REACHES_ADMIN_ROLES: tuple[str, ...] = (
 # [26] / [27]; tests/test_security_alert_parity.py locks them to these constants. No builder here reads them (the
 # app's own grant-anomaly helpers keep their older 07-19 business day and 5-role ELEVATED_ROLES on purpose).
 # V174 (owner access decision 2026-10-05) appended SNOW_PRI_GFR_PRD_ALFA_DSA: a direct holder is an OVERWATCH admin.
+# V176 (owner 2026-10-12) adds the one piece arm [27] and the app DO share: the Streamlit runtime-grant skip below,
+# applied by admin_grant_context (the arm's app twin) through _streamlit_runtime_users / _not_streamlit_runtime_grant.
 ALERT_ADMIN_ROLES: tuple[str, ...] = (
     "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN", "USERADMIN", "ORGADMIN", "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS",
     "SNOW_PRI_GFR_PRD_ALFA_DSA",
@@ -56,6 +58,35 @@ ALERT_ADMIN_ROLES: tuple[str, ...] = (
 OFF_HOURS_START_HOUR = 20          # Central hour >= this is off-hours
 OFF_HOURS_END_HOUR = 6             # Central hour < this is off-hours
 OFF_HOURS_WEEKEND_ISO: tuple[int, ...] = (6, 7)
+
+# V176 (owner 2026-10-12: "Whenever I deploy the app, this keeps popping up in Teams. I want to turn this off."):
+# each `snow streamlit deploy --replace` makes Snowflake create a short-lived Streamlit runtime user (exactly
+# STPLATSTREAMLIT + digits) and grant it, itself (GRANTED_BY NULL), the app owner's role and the system-only
+# SYSTEM$MANAGED role. A grant is skipped only when all four hold: no grantor, that exact name (REGEXP_LIKE anchors
+# the whole name and is case-sensitive), an owner role below, and a no-grantor SYSTEM$MANAGED grant to the same user
+# in the same view. Any NULL keeps the row (fails open, toward alerting). tests/test_security_alert_parity.py binds
+# these to the LATEST SP_ALERT_SCAN arm [27]. The holder inventory and the grant change logs keep listing these
+# grants on purpose (real access while held; the audit trail).
+STREAMLIT_RUNTIME_USER_PATTERN = "STPLATSTREAMLIT[0-9]+"
+STREAMLIT_RUNTIME_OWNER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
+STREAMLIT_RUNTIME_MARKER_ROLE = "SYSTEM$MANAGED"
+
+
+def _streamlit_runtime_users() -> str:
+    """The ``rt`` CTE body: users holding a no-grantor SYSTEM$MANAGED grant under the runtime name (uncorrelated,
+    not time-bounded: a few rows per deploy)."""
+    return (f"SELECT DISTINCT GRANTEE_NAME FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS "
+            f"WHERE ROLE = {sql_literal(STREAMLIT_RUNTIME_MARKER_ROLE)} AND GRANTED_BY IS NULL "
+            f"AND REGEXP_LIKE(GRANTEE_NAME, {sql_literal(STREAMLIT_RUNTIME_USER_PATTERN)})")
+
+
+def _not_streamlit_runtime_grant(grant: str = "g", marker: str = "rt") -> str:
+    """TRUE unless the ``grant`` row is Snowflake's own Streamlit runtime grant (``marker`` = the LEFT JOINed rt CTE).
+    The role pair renders as ``=`` OR ``=``, never a second ``ROLE IN (`` list."""
+    roles = " OR ".join(f"{grant}.ROLE = {sql_literal(r)}" for r in STREAMLIT_RUNTIME_OWNER_ROLES)
+    return (f"NOT COALESCE({grant}.GRANTED_BY IS NULL AND REGEXP_LIKE({grant}.GRANTEE_NAME, "
+            f"{sql_literal(STREAMLIT_RUNTIME_USER_PATTERN)}) AND ({roles}) AND {marker}.GRANTEE_NAME IS NOT NULL, "
+            "FALSE)")
 
 
 #: Pre-LIMIT window totals that capped Security feeds carry beside their rows (UNCAPPED-AGGREGATE: a
@@ -1336,6 +1367,12 @@ def admin_grant_context(days: int = 90, company: str = "ALL") -> str:
     standard admin roles, defensively. The prior-grant count is a correlated
     read of the same GRANTS_TO_USERS history (retains revoked rows), so a role
     granted, revoked, and re-granted is NOT counted as first-time.
+
+    V176 (owner 2026-10-12): like alert [27] SEC_ADMIN_GRANT (its SQL twin), this
+    leaves out Snowflake's own Streamlit runtime grant made on each app deploy (the
+    same rt CTE, LEFT JOIN and predicate), so the first-ever count no longer grows
+    per deploy. Ungated: it is this panel's own read. The grant still shows in Recent
+    grant changes as (system); PRIOR_GRANTS keeps reading the full history.
     """
     days = bounded_days(days, 180)
     date_pred = f"g.CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
@@ -1343,8 +1380,12 @@ def admin_grant_context(days: int = 90, company: str = "ALL") -> str:
         _admin_roles_in("g.ROLE", ELEVATED_ROLES),
         date_pred,
         companies.user_clause(company, "g.GRANTEE_NAME"),
+        _not_streamlit_runtime_grant("g", "rt"),
     )
     return f"""
+WITH rt AS (
+    {_streamlit_runtime_users()}
+)
 SELECT g.ROLE AS ADMIN_ROLE, g.GRANTEE_NAME AS USER_NAME,
        g.CREATED_ON AS GRANTED_AT, g.GRANTED_BY,
        (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS p
@@ -1357,6 +1398,8 @@ SELECT g.ROLE AS ADMIN_ROLE, g.GRANTEE_NAME AS USER_NAME,
        DAYOFWEEKISO(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS DOW_ISO,
        HOUR(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS HOUR_OF_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g
+LEFT JOIN rt
+  ON rt.GRANTEE_NAME = g.GRANTEE_NAME
 WHERE {where}
 ORDER BY g.CREATED_ON DESC
 LIMIT 500
