@@ -191,6 +191,7 @@ snowflake/migrations/V172__detection_scans_company_and_accuracy.sql
 snowflake/migrations/V173__alert_scan_supported_subquery_and_div0.sql
 snowflake/migrations/V174__alert_scan_dsa_admin_role.sql
 snowflake/migrations/V175__admin_role_members_proc.sql
+snowflake/migrations/V176__alert_scan_streamlit_runtime_grant.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -605,6 +606,23 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > users as SNOW_ACCOUNTADMINS sees them and P175.2 confirms SNOW_SYSADMINS exists. After it: PART B V175.1 (version
 > row, procedure, USAGE for SNOW_SYSADMINS) and V175.2 (the CALL lists P175.1's users). Admin ▸ App access names the
 > CALL in its lookup verdict once a lookup has run on it. Rollback: RUNBOOK §12, "Rolling back V175".
+
+> **V176 (owner 2026-10-12: app deploys no longer page Teams with a Streamlit runtime admin grant):** apply V176
+> after V175 (it guards on V175, error -20176), any time, from a worksheet pinned to Central; no repairs, and no app
+> redeploy needed: the fix lives in SP_ALERT_SCAN alone, so it works from the first hourly scan after the apply. It
+> re-derives SP_ALERT_SCAN from V174 and changes only arm [27] SEC_ADMIN_GRANT: a grant row is skipped only when it has
+> no grantor, the grantee is exactly STPLATSTREAMLIT followed by digits (the Streamlit runtime user Snowflake creates on
+> each `snow streamlit deploy --replace`), the role is SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, and the same user also
+> got Snowflake's own no-grantor `SYSTEM$MANAGED` grant within 60 seconds of it (the same deploy; a user re-created
+> later under an old runtime name does not count); any other grant raises exactly as before. No task change;
+> nothing runs at apply time. Before it, the read-only PREFLIGHT P176.1a / P176.1b show what the arm raises today and
+> after V176 over the last 26h and 30 days (every skipped row should be a runtime user), and P176.2 lists the
+> runtime-user SEC_ADMIN_GRANT events still open: after the apply, resolve those as EXPECTED in Alerts (bulk select).
+> After it: PART B V176.1 right away (version row, the skip predicate in GET_DDL, SEC_ADMIN_GRANT still enabled);
+> V176.2 after the first hourly scan whose heartbeat lands 55+ minutes after the apply (14/14, no rule_block_failed
+> for SEC_ADMIN_GRANT; a WAIT means re-run after the next scan); V176.3 about 3h after the next app deploy (its runtime
+> grant on record with the co-grant, no SEC_ADMIN_GRANT event for it, every other admin grant since the apply raised).
+> Apply order with the earlier ones: V174 -> V175 -> V176. Rollback: RUNBOOK §12, "Rolling back V176".
 
 > **V164 verify (actionable Teams lines + CRITICAL escalation — OWNER SMOKE TEST: the send, the ARRAY
 > handling and the nested cursor loop are runtime-only):**

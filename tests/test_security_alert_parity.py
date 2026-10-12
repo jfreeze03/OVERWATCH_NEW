@@ -43,6 +43,42 @@ def test_admin_role_list_matches_the_app_constant_in_both_arms():
     assert set(security_sql.ELEVATED_ROLES) < set(security_sql.ALERT_ADMIN_ROLES)
 
 
+def test_streamlit_runtime_grant_skip_is_one_predicate_in_the_arm_and_the_app():
+    """V176 (owner 2026-10-12: every app deploy paged Teams): [27] skips Snowflake's own Streamlit runtime grant, and its
+    app twin admin_grant_context applies the SAME rt CTE, LEFT JOIN and predicate. A re-derivation that edits either side
+    alone -- or loosens a condition -- fails here."""
+    takeover, grant = _arms()
+    frag = security_sql._not_streamlit_runtime_grant("g", "rt")
+    cte = security_sql._streamlit_runtime_users()
+    join = f"LEFT JOIN rt ON {security_sql._streamlit_runtime_join('g', 'rt')}"
+    assert grant.count(frag) == 1 and "STPLAT" not in takeover
+    scan = _latest_proc_bodies()["SP_ALERT_SCAN"]
+    assert "STPLAT" not in _arm(scan, "    -- [18] SEC_NEW_ADMIN_NETWORK", "    -- [20] SEC_NEW_EXPOSURE")
+    flat = " ".join(grant.split())
+    assert flat.count(f"rt AS ( {cte} )") == 1 and flat.count(join) == 1
+    for company in ("ALL", "ALFA"):
+        app = security_sql.admin_grant_context(90, company)
+        assert app.count(frag) == 1 and app.count(cte) == 1
+        assert " ".join(app.split()).count(join) == 1
+    # the owner pair is watched by the alert and read by the panel (ELEVATED_ROLES), so the skip has something to skip
+    assert set(security_sql.STREAMLIT_RUNTIME_OWNER_ROLES) < set(security_sql.ALERT_ADMIN_ROLES)
+    assert set(security_sql.STREAMLIT_RUNTIME_OWNER_ROLES) < set(security_sql.ELEVATED_ROLES)
+    assert security_sql.STREAMLIT_RUNTIME_MARKER_ROLE == "SYSTEM$MANAGED"
+    # teeth: each of the four conditions is in the fragment, and dropping one from the arm breaks the match
+    pattern = security_sql.STREAMLIT_RUNTIME_USER_PATTERN
+    for cond in ("g.GRANTED_BY IS NULL AND ", f"REGEXP_LIKE(g.GRANTEE_NAME, '{pattern}') AND ",
+                 " OR g.ROLE = 'SNOW_SYSADMINS'", " AND rt.GRANTEE_NAME IS NOT NULL"):
+        assert frag.count(cond) == 1, cond
+        assert grant.replace(cond, "").count(frag) == 0, cond
+    assert frag.startswith("NOT COALESCE(") and frag.endswith(", FALSE)") and "ROLE IN (" not in frag
+    assert "\\" not in frag and "GRANTED_BY IS NULL" in cte and "ROLE = 'SYSTEM$MANAGED'" in cte
+    # the name pattern: exact, case-sensitive, digits only (Snowflake's REGEXP_LIKE anchors the whole name)
+    assert re.fullmatch(pattern, "STPLATSTREAMLIT98004567325")
+    for near in ("stplatstreamlit1", "STPLATSTREAMLIT", "STPLATSTREAMLITX1", "XSTPLATSTREAMLIT1", "STPLATSTREAMLIT1X",
+                 "STPLATSTREAMLIT1 "):
+        assert not re.fullmatch(pattern, near), near
+
+
 def test_off_hours_window_matches_the_app_constants_in_both_arms():
     takeover, grant = _arms()
     for arm, col in ((takeover, "a.TS_CT"), (grant, "g.CREATED_CT")):

@@ -822,6 +822,11 @@ _EXPECTED_MIGRATIONS = {
          "procedure that lists SNOW_PRI_GFR_PRD_ALFA_DSA's grantees (role hard-coded, created WITH COPY GRANTS, "
          "USAGE to SNOW_SYSADMINS). The app CALLs it for the admin-access lookup once applied, so the lookup "
          "answers the same whatever role owns the app. Read-only; no task change, no apply-time run",
+    176: "Owner 2026-10-12 (each app deploy paged Teams): SP_ALERT_SCAN re-derived from V174 -- SEC_ADMIN_GRANT "
+         "skips a grant with no grantor of SNOW_ACCOUNTADMINS or SNOW_SYSADMINS to a Snowflake Streamlit runtime "
+         "user (exactly STPLATSTREAMLIT plus digits) that Snowflake also gave its own system-only managed role; "
+         "every other admin grant still raises. Tallies and every other arm unchanged. No task change, no "
+         "apply-time run",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -13,8 +13,8 @@
 -- that ran and stopped), which is the real dead-man signal on re-runs / DR.
 
 WITH checks AS (
-    SELECT 'V001..V175 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 175) = 175,
+    SELECT 'V001..V176 applied' AS CHECK_NAME,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 176) = 176,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',
@@ -178,6 +178,12 @@ WITH checks AS (
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
                  WHERE PROCEDURE_SCHEMA = 'OVERWATCH' AND PROCEDURE_NAME = 'SP_ADMIN_ROLE_MEMBERS') = 1,
                'OK', 'FAIL: SP_ADMIN_ROLE_MEMBERS is missing — re-run V175')
+    UNION ALL
+    -- V176: hourly SEC_ADMIN_GRANT skips Snowflake's own Streamlit runtime grant (STPLATSTREAMLIT<digits>, no grantor,
+    -- with its SYSTEM$MANAGED co-grant). An older body pages Teams on every app deploy again.
+    SELECT 'SP_ALERT_SCAN skips the Streamlit runtime grant (V176)',
+           IFF(CONTAINS(GET_DDL('PROCEDURE', 'DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()'), 'STPLATSTREAMLIT[0-9]+'),
+               'OK', 'FAIL: SP_ALERT_SCAN is older than V176 (every app deploy raises SEC_ADMIN_GRANT) — re-run V176')
 )
 SELECT * FROM checks
 ORDER BY 1;

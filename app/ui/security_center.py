@@ -44,6 +44,7 @@ from app.ui.components import (
     styled_table,
     write_gate_open,
 )
+from app.ui.schema_gate import has_migration
 
 _PAGE = "Security"
 
@@ -626,11 +627,18 @@ def render_admin_grant_anomalies(company: str) -> None:
     # r-ux: neutral until the on-demand check runs (header renders before the toggle at line below),
     # not a standing false "warn" over a not-yet-loaded / verified-clean section.
     section_header("Admin grants — timing check", "", "admin", anchor="sec-admin-grants")
+    # V176 (owner 2026-10-12): the read leaves out Snowflake's own Streamlit runtime grant (ungated: the panel's own
+    # read); the clause about the alert is a migration's behaviour, so it waits for the V176 apply (law 12).
     panel_help(
         "A count of admin grants is volume; the *context* is what matters. This flags a "
         "grant of an admin role to a user who has none on record (a first-ever elevation) "
         "and grants that landed on a weekend or outside business hours — outside a normal "
-        "deploy window. Evidence only; no alert fires from here."
+        "deploy window. Evidence only; no alert fires from here. Grants Snowflake makes itself (no grantor) "
+        f"of {' or '.join(security_sql.STREAMLIT_RUNTIME_OWNER_ROLES)} to its Streamlit runtime users "
+        "(STPLATSTREAMLIT + digits, a new one per app deploy, which Snowflake also grants "
+        f"{security_sql.STREAMLIT_RUNTIME_MARKER_ROLE}) are left out; they still show in Recent grant changes as "
+        "(system)."
+        + (" The SEC_ADMIN_GRANT alert skips the same grants (V176)." if has_migration(176, _PAGE) else "")
     )
     if not st.toggle("Load admin-grant timing check", key="sec_admin_grant_ctx_on"):
         return

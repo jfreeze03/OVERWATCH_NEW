@@ -1,5 +1,72 @@
 # Changelog
 
+## 4.613.0 - Deploys no longer page Teams with a Streamlit runtime admin grant (2026-10-12)
+
+The owner, 2026-10-12: "Whenever I deploy the app, this keeps popping up in Teams. I want to turn this off." This
+release turns that one page off and keeps every real admin-grant alert. The fix is migration V176; it works from the
+first hourly scan after you apply it, with no app redeploy. The app part is small (one panel's read and its help, the
+playbook).
+
+- **What it was.** Each `snow streamlit deploy --replace` makes Snowflake create a short-lived internal user for the
+  Streamlit runtime, named STPLATSTREAMLIT plus digits (for example STPLATSTREAMLIT98004567325). Snowflake itself
+  grants it the app owner's role (SNOW_ACCOUNTADMINS) and its own `SYSTEM$MANAGED` role, then revokes both and drops the
+  user seconds later. No person or role made the grant, so the grantor is blank ("by ?"). The hourly SEC_ADMIN_GRANT
+  check saw a first-ever admin grant to a new user and sent a HIGH line to Teams, once per deploy. A snooze could not
+  help (every deploy is a new user name), and disabling the rule would have silenced real admin grants too.
+- **What changed (V176).** SEC_ADMIN_GRANT now skips a grant only when all four of these hold:
+  1. it has no grantor (Snowflake made it; any GRANT a person or role runs records the grantor);
+  2. the user's name is exactly STPLATSTREAMLIT followed by digits (case-sensitive; look-alikes such as a
+     lower-case name, extra letters before or after, or no digits do not match);
+  3. the role is SNOW_ACCOUNTADMINS, or SNOW_SYSADMINS once that role owns the app;
+  4. the same user also got Snowflake's own `SYSTEM$MANAGED` role with no grantor, within 60 seconds of the admin
+     grant (the same deploy; the two land milliseconds apart). No customer statement can grant that role, it sits in
+     the same Snowflake view as the admin grant (so the check never races another view's delay), and the 60-second
+     tie means a user re-created later under an old runtime name does not inherit that deploy's marker.
+  If any of the four is unknown (a blank value), the grant still raises: the check fails toward alerting.
+- **Why it is safe.** To slip a real admin grant past it, someone would have to meet all four: a person who grants an
+  admin role to a user named STPLAT... is recorded as the grantor, so it raises; a look-alike name fails condition 2;
+  and condition 4 needs a role only Snowflake grants, at the same moment as the admin grant. (Real users with a blank grantor exist here, probe S3: they fail
+  conditions 2 and 4 and keep raising.)
+- **What still alerts, exactly as before:** any admin grant made by a person or role, whatever the user is called;
+  any other admin role given to a runtime user; a no-grantor grant to any other user (real users have a few of
+  those, and they keep raising); a runtime-shaped grant without the `SYSTEM$MANAGED` co-grant. Account-takeover
+  (SEC_LOGIN_TAKEOVER), new-network (SEC_NEW_ADMIN_NETWORK) and failed-login checks are unchanged: the runtime users
+  never log in, so they never touched those.
+- **Still visible.** The runtime grants still show in Security ▸ Changes ▸ Recent grant changes as (system), and in
+  Privileged role holders for the seconds they are held. Security ▸ Admin grants — timing check now leaves them out
+  too, so its first-ever-elevation count stops growing with each deploy; its help says the alert skips the same grants
+  once V176 is applied. The SEC_ADMIN_GRANT playbook explains the skip.
+- **To apply.** Order: V174 -> V175 -> V176 (V176 refuses to run before V175).
+  1. Before it, the read-only PREFLIGHT: P176.1a / P176.1b show what the alert raises today and after V176 over the
+     last 26 hours and 30 days (every skipped row should be a runtime user); P176.2 lists the runtime-user events
+     still open.
+  2. Apply V176 as SNOW_ACCOUNTADMINS. Nothing runs at apply time.
+  3. PART B: V176.1 right away; V176.2 after the next hourly scan (55+ minutes after the apply); V176.3 about 3 hours
+     after your next deploy. That deploy is the live test: its runtime grant is on record and no Teams line appears.
+  4. Resolve the 3 open runtime-user SEC_ADMIN_GRANT events (2026-10-05 to 10-12; P176.2 lists them) in Alerts ▸
+     Open events (Group by rule off): turn on Bulk select, tick only the rows whose title and time match P176.2's
+     list (P176.2 already checked the rule, the runtime name and the "by ?" detail), and resolve as **EXPECTED** with
+     the note "Streamlit runtime user system grant on app deploy (GRANTED_BY NULL);
+     excluded from SEC_ADMIN_GRANT by V176". Use EXPECTED, not NOISE: NOISE would count against the rule's precision.
+     Nothing is re-sent to Teams.
+  No redeploy is needed for V176. Deploying 4.613.0 only updates the timing-check panel, its help and the playbook
+  (re-run roles.sql's Streamlit block after it, as after every deploy).
+- **Teams after the fix.** A deploy sends nothing. A real admin grant still sends one HIGH line within 1-3 hours, in
+  the same format.
+- **SEC_BREAK_GLASS_USE (checked, nothing to change).** It raised five times for runtime users on 2026-07-08/09
+  because the app's own statements run as the runtime user under SNOW_ACCOUNTADMINS. You disabled the rule (V025),
+  deleted it (V034) and its scan arm was dropped (V157); no current scan has it, so it cannot fire again.
+- **Rollback:** RUNBOOK §12, "Rolling back V176" (re-run V174's SP_ALERT_SCAN; the per-deploy page comes back).
+  Prefer that over disabling the rule.
+- **Numbering.** The 4.612.0 entry's planned Cortex Code Desktop fold ("V176 + v4.613") takes the next free numbers.
+- **Repo.** outputs/gen_v176.py re-derives SP_ALERT_SCAN from V174 (only arm [27]: an uncorrelated rt CTE, a LEFT
+  JOIN and one NOT COALESCE(...) filter, plus a two-line note). The app side shares the predicate:
+  `security_sql.STREAMLIT_RUNTIME_*` and the private builders `_streamlit_runtime_users` /
+  `_not_streamlit_runtime_grant`, used by admin_grant_context. Locks: tests/migrations/test_v176_* (byte-identity
+  against V174 after removing the declared insertions, the executed sqlite cases with and without the co-grant, and
+  the PREFLIGHT / PART B grids) and tests/test_security_alert_parity.py (the arm's predicate and the app fragment are
+  the same text). validate.sql checks V001..V176 and that SP_ALERT_SCAN carries the skip.
+
 ## 4.612.0 - Cortex Code models by user (2026-10-08)
 
 The owner, 2026-10-08: "my boss addressed coco usage. We need to track and drill down by user which models they

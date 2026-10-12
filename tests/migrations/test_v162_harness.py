@@ -62,7 +62,7 @@ _ARM27 = _between(_H, "    -- [27] SEC_ADMIN_GRANT", "    IF (MOD(ct_hour, 3) = 
 # -- clocks ---------------------------------------------------------------------------------------------------
 _EPOCH = datetime(1970, 1, 1)
 _CT, _UTC = ZoneInfo("America/Chicago"), ZoneInfo("UTC")
-_UNIT_MS = {"minute": 60_000, "hour": 3_600_000, "day": 86_400_000}
+_UNIT_MS = {"second": 1_000, "minute": 60_000, "hour": 3_600_000, "day": 86_400_000}
 
 
 def _ms(d: datetime) -> int:
@@ -165,6 +165,9 @@ def _connect(tables: dict, now: int) -> sqlite3.Connection:
         "TO_VARCHAR": (-1, _to_varchar),
         "SPLIT_PART": (3, _nullsafe(lambda s, d, n: (str(s).split(d) + [""] * int(n))[int(n) - 1])),
         "UUID_STRING": (0, lambda: str(uuid.uuid4())),
+        # V176's runtime-user skip: Snowflake's REGEXP_LIKE anchors the whole subject and is case-sensitive by
+        # default -- re.fullmatch, NULL-safe (the test_v157 shim)
+        "REGEXP_LIKE": (2, _nullsafe(lambda s, p: int(re.fullmatch(p, str(s)) is not None))),
     }
     for name, (narg, fn) in funcs.items():
         con.create_function(name, narg, fn)
