@@ -86,6 +86,11 @@ _REACHABLE = {
     # scopes the pattern-movers table via a live per-warehouse read (the pattern mart has no
     # warehouse grain) — interaction-gated on the click, not first paint.
     "app/ui/pages/cost_parts/compare.py": ("QUERY_ATTRIBUTION_HISTORY", "QUERY_HISTORY"),
+    # v4.612.0 (owner ask 2026-10-08, Cortex Code models by user): a NEW secure view, the unified Cortex Code
+    # usage view (Snowsight, CLI and Desktop) + the USERS name join. Toggle-gated off first paint
+    # (coco_models_scan), historical tier (1 h cache), ONE read per company that every lens folds in pandas:
+    # ~25-60 s cold (runbox probe C18 measures it), then cached. ai_chargeback.py's 5/5 budget and reach unchanged.
+    "app/ui/pages/cost_parts/coco_models.py": ("SNOWFLAKE_COCO_USAGE_HISTORY", "USERS"),
     # +TABLES (2026-07-31, audit B4): the storage retention-fix estimate counted the whole
     # time-travel + failsafe pile as recoverable, which is systematically high — failsafe
     # drains in 7d regardless of RETENTION_TIME. ACCOUNT_USAGE.TABLES carries the per-table

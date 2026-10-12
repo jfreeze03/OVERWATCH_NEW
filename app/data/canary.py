@@ -272,6 +272,10 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # canary panel names that one expected FAIL.
     ("cortex.guardrails_daily", lambda: cortex_sql.guardrails_daily(1)),
     ("cortex.code_token_types", cortex_sql.cortex_code_token_types),
+    # v4.612.0: the Cortex Code models read (SNOWFLAKE_COCO_USAGE_HISTORY, all three interfaces), the app's exact
+    # text for one company scope. A probe read, so a missing column (INTERFACE, METADATA, CREDITS_GRANULAR,
+    # TOKENS_GRANULAR ...) would otherwise fail silently on every render; it FAILs here (see EXPECTED_GAPS).
+    ("cortex.coco_model_usage_daily", lambda: cortex_sql.coco_model_usage_daily("ALFA")),
     ("cortex.quota_access_block_history", lambda: cortex_sql.quota_access_block_history(1)),
     ("cortex.app_self_cost", lambda: mart_sql.app_cortex_self_cost(1)),
     ("mart.exec_board", lambda: mart_sql.exec_board("ALFA", 7)),
@@ -484,6 +488,9 @@ EXPECTED_GAPS: frozenset[str] = frozenset({
     "cortex.code_token_types",
     "cortex.quota_access_block_history",
     "cortex.app_self_cost",
+    # v4.612.0: the unified Cortex Code view is subscription-gated like the per-interface views, so its absence
+    # (002139 / not readable) reads GAP; a missing column (INTERFACE, METADATA, CREDITS_GRANULAR) FAILs.
+    "cortex.coco_model_usage_daily",
     # v4.608 R2-065: ACCOUNT_USAGE.QUERY_INSIGHTS is an optional view (newer accounts/editions; the
     # Operations panel reads it probe=True and shows a calm note when it is absent). Only its absence reads
     # GAP; a renamed column (INSIGHT_TYPE_ID, MESSAGE) is drift and FAILs.

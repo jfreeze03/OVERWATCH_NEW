@@ -119,6 +119,16 @@ COLUMN_HELP = {
     "TRACKED": "Action Center status of this task or warehouse row: Tracked (open), Done or Dismissed within "
                "90 days, Untracked, or Unknown when the status read failed. Alerts are owned through "
                "Acknowledge and the incident flow, so they show no status.",
+    # v4.612.0: Cost > Chargeback & AI > Cortex Code models (Snowsight, CLI and Desktop). At most one "$" each.
+    "MAIN_REQUESTS": "Cortex Code requests counted once each, on their main model (the model that carried the "
+                     "most credits in the request). Adds up across models: the which-model-they-select count.",
+    "REQUESTS_USING": "Requests that billed this model at all. One request can bill several models (a main model "
+                      "plus a helper), so this does NOT add up across models.",
+    "MOST_USED_MODEL": "The model most of the user's requests ran on (their main model), with its share of the "
+                       "user's requests.",
+    "TOP_MODEL": "The model with the most credits for the user, with its share of the user's Cortex Code spend.",
+    "MODEL_SHARE_PCT": "This model's credits as a share of the window's Cortex Code request credits (TOKEN_CREDITS); "
+                       "the rows, the '(not attributed to a model)' row included, add up to 100%.",
 }
 
 
@@ -276,6 +286,18 @@ METRICS: tuple[Metric, ...] = (
            window="rolling-daily", partial_day="included", unit="USD", filters=("company", "user"),
            required_sources=("ACCOUNT_USAGE.METERING_DAILY_HISTORY",),
            coverage="priced at the AI rate, not the compute rate", owner="platform"),
+    Metric("coco_user_model_spend", "Cortex Code spend by user and model", METERED,
+           "user / model / interface / role / day",
+           "ACCOUNT_USAGE.SNOWFLAKE_COCO_USAGE_HISTORY (TOKEN_CREDITS per request; CREDITS_GRANULAR / "
+           "TOKENS_GRANULAR by model) x AI rate",
+           ACCOUNT_TZ, "up to 1h view latency + 1h cache; 365-day retention", "v4.612",
+           notes="Each request once, on its main (highest-credit) model; per-model credits are the "
+                 "CREDITS_GRANULAR leaves and any gap is its own row. Snowsight, CLI and Desktop.",
+           window="rolling-daily", partial_day="included", unit="USD", filters=("company",),
+           required_sources=("ACCOUNT_USAGE.SNOWFLAKE_COCO_USAGE_HISTORY",),
+           coverage="exact token metering per request; model split with a visible residual; trailing 365 days "
+                    "only",
+           owner="finops"),
     Metric("cloud_services_ratio", "Cloud-services ratio", METERED,
            "warehouse / window", "ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (CS / total)",
            ACCOUNT_TZ, "up to ~6h (CS column; total credits ~3h)", "v4.30",

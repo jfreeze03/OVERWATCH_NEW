@@ -59,8 +59,8 @@ def test_cost_dispatch_places_showback_after_department_chargeback():
     pre = block[:i_show]
     assert "is_operator and" not in block[i_show:i_tags] and "st.toggle(" not in block[i_show:i_tags]
     assert pre.count("st.divider()") == 1
-    assert ('"note": "Company shapes chargeback, the all-in showback and AI users; Cortex service totals '
-            'remain account-wide."') in cost
+    assert ('"note": "Company shapes chargeback, the all-in showback, AI users and Cortex Code models; Cortex '
+            'service totals remain account-wide."') in cost
 
 
 def test_panel_is_mart_only_and_hourly():
@@ -92,7 +92,9 @@ def test_copy_locks():
                            "warehouse's company (the same metering as Department chargeback above, over this "
                            "panel's days).")
     for phrase in ("its query-compute arms are slices of warehouse compute and are left out so nothing counts "
-                   "twice", "(Cortex Code Desktop is not read, so it stays on the unattributed row)",
+                   "twice",
+                   "(Cortex Code Desktop is not loaded into this showback, so it stays on the unattributed row; "
+                   "Cortex Code models below shows it per user)",
                    "Storage: estimated from average daily database and fail-safe bytes, by database.",
                    "Other metered: metering with no company key."):
         assert phrase in note, phrase

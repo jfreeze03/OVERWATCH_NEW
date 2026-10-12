@@ -8,6 +8,11 @@ via the shared clause builders (KEBARR1 override included).
 Sources:
 - CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY / CORTEX_CODE_CLI_USAGE_HISTORY:
   per-user, per-request TOKEN_CREDITS and TOKENS (exact attribution).
+- SNOWFLAKE_COCO_USAGE_HISTORY (v4.612.0): the unified Cortex Code view
+  (Snowsight, CLI and Desktop, with INTERFACE and METADATA); read ONLY by
+  coco_model_usage_daily, the per-user model split (CREDITS_GRANULAR /
+  TOKENS_GRANULAR by model). The per-user readers above stay on the two
+  per-interface views until Phase 2.
 - CORTEX_AI_FUNCTIONS_USAGE_HISTORY: optional; not all accounts expose it —
   callers rely on the QueryResult error path when it is absent.
 """
@@ -351,6 +356,196 @@ FROM flat
 LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON flat.USER_ID = U.USER_ID
 GROUP BY 1, 2, 3
 ORDER BY USER_NAME, USAGE_DATE, TOKEN_TYPE
+LIMIT 200000
+"""
+
+
+def coco_model_usage_daily(company: str = "ALL") -> str:
+    """Cortex Code usage by Central day x user x interface x role x MODEL, all three interfaces (v4.612.0, owner ask
+    2026-10-08: "track and drill down by user which models they select when using coco"). The ONE live read behind
+    Cost Intelligence > Chargeback & AI > Cortex Code models.
+
+    Source: SNOWFLAKE_COCO_USAGE_HISTORY (GA 2026-08-17), the Snowsight, CLI AND Desktop views in one, with INTERFACE
+    and METADATA; 365-day retention, latency up to 1 h. It probes the Cortex Code subscriptions like the per-interface
+    views (002139 when absent), so callers pass probe=True and branch on error_kind (v4.603). Days-independent like
+    cortex_code_user_daily: the full LIVE_DERIVE_DAYS once, one cache entry per company; app.logic.cortex slices the
+    window (Last-month bounds included) and folds every drill, so a click costs no query.
+
+    Columns (the contract app.logic.cortex.coco_* folds read):
+    * MAIN_REQUESTS / REQUEST_TOKEN_CREDITS / REQUEST_TOKENS: each request ONCE, on its main model (the model with the
+      most credits in the request; ties by name). Additive over any slice; REQUEST_TOKEN_CREDITS is the spend basis
+      (= TOKEN_CREDITS, the number the AI users tab sums for Snowsight + CLI).
+    * COCO_CREDITS(_INPUT/_CACHE_READ/_CACHE_WRITE/_OUTPUT/_OTHER): this model's CREDITS_GRANULAR leaves, every leaf
+      COALESCEd and read with TRY_TO_DOUBLE (TRY_TO_NUMBER is scale 0: 0.0123 -> 0); _OTHER = an entry whose value is
+      a bare number. The four named leaves are read by name, so a pre-computed 'total' leaf can never double count;
+      any gap to TOKEN_CREDITS becomes a visible '(not attributed to a model)' row in coco_model_mix, never a drop.
+    * REQUESTS_USING: requests that billed this model. NOT additive across models (one request can bill several).
+    * TOKENS_*: TOKENS_GRANULAR flattened on its own, aggregated to the same grain, then FULL OUTER JOINed (two
+      FLATTENs in one FROM multiply models x models; an inner join drops a model present on one side only). Only
+      requests that also carry a CREDITS_GRANULAR breakdown lend tokens to a model (review r1): a request with
+      tokens but no credit breakdown puts its credits on '(no model breakdown)', so its tokens must not lower a
+      named model's credits per 1M tokens (its REQUEST_TOKENS still count on that row).
+    * MODEL_NAME '(no model breakdown)' = a request with a NULL / empty CREDITS_GRANULAR (OUTER => TRUE keeps it);
+      app.logic.cortex.COCO_NO_BREAKDOWN must equal this literal.
+    * ROLE_NAME = METADATA:role_name, '(not recorded)' before the field existed.
+    * USER_NAME = USERS.NAME via USER_ID (USERS deduplicated per USER_ID), 'UNKNOWN (<id>)' otherwise: the key
+      cortex_code_user_daily and COMPANY_FOR_USER use; the view's own USER_NAME (a login name) is not read.
+    Each FLATTEN sits in its own CTE (a LATERAL cannot be on the left of a LEFT JOIN: 001072). Day keys convert to
+    Central first (R2-052). Company scope runs COMPANY_FOR_USER once per DISTINCT grouped user, on a plain column
+    (V030). No division, no correlated subquery; LIMIT 200000 (run(max_rows=200_000) discloses truncation)."""
+    scope = companies.user_clause(company, "s.USER_NAME")
+    in_scope = (f"n.USER_NAME IN (SELECT s.USER_NAME FROM (SELECT DISTINCT d.USER_NAME FROM named d) s "
+                f"WHERE {scope})" if scope else "1 = 1")
+    return f"""
+WITH base AS (
+    SELECT
+        COALESCE(C.USER_ID, -1) AS USER_KEY,
+        C.USAGE_TIME,
+        CONVERT_TIMEZONE('America/Chicago', C.USAGE_TIME)::DATE AS USAGE_DATE,
+        CASE LOWER(C.INTERFACE)
+            WHEN 'snowsight' THEN 'Snowsight'
+            WHEN 'cli' THEN 'CLI'
+            WHEN 'desktop' THEN 'Desktop'
+            ELSE COALESCE(NULLIF(TRIM(C.INTERFACE), ''), '(unknown)')
+        END AS SOURCE,
+        COALESCE(NULLIF(TRIM(C.METADATA:role_name::STRING), ''), '(not recorded)') AS ROLE_NAME,
+        COALESCE(C.TOKEN_CREDITS, 0) AS TOKEN_CREDITS,
+        COALESCE(C.TOKENS, 0) AS TOKENS,
+        C.CREDITS_GRANULAR,
+        C.TOKENS_GRANULAR
+    FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWFLAKE_COCO_USAGE_HISTORY C
+    WHERE C.USAGE_TIME >= DATEADD('day', -{LIVE_DERIVE_DAYS}, CURRENT_TIMESTAMP())
+),
+cr AS (
+    SELECT
+        F.SEQ AS ROW_SEQ,
+        B.USER_KEY, B.USAGE_TIME, B.USAGE_DATE, B.SOURCE, B.ROLE_NAME, B.TOKEN_CREDITS, B.TOKENS,
+        COALESCE(NULLIF(TRIM(F.KEY::STRING), ''), '(no model breakdown)') AS MODEL_NAME,
+        COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(F.VALUE:input)), 0) AS CR_INPUT,
+        COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(F.VALUE:cache_read_input)), 0) AS CR_CACHE_READ,
+        COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(F.VALUE:cache_write_input)), 0) AS CR_CACHE_WRITE,
+        COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(F.VALUE:output)), 0) AS CR_OUTPUT,
+        IFF(IS_OBJECT(F.VALUE), 0, COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(F.VALUE)), 0)) AS CR_OTHER
+    FROM base B,
+         LATERAL FLATTEN(INPUT => B.CREDITS_GRANULAR, OUTER => TRUE) F
+),
+ranked AS (
+    SELECT
+        cr.ROW_SEQ, cr.USER_KEY, cr.USAGE_TIME, cr.USAGE_DATE, cr.SOURCE, cr.ROLE_NAME,
+        cr.TOKEN_CREDITS, cr.TOKENS, cr.MODEL_NAME,
+        cr.CR_INPUT, cr.CR_CACHE_READ, cr.CR_CACHE_WRITE, cr.CR_OUTPUT, cr.CR_OTHER,
+        ROW_NUMBER() OVER (
+            PARTITION BY cr.ROW_SEQ
+            ORDER BY cr.CR_INPUT + cr.CR_CACHE_READ + cr.CR_CACHE_WRITE + cr.CR_OUTPUT + cr.CR_OTHER DESC,
+                     cr.MODEL_NAME
+        ) AS MODEL_RANK
+    FROM cr
+),
+cr_agg AS (
+    SELECT
+        R.USAGE_DATE, R.USER_KEY, R.SOURCE, R.ROLE_NAME, R.MODEL_NAME,
+        COUNT(*) AS REQUESTS_USING,
+        COUNT_IF(R.MODEL_RANK = 1) AS MAIN_REQUESTS,
+        SUM(IFF(R.MODEL_RANK = 1, R.TOKEN_CREDITS, 0)) AS REQUEST_TOKEN_CREDITS,
+        SUM(IFF(R.MODEL_RANK = 1, R.TOKENS, 0)) AS REQUEST_TOKENS,
+        SUM(R.CR_INPUT + R.CR_CACHE_READ + R.CR_CACHE_WRITE + R.CR_OUTPUT + R.CR_OTHER) AS COCO_CREDITS,
+        SUM(R.CR_INPUT) AS COCO_CREDITS_INPUT,
+        SUM(R.CR_CACHE_READ) AS COCO_CREDITS_CACHE_READ,
+        SUM(R.CR_CACHE_WRITE) AS COCO_CREDITS_CACHE_WRITE,
+        SUM(R.CR_OUTPUT) AS COCO_CREDITS_OUTPUT,
+        SUM(R.CR_OTHER) AS COCO_CREDITS_OTHER,
+        MIN(R.USAGE_TIME) AS FIRST_TS,
+        MAX(R.USAGE_TIME) AS LAST_TS
+    FROM ranked R
+    GROUP BY R.USAGE_DATE, R.USER_KEY, R.SOURCE, R.ROLE_NAME, R.MODEL_NAME
+),
+tk_agg AS (
+    SELECT
+        B.USAGE_DATE, B.USER_KEY, B.SOURCE, B.ROLE_NAME,
+        COALESCE(NULLIF(TRIM(T.KEY::STRING), ''), '(no model breakdown)') AS MODEL_NAME,
+        SUM(COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(T.VALUE:input)), 0)) AS TOKENS_INPUT,
+        SUM(COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(T.VALUE:cache_read_input)), 0)) AS TOKENS_CACHE_READ,
+        SUM(COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(T.VALUE:cache_write_input)), 0)) AS TOKENS_CACHE_WRITE,
+        SUM(COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(T.VALUE:output)), 0)) AS TOKENS_OUTPUT,
+        SUM(IFF(IS_OBJECT(T.VALUE), 0, COALESCE(TRY_TO_DOUBLE(TO_VARCHAR(T.VALUE)), 0))) AS TOKENS_OTHER
+    FROM base B,
+         LATERAL FLATTEN(INPUT => B.TOKENS_GRANULAR) T
+    WHERE ARRAY_SIZE(OBJECT_KEYS(B.CREDITS_GRANULAR)) > 0
+    GROUP BY 1, 2, 3, 4, 5
+),
+merged AS (
+    SELECT
+        COALESCE(c.USAGE_DATE, t.USAGE_DATE) AS USAGE_DATE,
+        COALESCE(c.USER_KEY, t.USER_KEY) AS USER_KEY,
+        COALESCE(c.SOURCE, t.SOURCE) AS SOURCE,
+        COALESCE(c.ROLE_NAME, t.ROLE_NAME) AS ROLE_NAME,
+        COALESCE(c.MODEL_NAME, t.MODEL_NAME) AS MODEL_NAME,
+        COALESCE(c.REQUESTS_USING, 0) AS REQUESTS_USING,
+        COALESCE(c.MAIN_REQUESTS, 0) AS MAIN_REQUESTS,
+        COALESCE(c.REQUEST_TOKEN_CREDITS, 0) AS REQUEST_TOKEN_CREDITS,
+        COALESCE(c.REQUEST_TOKENS, 0) AS REQUEST_TOKENS,
+        COALESCE(c.COCO_CREDITS, 0) AS COCO_CREDITS,
+        COALESCE(c.COCO_CREDITS_INPUT, 0) AS COCO_CREDITS_INPUT,
+        COALESCE(c.COCO_CREDITS_CACHE_READ, 0) AS COCO_CREDITS_CACHE_READ,
+        COALESCE(c.COCO_CREDITS_CACHE_WRITE, 0) AS COCO_CREDITS_CACHE_WRITE,
+        COALESCE(c.COCO_CREDITS_OUTPUT, 0) AS COCO_CREDITS_OUTPUT,
+        COALESCE(c.COCO_CREDITS_OTHER, 0) AS COCO_CREDITS_OTHER,
+        COALESCE(t.TOKENS_INPUT, 0) AS TOKENS_INPUT,
+        COALESCE(t.TOKENS_CACHE_READ, 0) AS TOKENS_CACHE_READ,
+        COALESCE(t.TOKENS_CACHE_WRITE, 0) AS TOKENS_CACHE_WRITE,
+        COALESCE(t.TOKENS_OUTPUT, 0) AS TOKENS_OUTPUT,
+        COALESCE(t.TOKENS_OTHER, 0) AS TOKENS_OTHER,
+        c.FIRST_TS,
+        c.LAST_TS
+    FROM cr_agg c
+    FULL OUTER JOIN tk_agg t
+      ON t.USAGE_DATE = c.USAGE_DATE AND t.USER_KEY = c.USER_KEY AND t.SOURCE = c.SOURCE
+     AND t.ROLE_NAME = c.ROLE_NAME AND t.MODEL_NAME = c.MODEL_NAME
+),
+users1 AS (
+    SELECT U.USER_ID, U.NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY U.USER_ID ORDER BY U.CREATED_ON DESC NULLS LAST) = 1
+),
+named AS (
+    SELECT
+        m.USAGE_DATE,
+        COALESCE(u.NAME, IFF(m.USER_KEY = -1, 'UNKNOWN (no user id)',
+                             'UNKNOWN (' || m.USER_KEY || ')')) AS USER_NAME,
+        m.SOURCE,
+        m.ROLE_NAME,
+        m.MODEL_NAME,
+        SUM(m.REQUESTS_USING) AS REQUESTS_USING,
+        SUM(m.MAIN_REQUESTS) AS MAIN_REQUESTS,
+        SUM(m.REQUEST_TOKEN_CREDITS) AS REQUEST_TOKEN_CREDITS,
+        SUM(m.REQUEST_TOKENS) AS REQUEST_TOKENS,
+        SUM(m.COCO_CREDITS) AS COCO_CREDITS,
+        SUM(m.COCO_CREDITS_INPUT) AS COCO_CREDITS_INPUT,
+        SUM(m.COCO_CREDITS_CACHE_READ) AS COCO_CREDITS_CACHE_READ,
+        SUM(m.COCO_CREDITS_CACHE_WRITE) AS COCO_CREDITS_CACHE_WRITE,
+        SUM(m.COCO_CREDITS_OUTPUT) AS COCO_CREDITS_OUTPUT,
+        SUM(m.COCO_CREDITS_OTHER) AS COCO_CREDITS_OTHER,
+        SUM(m.TOKENS_INPUT) AS TOKENS_INPUT,
+        SUM(m.TOKENS_CACHE_READ) AS TOKENS_CACHE_READ,
+        SUM(m.TOKENS_CACHE_WRITE) AS TOKENS_CACHE_WRITE,
+        SUM(m.TOKENS_OUTPUT) AS TOKENS_OUTPUT,
+        SUM(m.TOKENS_OTHER) AS TOKENS_OTHER,
+        MIN(m.FIRST_TS) AS FIRST_TS,
+        MAX(m.LAST_TS) AS LAST_TS
+    FROM merged m
+    LEFT JOIN users1 u ON u.USER_ID = m.USER_KEY
+    GROUP BY 1, 2, 3, 4, 5
+)
+SELECT
+    n.USAGE_DATE, n.USER_NAME, n.SOURCE, n.ROLE_NAME, n.MODEL_NAME,
+    n.REQUESTS_USING, n.MAIN_REQUESTS, n.REQUEST_TOKEN_CREDITS, n.REQUEST_TOKENS,
+    n.COCO_CREDITS, n.COCO_CREDITS_INPUT, n.COCO_CREDITS_CACHE_READ, n.COCO_CREDITS_CACHE_WRITE,
+    n.COCO_CREDITS_OUTPUT, n.COCO_CREDITS_OTHER,
+    n.TOKENS_INPUT, n.TOKENS_CACHE_READ, n.TOKENS_CACHE_WRITE, n.TOKENS_OUTPUT, n.TOKENS_OTHER,
+    n.FIRST_TS, n.LAST_TS
+FROM named n
+WHERE {in_scope}
+ORDER BY n.USAGE_DATE, n.USER_NAME, n.SOURCE, n.ROLE_NAME, n.MODEL_NAME
 LIMIT 200000
 """
 

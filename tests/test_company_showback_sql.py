@@ -12,6 +12,7 @@ days clamp for this builder automatically.
 
 from __future__ import annotations
 
+import ast
 import re
 from datetime import date
 from pathlib import Path
@@ -117,6 +118,41 @@ def test_coco_sources_match_the_loader_code_arms():
     # the copy says Cortex Code Desktop is not read: true while no migration or builder names its view
     for p in list(_MIG.glob("V*.sql")) + list((_ROOT / "app").rglob("*.py")):
         assert "CORTEX_CODE_DESKTOP" not in p.read_text(encoding="utf-8").upper(), p.name
+
+
+def _enclosing_functions(src: str, needle: str) -> set[str]:
+    """The enclosing function of every string literal (f-string parts included) that holds ``needle``
+    ('<module>' outside any function)."""
+    tree = ast.parse(src)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and needle in node.value.upper():
+            cur = parents.get(node)
+            while cur is not None and not isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                cur = parents.get(cur)
+            found.add(cur.name if cur is not None else "<module>")
+    return found
+
+
+def test_only_the_models_builder_reads_the_unified_coco_view():
+    """v4.612.0: the unified Cortex Code view (SNOWFLAKE_COCO_USAGE_HISTORY, Desktop included) is READ only by
+    cortex_sql.coco_model_usage_daily (Cost > Chargeback & AI > Cortex Code models). The showback, AI users and
+    CoCo tile copy ("Snowsight + CLI", Desktop "not loaded into this showback") stays true until Phase 2
+    deliberately widens those readers, and this lock with them. Prose may name the view; its SQL reference may
+    sit only inside that builder, and no migration (or other Snowflake script) names it."""
+    ref = "SNOWFLAKE.ACCOUNT_USAGE.SNOWFLAKE_COCO_USAGE_HISTORY"
+    for p in (_ROOT / "snowflake").rglob("*.sql"):
+        assert "SNOWFLAKE_COCO_USAGE_HISTORY" not in p.read_text(encoding="utf-8").upper(), p.name
+    readers = {}
+    for p in (_ROOT / "app").rglob("*.py"):
+        src = p.read_text(encoding="utf-8")
+        if ref in src.upper():
+            readers[p.relative_to(_ROOT).as_posix()] = _enclosing_functions(src, ref)
+    assert readers == {"app/data/cortex_sql.py": {"coco_model_usage_daily"}}, readers
+    # the lock has teeth: a second reader is seen
+    probe = "def other():\n    return 'SELECT 1 FROM " + ref + "'\n"
+    assert _enclosing_functions(probe, ref) == {"other"}
 
 
 def test_builder_columns_exist_in_the_mart_definitions():

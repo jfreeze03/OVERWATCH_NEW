@@ -549,7 +549,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                  "inside the Credit-spend and Total-credits tiles — post-V079 CoCo bills as "
                  "SNOWFLAKE_COCO_SNOWSIGHT within METERING_DAILY_HISTORY. Shown here from the "
                  "near-real-time loader for freshness; do NOT add it to the totals on the left. "
-                 + _coco_dash_help(_v167, _coco_note)},
+                 + _coco_dash_help(_v167, _coco_note)
+                 + " Cortex Code Desktop is not in this tile; Chargeback & AI ▸ Cortex Code models shows it."},
     ]
     hero_metric(_hero, _companions)
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution)."

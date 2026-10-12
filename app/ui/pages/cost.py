@@ -61,6 +61,7 @@ from app.ui.pages.cost_parts.ai_chargeback import (  # noqa: E402
     _company_showback_panel,
     _cortex_spend_tab,
 )
+from app.ui.pages.cost_parts.coco_models import coco_models_section  # noqa: E402
 from app.ui.pages.cost_parts.contract import _contract_tab, org_balance_result  # noqa: E402
 from app.ui.pages.cost_parts.optimize import _optimization_tab, _savings_tab  # noqa: E402
 from app.ui.pages.cost_parts.spend import (  # noqa: E402,F401
@@ -204,7 +205,7 @@ def render() -> None:
         "Chargeback & AI": {
             "applies": ("days",),
             "partial": ("company", "database", "schema_contains"),
-            "note": "Company shapes chargeback, the all-in showback and AI users; Cortex service totals remain account-wide.",
+            "note": "Company shapes chargeback, the all-in showback, AI users and Cortex Code models; Cortex service totals remain account-wide.",
         },
         "Unit costs": {
             # v4.157.0: measured_query_costs honors warehouse/user contains too —
@@ -465,12 +466,24 @@ def render() -> None:
         # r22 #14: the exact Cortex Code user scan is the heaviest read in
         # this group — it runs only when asked, like the other deep scans.
         from app.ui.components import toggle_cost_hint
-        st.caption(toggle_cost_hint("cortex_users"))
+        st.caption(toggle_cost_hint("cortex_user_daily"))   # v4.612: the live scan's key (not 'cortex_users')
         if st.toggle("Load AI user attribution (exact live token metering)",
                      key="ai_users_scan",
                      help="Runs the per-user Cortex Code scans; the rest of "
                           "this section stays cheap without it."):
             _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator, bounds=f["bounds"])
+        # v4.612.0 (owner ask 2026-10-08): which models each user's Cortex Code requests ran on, all three
+        # interfaces. A sibling of AI users, not nested in it, so AI users' early returns (no subscription, an
+        # empty window) never hide it; its own toggle keeps it off first paint.
+        st.divider()
+        section_header("Cortex Code models", "", "cost", anchor="cost-coco-models")
+        st.caption(toggle_cost_hint("coco_models_"))
+        if st.toggle("Load Cortex Code models by user (live, all interfaces)",
+                     key="coco_models_scan",
+                     help="One read of SNOWFLAKE_COCO_USAGE_HISTORY (365 days, cached 1 h): which models each "
+                          "user’s Cortex Code requests ran on in Snowsight, the CLI and Desktop. Every click "
+                          "below reuses that read."):
+            coco_models_section(f["company"], f["days"], ai_rate, bounds=f["bounds"])
     elif section == "Unit costs":
         section_header("Unit costs", "", "cost")
         _unit_costs_tab(f, rate, ai_rate)

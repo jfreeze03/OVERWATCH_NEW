@@ -215,6 +215,7 @@ _PROBE_CANARIES = {
     "cortex.code_token_types": ("cortex_code_token_types", ()),
     "cortex.quota_access_block_history": ("quota_access_block_history", (1,)),
     "cortex.app_self_cost": ("app_cortex_self_cost", (1,)),
+    "cortex.coco_model_usage_daily": ("coco_model_usage_daily", ("ALFA",)),   # v4.612.0
 }
 
 

@@ -27,6 +27,7 @@ from app.logic.wave2 import token_economics
     lambda: cortex_sql.cortex_code_user_rollup(7, "ALFA"),
     lambda: cortex_sql.cortex_code_daily(7, "ALFA"),
     lambda: cortex_sql.cortex_ai_functions_daily(7),
+    lambda: cortex_sql.coco_model_usage_daily("ALFA"),
 ])
 def test_cortex_scans_are_bounded(builder):
     assert re.search(r"DATEADD\('day',\s*-\d+", builder())
