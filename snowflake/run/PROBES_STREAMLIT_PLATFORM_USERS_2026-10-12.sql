@@ -65,4 +65,22 @@ SHOW STREAMLITS IN SCHEMA DBA_MAINT_DB.OVERWATCH;
 SELECT "name", "created_on", "owner", "query_warehouse"
 FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
 
+-- S7 What OVERWATCH's security change log recorded FOR these users (the statements they ran), last 30 days.
+-- DECIDES: rows here are the runtime's own statements, which stay in Security > Changes (the fix only stops the
+--    admin-grant ALERT); a high RISK_LEVEL here would need its own look.
+SELECT f.USER_NAME, f.CHANGE_KIND, f.RISK_LEVEL, f.QUERY_TYPE, COUNT(*) AS CHANGES, MAX(f.EVENT_TS) AS LAST_AT
+FROM DBA_MAINT_DB.OVERWATCH.FACT_SECURITY_CHANGE f
+WHERE f.USER_NAME ILIKE 'STPLAT%'
+  AND f.DAY >= DATEADD('day', -30, CURRENT_DATE())
+GROUP BY 1, 2, 3, 4
+ORDER BY CHANGES DESC
+LIMIT 50;
+
+-- S8 Posture-metric alert rules you created (they count grants too, so a deploy could also trip one).
+-- DECIDES: a rule on BREAKGLASS_GRANTS_30D or GRANT_CHANGES_24H means those counts need the same exclusion.
+SELECT RULE_ID, METRIC_NAME, THRESHOLD_NUM, ENABLED
+FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+WHERE COALESCE(METRIC_NAME, '') <> ''
+ORDER BY RULE_ID;
+
 ALTER SESSION UNSET TIMEZONE;
