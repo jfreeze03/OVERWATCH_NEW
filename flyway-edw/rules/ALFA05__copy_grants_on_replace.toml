@@ -1,0 +1,27 @@
+# ALFA05 -- CREATE OR REPLACE without COPY GRANTS (heuristic).    Flyway Enterprise regex rule (`flyway check -code`)
+#
+# Why: CREATE OR REPLACE of a view, materialized view, function, procedure, dynamic table or stream drops every
+# explicit grant on the object unless the statement says COPY GRANTS. Repeatable migrations re-run whenever they
+# change, so a missing COPY GRANTS revokes consumer access on each runway at its next deploy. Snowflake behaviour
+# change BCR-2433 makes copying the default once it is enabled; until then write COPY GRANTS explicitly.
+#
+# A WARNING because a regex cannot parse SQL. Patterns 1-5 report the CREATE OR REPLACE header when the first
+# standalone AS keyword (the body's AS, or EXECUTE AS on a procedure) comes before any COPY GRANTS in the same
+# statement: COPY GRANTS belongs after the name / argument or column list, ahead of RETURNS and AS. A header COMMENT
+# containing the word "as" ahead of COPY GRANTS gives a false report, so write COPY GRANTS first. Pattern 6 covers
+# streams, which have no AS: it reports a CREATE OR REPLACE STREAM with no COPY GRANTS before its semicolon.
+# Guard rule FG011 is the statement-aware check that fails the build; this rule annotates the report.
+#
+# Patterns are TOML literal strings ('...'): the regex is exactly what is written, no backslash escaping.
+code = "ALFA05"
+dialects = ["TEXT"]
+rules = [
+    '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:SECURE\s+|RECURSIVE\s+)*VIEW\b(?:(?!COPY\s+GRANTS)[^;])*?\bAS\b',
+    '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:SECURE\s+)?MATERIALIZED\s+VIEW\b(?:(?!COPY\s+GRANTS)[^;])*?\bAS\b',
+    '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:SECURE\s+|AGGREGATE\s+)*FUNCTION\b(?:(?!COPY\s+GRANTS)[^;])*?\bAS\b',
+    '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:SECURE\s+)?PROCEDURE\b(?:(?!COPY\s+GRANTS)[^;])*?\bAS\b',
+    '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:TRANSIENT\s+)?DYNAMIC\s+TABLE\b(?:(?!COPY\s+GRANTS)[^;])*?\bAS\b',
+    '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+STREAM\b(?:(?!COPY\s+GRANTS)[^;])*;',
+]
+description = "CREATE OR REPLACE without COPY GRANTS drops explicit grants (heuristic; guard FG011 decides)"
+severity = "warning"

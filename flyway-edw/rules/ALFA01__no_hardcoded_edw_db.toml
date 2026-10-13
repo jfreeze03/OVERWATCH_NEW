@@ -1,0 +1,22 @@
+# ALFA01 -- no hard-coded environment database name.            Flyway Enterprise regex rule (`flyway check -code`)
+#
+# Why: one bundle is promoted DEV -> SAN | SEA | PHX -> MGM -> PRD and test runways are refreshed by zero-copy clone.
+# Code that names ALFA_EDW_<X> hits the wrong runway after promotion, and inside a view / procedure / task body it
+# keeps pointing at the clone's SOURCE database. Write SCHEMA.OBJECT (it resolves in the object's own database) and
+# reach another database only through a placeholder (docs/CONVENTIONS.md, cross-database references).
+#
+# Mirror of guard rule FG009 (scripts/fwkit/guard.py), which is comment-aware and authoritative; this copy puts the
+# finding in the Enterprise code-review report. Flyway searches every pattern (Java regex, all matches) in the raw
+# text of each reviewed migration, comments included, so the pattern skips lines that START a comment (--, /*, *).
+# A database name in a trailing comment on a code line is still reported: keep it out of trailing comments.
+# At least one name character must follow ALFA_EDW_, so a regex literal like 'ALFA_EDW_[A-Z0-9_]+' (the
+# cross-environment guard callback) is not reported.
+#
+# Patterns are TOML literal strings ('...'): the regex is exactly what is written, no backslash escaping.
+code = "ALFA01"
+dialects = ["TEXT"]
+rules = [
+    '(?im)^(?![ \t]*(?:--|/\*|\*))[^\r\n]*?\bALFA_EDW_[A-Z0-9_]+',
+]
+description = "Hard-coded ALFA_EDW_ database name: use SCHEMA.OBJECT or a placeholder (guard FG009)"
+severity = "error"

@@ -1,0 +1,84 @@
+{
+  "_notes": [
+    "Desired Bitbucket Cloud branch restrictions for the EDW Flyway repository. Applied by",
+    "bitbucket/apply_branch_restrictions.sh: it creates missing kinds, updates changed ones and never deletes.",
+    "Keys starting with '_' are documentation and are never sent to Bitbucket.",
+    "'groups_env' names an environment variable holding comma-separated Bitbucket group slugs; the script turns",
+    "it into the API's 'groups' list. Only 'push' and 'restrict_merges' accept users/groups, and an EMPTY list",
+    "denies everybody (api.bitbucket.org/swagger.json, POST .../branch-restrictions).",
+    "Kinds and value semantics: FACTS I4-01 / I4-02 (swagger branchrestriction.kind enum, fetched 2026-10-13).",
+    "Plan caveats (verify on the workspace): enforce_merge_checks ('Prevent a merge with unresolved merge",
+    "checks') is believed to need Bitbucket Premium; on Free/Standard the merge checks are advisory and the hard",
+    "gate is Jenkins (MGM/PRD deploy jobs only take bundles built from main).",
+    "Default reviewers are individual users (the API has no group form): add them at project or repository",
+    "level, or require_default_reviewer_approvals_to_merge can never be met.",
+    "Alternative to reset_pullrequest_approvals_on_change: smart_reset_pullrequest_approvals (keeps approvals",
+    "when the diff is unchanged). Use one of the two, not both.",
+    "Test on a scratch repository first: whether an EMPTY push list also blocks 'Merge via pull request' for",
+    "members of the restrict_merges groups (an open question; docs/GUIDE.md Part B)."
+  ],
+  "branch_match_kind": "glob",
+  "pattern": "main",
+  "restrictions": [
+    {
+      "kind": "push",
+      "users": [],
+      "groups_env": "BITBUCKET_BREAK_GLASS_GROUPS",
+      "_why": [
+        "No direct pushes to main: every change arrives through a reviewed, Jenkins-validated pull request.",
+        "Only the optional break-glass group may push (unset = nobody), for a recorded emergency."
+      ]
+    },
+    {
+      "kind": "restrict_merges",
+      "users": [],
+      "groups_env": "BITBUCKET_MERGE_GROUPS",
+      "_why": [
+        "Only the EDW merge group may press Merge.",
+        "Required: an empty list here would block every merge, so the script refuses to send one."
+      ]
+    },
+    {
+      "kind": "force",
+      "_why": ["No force-push: rewriting main orphans migrations already applied on a runway (guard FG003)."]
+    },
+    {
+      "kind": "delete",
+      "_why": ["main cannot be deleted."]
+    },
+    {
+      "kind": "require_approvals_to_merge",
+      "value": 2,
+      "_why": ["Two approvals on every change."]
+    },
+    {
+      "kind": "require_default_reviewer_approvals_to_merge",
+      "value": 1,
+      "_why": ["At least one of those approvals comes from a default reviewer (DBA / data architect)."]
+    },
+    {
+      "kind": "require_passing_builds_to_merge",
+      "value": 1,
+      "_why": ["The Jenkins PR build (guard, Flyway code review, info + validate against DEV) must be green."]
+    },
+    {
+      "kind": "require_no_changes_requested",
+      "_why": ["An open 'request changes' blocks the merge."]
+    },
+    {
+      "kind": "require_tasks_to_be_completed",
+      "_why": ["Open pull request tasks (review to-dos) block the merge."]
+    },
+    {
+      "kind": "reset_pullrequest_approvals_on_change",
+      "_why": ["A new push to the source branch withdraws earlier approvals: reviewers approve what merges."]
+    },
+    {
+      "kind": "enforce_merge_checks",
+      "_why": [
+        "Makes the checks above blocking instead of advisory. Believed Premium-only (verify); on a plan that",
+        "refuses it, run the script with --skip enforce_merge_checks."
+      ]
+    }
+  ]
+}

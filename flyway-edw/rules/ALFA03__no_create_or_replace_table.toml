@@ -1,0 +1,19 @@
+# ALFA03 -- no CREATE OR REPLACE TABLE.                           Flyway Enterprise regex rule (`flyway check -code`)
+#
+# Why: CREATE OR REPLACE TABLE drops the existing table: its rows, its Time Travel history and the offsets of every
+# stream on it (the streams go stale). In an EDW that is data loss, not a schema change. New tables use
+# CREATE TABLE IF NOT EXISTS; changes use ALTER TABLE ... ADD COLUMN IF NOT EXISTS etc. (docs/CONVENTIONS.md, Tables).
+# TRANSIENT, HYBRID and ICEBERG tables are reported too. TEMPORARY / VOLATILE tables (session scratch in a data fix)
+# and DYNAMIC / EXTERNAL tables (no data of their own to lose) are not.
+#
+# Mirror of guard rule FG006. Regex rules have no per-file waiver: a replace the guard waived with a ticket still
+# needs this rule's severity changed in a reviewed commit, so prefer CREATE TABLE ... + ALTER TABLE ... SWAP WITH.
+#
+# Patterns are TOML literal strings ('...'): the regex is exactly what is written, no backslash escaping.
+code = "ALFA03"
+dialects = ["TEXT"]
+rules = [
+    '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:(?:TRANSIENT|HYBRID|ICEBERG)\s+)?TABLE\b',
+]
+description = "CREATE OR REPLACE TABLE drops data, Time Travel and streams: use IF NOT EXISTS / ALTER (guard FG006)"
+severity = "error"

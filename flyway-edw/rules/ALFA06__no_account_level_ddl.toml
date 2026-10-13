@@ -1,0 +1,30 @@
+# ALFA06 -- no account-level DDL or grants in a migration.        Flyway Enterprise regex rule (`flyway check -code`)
+#
+# Why: warehouses, roles, users, databases, integrations, network / authentication / password / session policies,
+# network rules, resource monitors, shares, replication / failover groups, connections, compute pools and the account
+# itself are shared by all six runways. A migration replays once per runway (and again in the MGM / PRD rehearsals),
+# each time with that runway's placeholders, and the runway deployer roles lack these privileges by design. Such
+# objects belong in bootstrap/, run deliberately by a Snowflake admin. Grants ON ACCOUNT / DATABASE / WAREHOUSE /
+# INTEGRATION / USER, GRANT ROLE ... TO USER and GRANT OWNERSHIP are reported for the same reason; schema-level
+# grants (repeatable layer 90) and DATABASE ROLE statements are not.
+#
+# Mirror of guard rule FG007. Regex rules have no per-file waiver: a change the guard would waive with a ticket is run
+# by an admin from bootstrap/ instead of shipping in a migration.
+#
+# Patterns are TOML literal strings ('...'): the regex is exactly what is written, no backslash escaping.
+code = "ALFA06"
+dialects = ["TEXT"]
+rules = [
+    '(?im)^[ \t]*(?:CREATE(?:\s+OR\s+\w+)?|ALTER|DROP)\s+(?:WAREHOUSE|ROLE|USER|SHARE|CONNECTION|ACCOUNT)\b',
+    '(?im)^[ \t]*(?:CREATE(?:\s+OR\s+\w+)?|ALTER|DROP)\s+(?:TRANSIENT\s+)?DATABASE\b(?!\s+ROLE\b)',
+    '(?im)^[ \t]*(?:CREATE(?:\s+OR\s+\w+)?|ALTER|DROP)\s+(?:\w+\s+){0,2}INTEGRATION\b',
+    '(?im)^[ \t]*(?:CREATE(?:\s+OR\s+\w+)?|ALTER|DROP)\s+(?:AUTHENTICATION|PASSWORD|SESSION)\s+POLICY\b',
+    '(?im)^[ \t]*(?:CREATE(?:\s+OR\s+\w+)?|ALTER|DROP)\s+NETWORK\s+(?:POLICY|RULE)\b',
+    '(?im)^[ \t]*(?:CREATE(?:\s+OR\s+\w+)?|ALTER|DROP)\s+(?:RESOURCE\s+MONITOR|COMPUTE\s+POOL)\b',
+    '(?im)^[ \t]*(?:CREATE(?:\s+OR\s+\w+)?|ALTER|DROP)\s+(?:FAILOVER|REPLICATION)\s+GROUP\b',
+    '(?im)^[ \t]*(?:GRANT|REVOKE)\b[^;]*?\bON\s+(?:ACCOUNT|DATABASE|WAREHOUSE|INTEGRATION|USER)\b',
+    '(?im)^[ \t]*GRANT\s+ROLE\s+\S+\s+TO\s+USER\b',
+    '(?im)^[ \t]*GRANT\s+OWNERSHIP\b',
+]
+description = "Account-level DDL or grant in a migration replays on every runway: use bootstrap/ (guard FG007)"
+severity = "error"

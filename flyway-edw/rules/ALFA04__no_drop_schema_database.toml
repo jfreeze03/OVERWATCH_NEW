@@ -1,0 +1,19 @@
+# ALFA04 -- no DROP SCHEMA / DROP DATABASE, nor their CREATE OR REPLACE forms. Flyway Enterprise regex rule.
+#
+# Why: a migration replays on all six runways. DROP SCHEMA destroys every object in the schema, including objects
+# other projects created there later; DROP DATABASE / CREATE OR REPLACE DATABASE removes a whole runway, and
+# CREATE OR REPLACE SCHEMA is a DROP SCHEMA in disguise. Databases are created and retired only by a Snowflake admin
+# (bootstrap/); schemas are created with CREATE SCHEMA IF NOT EXISTS and retired by a reviewed, ticketed change.
+# DATABASE ROLE statements are not reported (database roles are not databases).
+#
+# Mirror of guard rule FG006 (DROP DATABASE and the CREATE OR REPLACE forms are never waivable there either).
+#
+# Patterns are TOML literal strings ('...'): the regex is exactly what is written, no backslash escaping.
+code = "ALFA04"
+dialects = ["TEXT"]
+rules = [
+    '(?im)^[ \t]*DROP\s+(?:SCHEMA\b|DATABASE\b(?!\s+ROLE\b))',
+    '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:TRANSIENT\s+)?(?:SCHEMA\b|DATABASE\b(?!\s+ROLE\b))',
+]
+description = "DROP / CREATE OR REPLACE of a SCHEMA or DATABASE destroys it on every runway (guard FG006)"
+severity = "error"

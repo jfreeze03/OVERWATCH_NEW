@@ -1,0 +1,19 @@
+# ALFA02 -- no USE DATABASE / SCHEMA / ROLE / SECONDARY ROLES.   Flyway Enterprise regex rule (`flyway check -code`)
+#
+# Why: before every migration Flyway runs USE ROLE <its own role> and USE SCHEMA FLYWAY, but it never resets the
+# DATABASE. A USE DATABASE (or a bare `USE <name>`, which Snowflake reads as USE DATABASE / USE SCHEMA) silently
+# redirects every later migration in the same run; USE ROLE / USE SECONDARY ROLES change who owns what gets created.
+# Schema-qualify instead (SCHEMA.OBJECT). USE WAREHOUSE is not reported here: guard FG008 reports it and it may be
+# waived with a ticket for a heavy backfill.
+#
+# Mirror of the unwaivable part of guard rule FG008. Flyway searches the raw file text; the statement must start
+# its line (the house layout), so prose in `--` comments never matches.
+#
+# Patterns are TOML literal strings ('...'): the regex is exactly what is written, no backslash escaping.
+code = "ALFA02"
+dialects = ["TEXT"]
+rules = [
+    '(?im)^[ \t]*USE\s+(?!WAREHOUSE\b)\S',
+]
+description = "USE DATABASE/SCHEMA/ROLE leaks into every later migration of the run: schema-qualify (guard FG008)"
+severity = "error"
