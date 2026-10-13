@@ -1,5 +1,10 @@
 # Flyway adoption runbook
 
+> **The EDW pipeline is separate.** The Flyway Enterprise CI/CD kit for the ALFA EDW (ALFA_EDW_DEV -> SAN/SEA/PHX ->
+> MGM -> PRD, Bitbucket Cloud + Jenkins) lives in `flyway-edw/` and is documented in `flyway-edw/docs/GUIDE.md`.
+> This page stays about OVERWATCH's own chain (`snowflake/migrations`, `DBA_MAINT_DB.OVERWATCH`). When the EDW
+> service users exist, add them to `DEPLOY_ACTORS` (step 2 below) so OVERWATCH reads their changes as MANAGED.
+
 Written 2026-07-10, ahead of procurement — so the day Flyway lands it is a
 config change, not a project. The repo has used Flyway's naming convention
 (`V###__description.sql`, append-only, never edit an applied file) since

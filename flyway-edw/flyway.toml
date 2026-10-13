@@ -1,0 +1,216 @@
+# Flyway Enterprise project configuration -- ALFA EDW (Snowflake), six airport-coded runways.
+#
+#   DEV -> SAN | SEA | PHX -> MGM -> PRD        database = ALFA_EDW_<ID>, history = <DB>.FLYWAY."flyway_schema_history"
+#
+# NO SECRETS IN THIS FILE (guard rule FG017/FG018). Everything that identifies a login comes from environment
+# variables at run time through Flyway's ${env.NAME} resolver; the Jenkins deploy job sets them from folder-scoped
+# credentials, and `scripts/fw.py env --runway <ID>` prints them for a manual run (docs/GUIDE.md section 9):
+#   SNOWFLAKE_ACCOUNT    account identifier (<orgname>-<account_name>)
+#   FLYWAY_SF_USER       SVC_EDW_FLYWAY_<ID> (deploy) or SVC_EDW_FLYWAY_AUDIT (read-only info/validate)
+#   FLYWAY_SF_ROLE       EDW_<ID>_DEPLOYER or EDW_FLYWAY_AUDITOR
+#   FLYWAY_SF_WAREHOUSE  WH_EDW_DEPLOY_<ID> (or WH_EDW_FLYWAY_AUDIT)
+#   FLYWAY_SF_KEY_FILE   path to the ENCRYPTED PKCS#8 private key (Jenkins sshUserPrivateKey keyFileVariable)
+#   FLYWAY_SF_KEY_PWD    its passphrase (Jenkins passphraseVariable)
+#   FLYWAY_RH_DB         rehearsal clone name, only for the RH_MGM / RH_PRD environments (ALFA_EDW_RH_MGM / _PRD)
+#   FLYWAY_EMAIL / FLYWAY_TOKEN (or FLYWAY_OFFLINE_PERMIT_PATH)   Enterprise licence -- never in this file
+#
+# Facts this file encodes (each verified against Flyway 13.10 source; see docs/SHORTCOMINGS.md):
+# * JDBC_QUERY_RESULT_FORMAT=JSON: the Snowflake driver needs it on Java 16+ (Flyway's Snowflake driver page).
+# * defaultSchema FLYWAY: Flyway runs USE SCHEMA FLYWAY before EVERY migration, so unqualified names land there --
+#   the guard (FG010) requires SCHEMA.OBJECT targets.
+# * createSchemas=false: the FLYWAY schema is created by bootstrap/20_runway_database.sql, never by Flyway.
+# * cleanDisabled=true everywhere: `flyway clean` on Snowflake only drops tables/views/sequences/stages/UDFs/procs
+#   and would leave tasks/streams/pipes behind -- it is useless for an EDW and dangerous on a real runway.
+# * outOfOrder=true everywhere: versions are timestamps written on many branches; merge order != author order.
+#   MGM rehearses exactly what PRD will receive, and the deploy job prints any out-of-order item for the approver.
+# * ignoreMigrationPatterns: test runways carry other projects' unmerged migrations (*:missing) and newer main
+#   builds (*:future); MGM/PRD only tolerate *:future (a newer build already deployed).
+# * Placeholders differ per environment: VERSIONED checksums ignore them (raw file), REPEATABLE checksums include
+#   them (changing a value re-runs that repeatable in that environment only).
+
+[flyway]
+locations = ["filesystem:migrations", "filesystem:repeatable", "filesystem:callbacks"]
+defaultSchema = "FLYWAY"
+schemas = ["FLYWAY"]
+createSchemas = false
+cleanDisabled = true
+validateOnMigrate = true
+validateMigrationNaming = true
+baselineOnMigrate = false
+outOfOrder = true
+failOnMissingLocations = true
+sqlMigrationPrefix = "V"
+repeatableSqlMigrationPrefix = "R"
+sqlMigrationSeparator = "__"
+sqlMigrationSuffixes = [".sql"]
+outputQueryResults = false
+reportEnabled = false
+
+[flyway.check]
+# Enterprise code review (`flyway check -code`): SQLFluff (Snowflake dialect) + the kit's regex rules in rules/.
+rulesLocation = "rules"
+rulesConfig = "sqlfluff.cfg"
+rulesDialect = "snowflake"
+
+[flyway.placeholders]
+# Pipeline-supplied on every deploy (-placeholders.deploy_id=... etc.); these defaults keep manual runs resolvable.
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"
+
+# ---------------------------------------------------------------- DEV  (ALFA_EDW_DEV, nonprod)
+[environments.DEV]
+url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_DEV&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+user = "${env.FLYWAY_SF_USER}"
+jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
+
+[environments.DEV.flyway]
+outOfOrder = true
+cleanDisabled = true
+ignoreMigrationPatterns = ["*:missing", "*:future"]
+
+[environments.DEV.flyway.placeholders]
+env = "DEV"
+edw_db = "ALFA_EDW_DEV"
+home_db = "ALFA_EDW_DEV"
+etl_wh = "WH_EDW_ETL_DEV"
+role_prefix = "EDW_DEV"
+tasks_enabled = "false"
+
+# ---------------------------------------------------------------- SAN  (ALFA_EDW_SAN, nonprod)
+[environments.SAN]
+url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_SAN&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+user = "${env.FLYWAY_SF_USER}"
+jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
+
+[environments.SAN.flyway]
+outOfOrder = true
+cleanDisabled = true
+ignoreMigrationPatterns = ["*:missing", "*:future"]
+
+[environments.SAN.flyway.placeholders]
+env = "SAN"
+edw_db = "ALFA_EDW_SAN"
+home_db = "ALFA_EDW_SAN"
+etl_wh = "WH_EDW_ETL_SAN"
+role_prefix = "EDW_SAN"
+tasks_enabled = "false"
+
+# ---------------------------------------------------------------- SEA  (ALFA_EDW_SEA, nonprod)
+[environments.SEA]
+url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_SEA&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+user = "${env.FLYWAY_SF_USER}"
+jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
+
+[environments.SEA.flyway]
+outOfOrder = true
+cleanDisabled = true
+ignoreMigrationPatterns = ["*:missing", "*:future"]
+
+[environments.SEA.flyway.placeholders]
+env = "SEA"
+edw_db = "ALFA_EDW_SEA"
+home_db = "ALFA_EDW_SEA"
+etl_wh = "WH_EDW_ETL_SEA"
+role_prefix = "EDW_SEA"
+tasks_enabled = "false"
+
+# ---------------------------------------------------------------- PHX  (ALFA_EDW_PHX, nonprod)
+[environments.PHX]
+url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_PHX&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+user = "${env.FLYWAY_SF_USER}"
+jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
+
+[environments.PHX.flyway]
+outOfOrder = true
+cleanDisabled = true
+ignoreMigrationPatterns = ["*:missing", "*:future"]
+
+[environments.PHX.flyway.placeholders]
+env = "PHX"
+edw_db = "ALFA_EDW_PHX"
+home_db = "ALFA_EDW_PHX"
+etl_wh = "WH_EDW_ETL_PHX"
+role_prefix = "EDW_PHX"
+tasks_enabled = "false"
+
+# ---------------------------------------------------------------- MGM  (ALFA_EDW_MGM, prod)
+[environments.MGM]
+url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_MGM&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+user = "${env.FLYWAY_SF_USER}"
+jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
+
+[environments.MGM.flyway]
+outOfOrder = true
+cleanDisabled = true
+ignoreMigrationPatterns = ["*:future"]
+
+[environments.MGM.flyway.placeholders]
+env = "MGM"
+edw_db = "ALFA_EDW_MGM"
+home_db = "ALFA_EDW_MGM"
+etl_wh = "WH_EDW_ETL_MGM"
+role_prefix = "EDW_MGM"
+tasks_enabled = "true"
+
+# ---------------------------------------------------------------- PRD  (ALFA_EDW_PRD, prod)
+[environments.PRD]
+url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_PRD&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+user = "${env.FLYWAY_SF_USER}"
+jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
+
+[environments.PRD.flyway]
+outOfOrder = true
+cleanDisabled = true
+ignoreMigrationPatterns = ["*:future"]
+
+[environments.PRD.flyway.placeholders]
+env = "PRD"
+edw_db = "ALFA_EDW_PRD"
+home_db = "ALFA_EDW_PRD"
+etl_wh = "WH_EDW_ETL_PRD"
+role_prefix = "EDW_PRD"
+tasks_enabled = "true"
+
+# ---------------------------------------------------------------- RH_MGM  (rehearsal: zero-copy clone of ALFA_EDW_MGM)
+# Same placeholders as MGM (env = "MGM") except: the clone's name, and tasks never resume in a rehearsal.
+# Use the ${env} placeholder -- not ${flyway:environment} -- in shouldExecute so rehearsals behave like MGM.
+[environments.RH_MGM]
+url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=${env.FLYWAY_RH_DB}&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+user = "${env.FLYWAY_SF_USER}"
+jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
+
+[environments.RH_MGM.flyway]
+outOfOrder = true
+cleanDisabled = true
+ignoreMigrationPatterns = ["*:future"]
+
+[environments.RH_MGM.flyway.placeholders]
+env = "MGM"
+edw_db = "ALFA_EDW_RH_MGM"
+home_db = "ALFA_EDW_MGM"
+etl_wh = "WH_EDW_ETL_MGM"
+role_prefix = "EDW_MGM"
+tasks_enabled = "false"
+
+# ---------------------------------------------------------------- RH_PRD  (rehearsal: zero-copy clone of ALFA_EDW_PRD)
+# Same placeholders as PRD (env = "PRD") except: the clone's name, and tasks never resume in a rehearsal.
+# Use the ${env} placeholder -- not ${flyway:environment} -- in shouldExecute so rehearsals behave like PRD.
+[environments.RH_PRD]
+url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=${env.FLYWAY_RH_DB}&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+user = "${env.FLYWAY_SF_USER}"
+jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
+
+[environments.RH_PRD.flyway]
+outOfOrder = true
+cleanDisabled = true
+ignoreMigrationPatterns = ["*:future"]
+
+[environments.RH_PRD.flyway.placeholders]
+env = "PRD"
+edw_db = "ALFA_EDW_RH_PRD"
+home_db = "ALFA_EDW_PRD"
+etl_wh = "WH_EDW_ETL_PRD"
+role_prefix = "EDW_PRD"
+tasks_enabled = "false"

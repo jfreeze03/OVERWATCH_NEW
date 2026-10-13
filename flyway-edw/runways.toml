@@ -1,0 +1,161 @@
+# Pipeline policy for the six airport-coded runways. Flyway itself never reads this file: the Jenkins jobs and
+# scripts/fw.py do (`fw.py env --runway <ID>`), and guard rule FG019 keeps it consistent with flyway.toml.
+#
+#   DEV  ->  SAN | SEA | PHX  ->  MGM  ->  PRD
+#
+# lanes          which bundles may deploy: "main" = built from the main branch; "branch" = any other branch build
+#                (project work that is not merged yet). MGM and PRD accept main bundles only.
+# promote_from   the bundle's migrations must already be applied (same checksums, nothing pending/outdated) in AT
+#                LEAST ONE of these runways -- checked with the read-only auditor login before anything runs.
+# approval_group Jenkins input submitter (an AD/LDAP group). Empty = no approval step.
+# four_eyes      the approver must not be the person who started the deploy.
+# rehearsal      zero-copy clone the target to ALFA_EDW_RH_<ID>, migrate the clone first, drop it afterwards.
+# drift_gate     out-of-band DDL since the last deploy: "warn" prints it, "fail" stops the deploy (ACK_DRIFT=true
+#                lets an approver proceed). Start MGM/PRD on "warn" and switch to "fail" after two clean releases.
+# save_snapshot / preview_checks   Flyway Enterprise snapshot + check -drift/-changes are PREVIEW on Snowflake: keep
+#                false until the spike in docs/GUIDE.md step 11 passes, then switch on per runway.
+
+[kit]
+flyway_version = "13.8.1"
+flyway_image = "redgate/flyway:13.8.1"
+python_image = "python:3.11-slim"
+snowflake_cli = "3.28.0"
+edition = "Enterprise"
+history_schema = "FLYWAY"
+auditor_user = "SVC_EDW_FLYWAY_AUDIT"
+auditor_role = "EDW_FLYWAY_AUDITOR"
+auditor_warehouse = "WH_EDW_FLYWAY_AUDIT"
+auditor_credentials_id = "sf-flyway-AUDIT"
+main_branch = "main"
+# Version of the B (baseline) script / `flyway baseline -baselineVersion` used when each existing database was
+# adopted. Everything at or below it is "Below Baseline" and never runs on an adopted database.
+baseline_version = "2026.10.01.0000"
+
+[runways.DEV]
+database = "ALFA_EDW_DEV"
+tier = "nonprod"
+order = 1
+lanes = ["main", "branch"]
+promote_from = []
+approval_group = ""
+four_eyes = false
+ticket_required = false
+rehearsal = false
+drift_gate = "warn"
+save_snapshot = false
+preview_checks = false
+lock = "ALFA_EDW_DEV"
+credentials_id = "sf-flyway-DEV"
+service_user = "SVC_EDW_FLYWAY_DEV"
+deploy_role = "EDW_DEV_DEPLOYER"
+deploy_warehouse = "WH_EDW_DEPLOY_DEV"
+jenkins_folder = "EDW/deploy/DEV"
+
+[runways.SAN]
+database = "ALFA_EDW_SAN"
+tier = "nonprod"
+order = 2
+lanes = ["main", "branch"]
+promote_from = ["DEV"]
+approval_group = ""
+four_eyes = false
+ticket_required = false
+rehearsal = false
+drift_gate = "warn"
+save_snapshot = false
+preview_checks = false
+lock = "ALFA_EDW_SAN"
+credentials_id = "sf-flyway-SAN"
+service_user = "SVC_EDW_FLYWAY_SAN"
+deploy_role = "EDW_SAN_DEPLOYER"
+deploy_warehouse = "WH_EDW_DEPLOY_SAN"
+jenkins_folder = "EDW/deploy/SAN"
+
+[runways.SEA]
+database = "ALFA_EDW_SEA"
+tier = "nonprod"
+order = 2
+lanes = ["main", "branch"]
+promote_from = ["DEV"]
+approval_group = ""
+four_eyes = false
+ticket_required = false
+rehearsal = false
+drift_gate = "warn"
+save_snapshot = false
+preview_checks = false
+lock = "ALFA_EDW_SEA"
+credentials_id = "sf-flyway-SEA"
+service_user = "SVC_EDW_FLYWAY_SEA"
+deploy_role = "EDW_SEA_DEPLOYER"
+deploy_warehouse = "WH_EDW_DEPLOY_SEA"
+jenkins_folder = "EDW/deploy/SEA"
+
+[runways.PHX]
+database = "ALFA_EDW_PHX"
+tier = "nonprod"
+order = 2
+lanes = ["main", "branch"]
+promote_from = ["DEV"]
+approval_group = ""
+four_eyes = false
+ticket_required = false
+rehearsal = false
+drift_gate = "warn"
+save_snapshot = false
+preview_checks = false
+lock = "ALFA_EDW_PHX"
+credentials_id = "sf-flyway-PHX"
+service_user = "SVC_EDW_FLYWAY_PHX"
+deploy_role = "EDW_PHX_DEPLOYER"
+deploy_warehouse = "WH_EDW_DEPLOY_PHX"
+jenkins_folder = "EDW/deploy/PHX"
+
+[runways.MGM]
+database = "ALFA_EDW_MGM"
+tier = "prod"
+order = 3
+lanes = ["main"]
+promote_from = ["SAN", "SEA", "PHX"]
+approval_group = "edw-release-approvers"
+four_eyes = false
+ticket_required = false
+rehearsal = true
+drift_gate = "warn"
+save_snapshot = false
+preview_checks = false
+lock = "ALFA_EDW_MGM"
+credentials_id = "sf-flyway-MGM"
+service_user = "SVC_EDW_FLYWAY_MGM"
+deploy_role = "EDW_MGM_DEPLOYER"
+deploy_warehouse = "WH_EDW_DEPLOY_MGM"
+jenkins_folder = "EDW/deploy/MGM"
+
+[runways.PRD]
+database = "ALFA_EDW_PRD"
+tier = "prod"
+order = 4
+lanes = ["main"]
+promote_from = ["MGM"]
+approval_group = "edw-prod-approvers"
+four_eyes = true
+ticket_required = true
+rehearsal = true
+drift_gate = "warn"
+save_snapshot = false
+preview_checks = false
+lock = "ALFA_EDW_PRD"
+credentials_id = "sf-flyway-PRD"
+service_user = "SVC_EDW_FLYWAY_PRD"
+deploy_role = "EDW_PRD_DEPLOYER"
+deploy_warehouse = "WH_EDW_DEPLOY_PRD"
+jenkins_folder = "EDW/deploy/PRD"
+
+[drift]
+# Out-of-band DDL detection (scripts/fwkit/drift.py). Schemas and object-name patterns (Python regex, matched
+# against the upper-case object name) that are expected to change outside Flyway, e.g. loader scratch tables.
+ignore_schemas = ["FLYWAY", "INFORMATION_SCHEMA", "PUBLIC"]
+ignore_name_patterns = ["^TMP_", "^STG_TMP_"]
+# Users whose DDL is NOT drift besides the runway's own service_user (e.g. an ETL service that recreates
+# staging tables). Keep this list short and reviewed.
+allowed_ddl_users = []
