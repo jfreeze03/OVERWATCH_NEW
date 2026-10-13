@@ -55,7 +55,9 @@ R_RE = re.compile(r"^R__(?P<layer>\d{2})_(?P<schema>[A-Z][A-Z0-9_]*)__(?P<obj>[a
 SCHEMA_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 WAIVER_RE = re.compile(r"--\s*FLYWAY-WAIVER:\s*(?P<rule>FG\d{3})(?P<rest>[^\n]*)")
 PLACEHOLDER_RE = re.compile(r"\$\{([^}]*)\}")
-CONF_KEYS = {"shouldexecute", "placeholderreplacement", "executeintransaction", "encoding"}
+# Pipeline-supplied per-deploy values (flyway.toml [flyway.placeholders] defaults, overridden on every deploy).
+PER_DEPLOY_PLACEHOLDERS = {"deploy_id", "git_sha", "build_url", "approver", "flyway:timestamp"}
+CONF_KEYS = {"shouldExecute", "placeholderReplacement", "executeInTransaction", "encoding"}  # case-sensitive
 CALLBACK_EVENTS = {
     "beforeMigrate", "beforeEachMigrate", "beforeEachMigrateStatement", "afterEachMigrateStatement",
     "afterEachMigrateStatementError", "afterEachMigrate", "afterEachMigrateError", "beforeRepeatables",
@@ -184,7 +186,7 @@ class Guard:
                     text = path.read_text(encoding="utf-8")
                     conf_path = path.with_name(path.name + ".conf")
                     conf = _parse_conf(conf_path.read_text(encoding="utf-8")) if conf_path.exists() else {}
-                    pr = {k.lower(): v for k, v in conf.items()}.get("placeholderreplacement", "true").lower()
+                    pr = conf.get("placeholderReplacement", "true").lower()
                     waivers = set()
                     for m in WAIVER_RE.finditer(text):
                         rest = m.group("rest").split()
@@ -356,6 +358,11 @@ class Guard:
         declared = self.kit.declared_placeholders()
         for m in PLACEHOLDER_RE.finditer(f.script.code):
             name = m.group(1).strip().lower()
+            if f.area == "repeatable" and name in PER_DEPLOY_PLACEHOLDERS:
+                self.add("FG005", "error", f.rel, f.line_of(m.start()),
+                         f"${{{m.group(1)}}} changes on every deploy, and a repeatable's checksum is taken AFTER "
+                         "placeholder replacement: this file would re-run on every deploy", f=f)
+                continue
             if name.startswith("flyway:") or name in declared:
                 continue
             self.add("FG005", "error", f.rel, f.line_of(m.start()),
@@ -441,7 +448,7 @@ class Guard:
                 # offsets must be taken on `masked` (same length as `code`), not on the collapsed `head`
                 tm = TARGET_RE.match(st.masked)
                 cut = tm.end("name") if tm else 0
-                for m in re.finditer(r"\$\{\s*(?:edw_db|home_db)\s*\}", st.code, re.IGNORECASE):
+                for m in re.finditer(r"\$\{\s*(?:edw_db|home_db|flyway:database)\s*\}", st.code, re.IGNORECASE):
                     if m.start() >= cut:
                         self.add("FG009", "error", f.rel, f.line_of(st.offset + m.start()),
                                  "${edw_db} inside an object body becomes a literal database name: a clone of this "
@@ -550,13 +557,14 @@ class Guard:
             self.add("FG001", "error", rel, 1, f"script configuration without its script {sql.name}")
         conf = _parse_conf(path.read_text(encoding="utf-8"))
         for key, val in conf.items():
-            k = key.lower()
-            if k not in CONF_KEYS:
+            if key not in CONF_KEYS:
+                hint = next((k for k in CONF_KEYS if k.lower() == key.lower()), None)
                 self.add("FG020", "error", rel, 1,
-                         f"unknown key {key!r}: Flyway rejects it and EVERY command that resolves migrations fails")
-            elif k in ("placeholderreplacement", "executeintransaction") and val.lower() not in ("true", "false"):
+                         f"unknown key {key!r}" + (f" (keys are case-sensitive: {hint})" if hint else "")
+                         + ": Flyway rejects it and EVERY command that resolves migrations fails")
+            elif key in ("placeholderReplacement", "executeInTransaction") and val.lower() not in ("true", "false"):
                 self.add("FG020", "error", rel, 1, f"{key} must be true or false")
-            elif k == "shouldexecute" and "flyway:environment" in val.replace(" ", ""):
+            elif key == "shouldExecute" and "flyway:environment" in val.replace(" ", ""):
                 self.add("FG020", "warning", rel, 1,
                          "shouldExecute on ${flyway:environment} is RH_<ID> during a rehearsal; use ${env}")
 

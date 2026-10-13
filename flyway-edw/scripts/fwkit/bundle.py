@@ -59,8 +59,22 @@ def digest_of(files: dict[str, str]) -> str:
     return h.hexdigest()
 
 
-def _inventory(files: dict[str, str]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    versioned, repeatable = [], []
+def _should_execute(root: Path, rel: str) -> str:
+    conf = root / (rel + ".conf")
+    if not conf.is_file():
+        return ""
+    for line in conf.read_text(encoding="utf-8").splitlines():
+        key, sep, val = line.strip().partition("=")
+        if sep and key.strip() == "shouldExecute":
+            return val.strip()
+    return ""
+
+
+def _inventory(root: Path, files: dict[str, str]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Versioned + repeatable migrations in the bundle; `should_execute` records a .sql.conf shouldExecute expression
+    so the promotion gate can tell a deliberate per-runway skip ("Ignored") from a migration that never ran."""
+    versioned: list[dict[str, str]] = []
+    repeatable: list[dict[str, str]] = []
     for rel in sorted(files):
         name = PurePosixPath(rel).name
         if rel.startswith("migrations/"):
@@ -69,12 +83,18 @@ def _inventory(files: dict[str, str]) -> tuple[list[dict[str, str]], list[dict[s
             if m and m.group("prefix") == "V":
                 version = ".".join(x for x in (m.group("y"), m.group("mo"), m.group("d"), m.group("hm"),
                                                m.group("seq")) if x is not None)
-                versioned.append({"version": version, "description": flyway_description(name), "path": rel})
+                item = {"version": version, "description": flyway_description(name), "path": rel}
+                if expr := _should_execute(root, rel):
+                    item["should_execute"] = expr
+                versioned.append(item)
             elif b:
                 versioned.append({"version": b.group("ver"), "description": flyway_description(name), "path": rel,
                                   "baseline": "true"})
         elif rel.startswith("repeatable/") and R_RE.match(name):
-            repeatable.append({"description": flyway_description(name), "path": rel})
+            item = {"description": flyway_description(name), "path": rel}
+            if expr := _should_execute(root, rel):
+                item["should_execute"] = expr
+            repeatable.append(item)
     return versioned, repeatable
 
 
@@ -84,7 +104,7 @@ def build(root: Path, out_dir: Path, *, build_id: str, git_sha: str, branch: str
 
     files_list = _payload_files(root)
     files = {rel: hashlib.sha256(p.read_bytes()).hexdigest() for rel, p in files_list}
-    versioned, repeatable = _inventory(files)
+    versioned, repeatable = _inventory(root, files)
     with (root / "runways.toml").open("rb") as fh:
         kit = tomllib.load(fh).get("kit", {})
     manifest: dict[str, Any] = {

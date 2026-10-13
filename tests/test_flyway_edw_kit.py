@@ -229,6 +229,7 @@ def test_guard_unknown_base_is_usage_error(tmp_path):
     ("FG008", "ALTER SESSION SET TIMEZONE = 'UTC';"),
     ("FG009", "CREATE TABLE IF NOT EXISTS SALES.T AS SELECT * FROM ALFA_EDW_PRD.SALES.ORDERS;"),
     ("FG009", "CREATE OR REPLACE VIEW SALES.V COPY GRANTS AS SELECT ID FROM ${edw_db}.SALES.ORDERS;"),
+    ("FG009", "CREATE OR REPLACE VIEW SALES.V COPY GRANTS AS SELECT ID FROM ${flyway:database}.SALES.ORDERS;"),
     ("FG010", "CREATE TABLE IF NOT EXISTS ORDERS (ID INT);"),
     ("FG010", "ALTER TABLE ORDERS ADD COLUMN X INT;"),
     ("FG011", "CREATE OR REPLACE VIEW SALES.V AS SELECT 1 AS X;"),
@@ -327,12 +328,22 @@ def test_fg005_skipped_when_placeholder_replacement_is_off(tmp_path):
     assert "FG005" not in _rules(_run(root))
 
 
+def test_fg005_per_deploy_placeholder_in_a_repeatable(tmp_path):
+    root = _mini_kit(tmp_path)
+    _write(root, "repeatable/SALES/R__30_SALES__v_x.sql",
+           "CREATE OR REPLACE VIEW SALES.V_X COPY GRANTS COMMENT = 'build ${git_sha}' AS SELECT 1 AS A;\n")
+    assert "FG005" in _rules(_run(root))
+    _write(root, V, "INSERT INTO SALES.AUDIT (NOTE) VALUES ('${git_sha}');\n")  # fine in a versioned migration
+    assert [f for f in _run(root) if f.path == V] == []
+
+
 def test_fg020_conf_keys(tmp_path):
     root = _mini_kit(tmp_path)
     _write(root, V, "SELECT 1;\n")
     _write(root, V + ".conf", "shouldexecute=${env}==PRD\nexecuteInTransaction=maybe\nnotAKey=1\n")
     msgs = [f.message for f in _run(root) if f.rule == "FG020"]
     assert any("unknown key 'notAKey'" in m for m in msgs)
+    assert any("case-sensitive: shouldExecute" in m for m in msgs)  # SqlScriptMetadata keys are case-sensitive
     assert any("true or false" in m for m in msgs)
     _write(root, V + ".conf", "shouldExecute=${flyway:environment}==PRD\n")
     assert "FG020" in _rules(_run(root), "warning")
@@ -438,6 +449,25 @@ def test_promote_check_fails(rows, needle):
     assert not v.ok and any(needle in p for p in v.problems)
 
 
+def test_promote_check_accepts_a_declared_should_execute_skip():
+    m = _manifest()
+    rows = [{"category": "Versioned", "version": "2026.10.13.0900", "state": "Ignored"},
+            {"category": "Versioned", "version": "2026.10.13.0915", "state": "Success"},
+            {"category": "Repeatable", "description": "30 SALES  v open orders", "state": "Success"}]
+    assert not promote_mod.judge("MGM", _info(rows), m).ok  # Ignored without a declared shouldExecute: never ran
+    m["versioned"][0]["should_execute"] = "${env}==PRD"
+    assert promote_mod.judge("MGM", _info(rows), m).ok
+
+
+def test_bundle_records_should_execute(tmp_path):
+    root = _mini_kit(tmp_path)
+    _write(root, V, "SELECT 1;\n")
+    _write(root, V + ".conf", "shouldExecute=${env}==PRD\n")
+    _write(root, "scripts/fw.py", "")
+    res = bundle_mod.build(root, tmp_path / "d", build_id="1", git_sha="s", branch="main")
+    assert res.manifest["versioned"][0]["should_execute"] == "${env}==PRD"
+
+
 def test_promote_check_below_baseline_counts_as_delivered():
     rows = [{"category": "", "version": "2026.10.14.0000", "type": "BASELINE", "state": "Baseline"},
             {"category": "Repeatable", "description": "30 SALES  v open orders", "state": "Success"}]
@@ -520,8 +550,13 @@ def test_scaffold_files_pass_the_guard(tmp_path):
 def test_env_command_formats(capsys):
     assert fw.main(["--root", str(KIT), "env", "--runway", "prd", "--format", "json"]) == 0
     s = json.loads(capsys.readouterr().out)
-    assert s["FLYWAY_LOCK"] == "ALFA_EDW_PRD" and s["FLYWAY_RH_DB"] == "ALFA_EDW_RH_PRD"
-    assert s["FLYWAY_SF_ROLE"] == "EDW_PRD_DEPLOYER" and s["FLYWAY_FOUR_EYES"] == "true"
+    assert s["EDW_LOCK"] == "ALFA_EDW_PRD" and s["FLYWAY_RH_DB"] == "ALFA_EDW_RH_PRD"
+    assert s["FLYWAY_SF_ROLE"] == "EDW_PRD_DEPLOYER" and s["EDW_FOUR_EYES"] == "true"
+    # Flyway reads FLYWAY_<SETTING> env vars as configuration (ConfigUtils.convertKey: FLYWAY_TARGET -> target,
+    # FLYWAY_ENVIRONMENT, FLYWAY_BASELINE_VERSION ...): pipeline keys are EDW_*, and the only FLYWAY_* names are the
+    # connection variables flyway.toml resolves, none of which is a Flyway setting.
+    assert {k for k in s if not k.startswith("EDW_")} == {"FLYWAY_SF_USER", "FLYWAY_SF_ROLE", "FLYWAY_SF_WAREHOUSE",
+                                                          "FLYWAY_RH_DB"}
     assert fw.main(["--root", str(KIT), "env", "--runway", "SAN", "--auditor"]) == 0
     out = capsys.readouterr().out
     assert "export FLYWAY_SF_ROLE=EDW_FLYWAY_AUDITOR" in out

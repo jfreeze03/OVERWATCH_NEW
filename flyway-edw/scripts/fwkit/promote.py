@@ -70,11 +70,15 @@ def judge(runway: str, info: dict[str, Any], manifest: dict[str, Any]) -> Verdic
                 continue  # older than the runway's adoption baseline: covered by the baseline
             v.problems.append(f"V{item['version']} {item['description']}: not known to {runway}")
             continue
+        if item.get("should_execute") and states and all(s == "Ignored" for s in states):
+            continue  # skipped on that runway by its own shouldExecute expression: delivered as designed
         if not any(s in VERSIONED_OK for s in states):
             v.problems.append(f"V{item['version']} {item['description']}: {'/'.join(states)} on {runway}")
     for item in manifest.get("repeatable", []):
         v.checked_repeatable += 1
         states = [s for s in by_desc.get(item["description"], []) if s != "Superseded"]
+        if item.get("should_execute") and states and all(s == "Ignored" for s in states):
+            continue
         if not states:
             v.problems.append(f"R {item['description']}: never applied on {runway}")
         elif bad := sorted({s for s in states if s in REPEATABLE_BAD}):
