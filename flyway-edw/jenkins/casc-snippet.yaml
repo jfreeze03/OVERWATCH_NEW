@@ -23,7 +23,9 @@
 #   EDW_BITBUCKET_WORKSPACE   Bitbucket workspace slug (https://bitbucket.org/<workspace>/<repository>)
 #   EDW_BITBUCKET_REPO        repository slug of the EDW repository
 #
-# Plugins: configuration-as-code, role-strategy, lockable-resources (and everything listed in jenkins/jobs.groovy).
+# Plugins: configuration-as-code, role-strategy, lockable-resources (a release with lock(timeoutForAllocateResource:)),
+# job-restrictions unless the deploy agents come from a restricted cloud (see "Deploy agents"), and everything listed
+# in jenkins/jobs.groovy.
 # =====================================================================================================================
 
 jenkins:
@@ -36,17 +38,62 @@ jenkins:
             value: "${EDW_BITBUCKET_WORKSPACE:-}"
           - key: "BITBUCKET_REPO"
             value: "${EDW_BITBUCKET_REPO:-}"
-          # Label of the Docker-capable agents both Jenkinsfiles request.
+          # Label of the Docker-capable agents the CI pipeline (jenkins/Jenkinsfile, EDW/ci) requests.
           - key: "EDW_AGENT_LABEL"
             value: "docker"
+          # Label of the DEPLOY agents (jenkins/Jenkinsfile.deploy, EDW/deploy). Must differ from EDW_AGENT_LABEL
+          # (the deploy job refuses to run otherwise), and the label alone is NOT the control: see "Deploy agents"
+          # below - those nodes must refuse every job outside EDW/deploy/.
+          - key: "EDW_DEPLOY_AGENT_LABEL"
+            value: "edw-deploy"
           # Behind an HTTP proxy, add these (Flyway 13.9+ ignores OS proxy settings; pip and the Snowflake CLI read
-          # the standard variables):
+          # the standard variables). Jenkins treats variable names case-insensitively, so a lower-case duplicate
+          # would REPLACE the upper-case entry: set the upper-case names only. The CI Guard stage exports the
+          # lower-case http_proxy / https_proxy / no_proxy that apt reads itself (http_proxy falls back to
+          # HTTPS_PROXY when HTTP_PROXY is unset).
           #   - key: "EDW_JAVA_PROXY_ARGS"
           #     value: "-Dhttps.proxyHost=proxy.example.internal -Dhttps.proxyPort=3128"
           #   - key: "HTTPS_PROXY"
           #     value: "http://proxy.example.internal:3128"
+          #   - key: "HTTP_PROXY"
+          #     value: "http://proxy.example.internal:3128"
+          #   - key: "NO_PROXY"
+          #     value: "localhost,127.0.0.1,.example.internal"
           #   - key: "PIP_INDEX_URL"
           #     value: "https://pypi-mirror.example.internal/simple"
+          # Recommended, proxy or not: set runways.toml [kit] python_image to an INTERNAL image (pinned by digest)
+          # with git and snowflake-cli==<[kit] snowflake_cli> preinstalled. The stock python:3.11-slim has neither,
+          # so the CI Guard stage apt-installs git on every build (needs deb.debian.org + security.debian.org or
+          # your apt mirror, through the proxy above) and every deploy step that talks to Snowflake pip-installs
+          # the CLI into a fresh venv (needs PyPI or PIP_INDEX_URL).
+
+  # Deploy agents (EDW_DEPLOY_AGENT_LABEL). The deploy jobs bind the runway keys, and every credential bound for a
+  # container step reaches it as `docker exec --env NAME=value`, visible in the agent host's process list (the key
+  # file sits in the workspace's @tmp folder on the host). A PR's Jenkinsfile runs with Docker on its agent - root on
+  # that host - and can request ANY label (node('edw-deploy')), so a separate label alone protects nothing. Enforce
+  # the split ON THE NODE SIDE, one of:
+  #   a) Job Restrictions plugin (job-restrictions) on every node carrying the deploy label: Node > Configure >
+  #      "Restrict jobs execution at node" > "Regular Expression (Job Name)" = EDW/deploy/.* (full name, not the
+  #      short name). In JCasC, on each such node (keys as a JCasC export of a UI-configured node shows them):
+  #        jenkins:
+  #          nodes:
+  #            - permanent:
+  #                name: "edw-deploy-01"
+  #                labelString: "edw-deploy"
+  #                numExecutors: 1
+  #                remoteFS: "/home/jenkins/agent"
+  #                launcher: ...                         # yours
+  #                nodeProperties:
+  #                  - jobRestrictionProperty:
+  #                      jobRestriction:
+  #                        regexNameRestriction:
+  #                          regexExpression: "EDW/deploy/.*"
+  #                          checkShortName: false
+  #   b) a separate cloud / agent template for the deploy label that the EDW/ci folder cannot use (for example a
+  #      Kubernetes cloud with "Restrict pipeline support to authorized folders", authorised for EDW/deploy only),
+  #      ideally ephemeral single-use agents for MGM and PRD.
+  # The CI agents must not carry the deploy label, and the built-in node keeps 0 executors. Verify after setup: a
+  # branch build whose Jenkinsfile asks for node('edw-deploy') must stay in the queue and never start.
 
   # Role-based Authorization Strategy (FACTS I6-05): item patterns are case-sensitive regexes on the FULL item name;
   # a folder must itself be readable before anything inside it is; global grants cannot be narrowed by item roles, so

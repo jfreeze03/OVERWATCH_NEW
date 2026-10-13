@@ -85,8 +85,10 @@ before each deploy. MGM and PRD accept bundles built from `main` only.
 
 | Control                                               | Enforced by                                        | Auto   |
 |-------------------------------------------------------|----------------------------------------------------|--------|
-| Names, versions, applied-file immutability, risky SQL | `fw.py guard` (FG001-FG020), every PR build        | yes    |
+| Names, versions, applied-file immutability, risky SQL | `fw.py guard` (FG001-FG021), every PR build        | yes    |
 | SQL code review (SQLFluff + rules/ALFA0x)             | `flyway check -code`, failOnError, PR builds       | yes    |
+| Deploys started only by a user or the main CI build   | deploy job cause check (B7)                        | yes    |
+| Deploy jobs never share agents with CI builds         | node restriction on the deploy agents (A2, C2)     | no     |
 | No push to main; reviews; green build before merge    | Bitbucket branch restrictions (B5)                 | see B5 |
 | One artifact for every runway                         | bundle + `fw.py verify-bundle` (sha256 manifest)   | yes    |
 | MGM/PRD take main builds only                         | `verify-bundle --require-branch main`, lanes       | yes    |
@@ -113,7 +115,9 @@ before each deploy. MGM and PRD accept bundles built from `main` only.
 
 Every runway has one job, `EDW/deploy/<ID>/deploy`, built from `jenkins/Jenkinsfile.deploy`:
 
-1. **Resolve policy**: `fw.py env --runway <ID> --format json` (nothing about a runway is hard-coded in Groovy).
+1. **Resolve policy**: `fw.py env --runway <ID> --format json` (nothing about a runway is hard-coded in Groovy), and
+   check who started the run: a user (Build with Parameters), or the CI main job's own trigger of DEV; anything
+   else is refused (B7).
 2. **Fetch bundle**: copy the archived bundle of `SOURCE_JOB` build `SOURCE_BUILD`, check the lane, run
    `fw.py verify-bundle` (main-only for MGM/PRD) and run main's `fw.py guard` over the bundle's files.
 3. **Licence check**: stop unless `flyway version -outputType=json` reports the Enterprise edition.
@@ -129,9 +133,8 @@ Every runway has one job, `EDW/deploy/<ID>/deploy`, built from `jenkins/Jenkinsf
 Parameters: `TARGET` (must match the folder's runway), `SOURCE_JOB` (default `/EDW/ci/edw-flyway/main`),
 `SOURCE_BUILD`, `CHANGE_TICKET` (required for PRD), `DRY_RUN` (every check, the dry-run report and the rehearsal,
 then stop: the target is not changed and no approval is asked), `ACK_DRIFT` (an approver accepts reported drift
-when the runway's `drift_gate` is `fail`), `ALLOW_UNBASELINED` (leave it false: the job refuses a database whose
-`flyway info` shows no schema version, i.e. one that was never baselined; true is only for a brand-new, empty
-database).
+when the runway's `drift_gate` is `fail`). The job always refuses a database whose `flyway info` shows no schema
+version, i.e. one that was never baselined; there is no override (a new database is baselined first, D5).
 
 ---
 
@@ -160,8 +163,9 @@ outcome in your architecture/change log.
    database keep pointing at PRD's), PII handling, and retention. Rehearsal is mandatory for prod-tier runways
    (FG019); runway refresh by clone is optional; without sign-off, seed test runways another way.
 7. **`main` is the only release branch.** MGM and PRD deploy main bundles only.
-8. **Fix-forward is the default rollback.** Snowflake DDL autocommits and Flyway cannot wrap it in a transaction, so a
-   failed migration is partially applied (RUNBOOKS R1). Undo scripts and Time Travel are the exceptions (F6).
+8. **Fix-forward is the default rollback.** Snowflake DDL autocommits, and on Snowflake Flyway runs every migration in
+   autocommit (DML too, SHORTCOMINGS S02), so a failed migration is partially applied (RUNBOOKS R1). Undo scripts and
+   Time Travel are the exceptions (F6).
 
 **Verify:** the decision record is signed by the platform owner and security.
 
@@ -183,21 +187,39 @@ deploy into a drift alarm.
    cloudbees-folder, credentials-binding, docker-workflow, lockable-resources, copyartifact, pipeline-utility-steps,
    pipeline-input-step, pipeline-build-step, junit, timestamper, role-strategy, job-dsl, configuration-as-code;
    htmlpublisher only if you want the Flyway HTML reports rendered inside Jenkins (C2).
-4. **Agents:** Linux agents that can run Docker containers. Flyway runs inside `redgate/flyway:<flyway_version>`
-   (Ubuntu 24.04 base: it carries the GLIBC 2.35+ that the bundled SQLFluff needs and the native libraries of the
-   comparison engine); `fw.py` and the Snowflake CLI run in `python:3.11-slim`. If you ever run Flyway natively on an
-   agent or workstation, it needs GLIBC 2.35+ (RHEL 9 / Ubuntu 22.04 or later) for `check -code`.
+4. **Agents:** Linux agents that can run Docker containers, in **two separate pools**:
+   * **CI agents** (label `EDW_AGENT_LABEL`) run the `EDW/ci` builds, including every pull request's own Jenkinsfile.
+   * **Deploy agents** (label `EDW_DEPLOY_AGENT_LABEL`) run only the `EDW/deploy/*` jobs. They hold the runway keys
+     while a deploy runs: credentials bound around a docker `.inside` step are visible in the deploy host's process
+     list, and a build can leave files or cached images behind for the next one. So these hosts are dedicated to
+     the deploy jobs, with shell access for the Jenkins admins only, and the node side enforces the split (C2
+     step 7): a label alone is not enough, because a PR's Jenkinsfile can ask for any label. Ideally MGM and PRD use
+     single-use (ephemeral) agents.
+
+   Flyway runs inside `redgate/flyway:<flyway_version>` (Ubuntu 24.04 base: it carries the GLIBC 2.35+ that the
+   bundled SQLFluff needs and the native libraries of the comparison engine); `fw.py` and the Snowflake CLI run in
+   `runways.toml` `python_image`. The CI Guard stage also needs **git** in that image (FG003/FG004 compare with the
+   base branch), and `python:3.11-slim` has none. Recommended: build an internal image from `python:3.11-slim` plus
+   git and `snowflake-cli==3.28.0` (`[kit] snowflake_cli`), and point `python_image` at it. Otherwise the CI
+   Jenkinsfile installs git with apt-get on every build, which needs the apt route in point 5. Pin both images by
+   digest in `runways.toml`, keeping the version tag in front of it (`redgate/flyway:13.8.1@sha256:<digest>`;
+   FG019 ties the Flyway tag to `flyway_version`), so neither a re-pushed tag nor an agent's image cache decides what
+   runs in a deploy. If you ever run Flyway natively on an agent or workstation, it needs GLIBC 2.35+ (RHEL 9 /
+   Ubuntu 22.04 or later) for `check -code`.
 5. **Network egress from the agents:** the Snowflake account host and the hosts returned by
    `SELECT SYSTEM$ALLOWLIST();`; Redgate licensing (online PAT licensing; Redgate does not document the host list in
    the CLI docs, so ask Redgate or use an offline permit); your Docker registry (or a mirror holding the two images);
-   PyPI or a mirror (`pip install snowflake-cli==3.28.0`); `bitbucket.org` and `api.bitbucket.org`.
-   **Ingress:** Bitbucket Cloud must reach `https://<jenkins>/bitbucket-scmsource-hook/notify` for webhooks;
+   PyPI or a mirror (`pip install snowflake-cli==3.28.0`); `bitbucket.org` and `api.bitbucket.org`; and, only while
+   the python image has no git, the Debian mirrors `deb.debian.org` and `security.debian.org` (or an internal apt
+   mirror). **Ingress:** Bitbucket Cloud must reach `https://<jenkins>/bitbucket-scmsource-hook/notify` for webhooks;
    otherwise configure periodic branch indexing.
 6. **Proxy:** Flyway 13.9+ ignores operating-system proxy settings, and on Linux/Docker the JVM never reads
    `HTTPS_PROXY`. Behind a proxy, set the controller environment variable `EDW_JAVA_PROXY_ARGS` to
    `-Dhttps.proxyHost=<host> -Dhttps.proxyPort=<port>` (the Jenkinsfiles append it to `JAVA_ARGS`; see
    `casc-snippet.yaml`), and put the same properties in `JAVA_ARGS` for manual runs. Set it now so a later upgrade
-   past 13.9 does not break licensing. A PyPI mirror goes into the controller variable `PIP_INDEX_URL`.
+   past 13.9 does not break licensing. A PyPI mirror goes into the controller variable `PIP_INDEX_URL`. apt (the
+   git fallback of point 4) reads neither of those: it needs the lower-case controller variables `http_proxy` and
+   `https_proxy`, or an internal apt mirror.
 
 **Verify** on one agent (the image's entrypoint is `flyway`):
 
@@ -225,7 +247,8 @@ a failure, a manual run will not.
 1. Edit the `SET` variables at the top: the Jenkins agents' egress CIDRs and the admin location (default
    `EDW_ADMIN_DB.SECURITY`).
 2. Run the shared sections: admin database/schema, network rule and network policy, authentication policy
-   (`AUTHENTICATION_METHODS = ('KEYPAIR')`, `CLIENT_TYPES = ('DRIVERS')`), and the auditor role
+   (`AUTHENTICATION_METHODS = ('KEYPAIR')`, `CLIENT_TYPES = ('DRIVERS', 'SNOWFLAKE_CLI')`: JDBC for Flyway, the
+   Snowflake CLI for the drift and rehearsal SQL), and the auditor role
    `EDW_FLYWAY_AUDITOR`, warehouse `WH_EDW_FLYWAY_AUDIT` and user `SVC_EDW_FLYWAY_AUDIT` (its key pair is made exactly
    like B2's).
 
@@ -242,9 +265,10 @@ SHOW GRANTS TO ROLE EDW_FLYWAY_AUDITOR;
 **What can go wrong:**
 
 * Wrong CIDRs: every Jenkins login fails with a network-policy error. Fix the network rule, not the policy.
-* The pipeline also runs the **Snowflake CLI** (`snow sql`) for drift and rehearsal SQL. If those logins are refused
-  by the authentication policy while Flyway's JDBC logins work, add `'SNOWFLAKE_CLI'` to `CLIENT_TYPES` (verify on
-  first run; Snowflake documents client-type checks as best effort).
+* The pipeline also runs the **Snowflake CLI** (`snow sql`) for drift and rehearsal SQL, which is why the policy
+  allows `SNOWFLAKE_CLI` next to `DRIVERS`. If those logins are still refused while Flyway's JDBC logins work, check
+  the client type Snowflake recorded (`REPORTED_CLIENT_TYPE` in `LOGIN_HISTORY_BY_USER`, RUNBOOKS R11 step 7);
+  Snowflake documents client-type checks as best effort.
 * Policies created inside an `ALFA_EDW_*` database would be cloned and replaced with it: keep them in the admin
   database.
 
@@ -272,7 +296,10 @@ workstation (OpenSSL) and Snowsight (`bootstrap/10_account_objects.sql`, per-run
    the rehearsal clone; the script explains that trade-off.
 3. Check that the deploy role holds `EXECUTE TASK` on the account (a task runs only if its owner role has it; add
    `EXECUTE MANAGED TASK` for serverless tasks). If bootstrap/10 does not grant it, grant it there: it is an
-   account-level grant and never belongs in a migration (FG007).
+   account-level grant and never belongs in a migration (FG007). Likewise, before the first layer-85 alert is
+   merged, run bootstrap/10's `GRANT EXECUTE ALERT ON ACCOUNT TO ROLE EDW_<ID>_DEPLOYER` for every runway (MGM and
+   PRD at least): resuming an alert needs it, and only MGM and PRD resume, so a missing grant first fails a real MGM
+   deploy after its approval (CONVENTIONS 5.12).
 4. Store the `.p8` file and its passphrase in the enterprise vault (manual and break-glass sessions check them out
    there, B7), give them to the Jenkins admin for B4 through your secret-transfer channel, then delete the local
    copies (`shred -u "$U.p8"`).
@@ -304,18 +331,32 @@ SCHEMA on it to `EDW_<ID>_DEPLOYER`, (c) create the `FLYWAY` schema owned by the
 `FLYWAY.DEPLOY_LOG` and `FLYWAY.DEPLOY_TASK_STATE`, and (d) give the auditor USAGE on the database and the `FLYWAY`
 schema. **Do not** run the brownfield ownership transfer yet (that is D2) or the post-baseline auditor grant (D5).
 
+Then (e) create the runway's **access roles** with bootstrap/10's access-role section: `EDW_<ID>_<SCHEMA>_READ`
+(and `EDW_<ID>_<SCHEMA>_WRITE` where a schema uses one) for every schema that has, or will get, a layer-90 grants
+file. The grants files grant to these roles through `${role_prefix}`, a migration never creates a role (FG007), and
+a missing role fails that runway's grants file at deploy time (CONVENTIONS 5.13). Repeat (e) for every runway
+whenever a new schema gets a grants file, before that PR merges.
+
+The grant model rests on **managed-access schemas**: every EDW schema is created `WITH MANAGED ACCESS` (new ones by
+their V migration, adopted ones by bootstrap/20 in D2), so the deploy role, as schema owner, can define the
+schema-level future grants of the layer-90 files without the account-wide MANAGE GRANTS privilege, which the kit
+never grants.
+
 **Verify:**
 
 ```sql
 SHOW GRANTS ON DATABASE ALFA_EDW_DEV;            -- OWNERSHIP: SYSADMIN; USAGE + CREATE SCHEMA: EDW_DEV_DEPLOYER
 SHOW SCHEMAS LIKE 'FLYWAY' IN DATABASE ALFA_EDW_DEV;   -- owner EDW_DEV_DEPLOYER
 SHOW TABLES IN SCHEMA ALFA_EDW_DEV.FLYWAY;       -- DEPLOY_LOG, DEPLOY_TASK_STATE
+SHOW ROLES LIKE 'EDW_DEV_%';                     -- EDW_DEV_DEPLOYER plus the access roles of (e)
 ```
 
 **What can go wrong:** `flyway.toml` sets `createSchemas = false`, so Flyway never creates `FLYWAY` itself; if it is
 missing, `baseline` and `migrate` fail. The two kit tables make `FLYWAY` non-empty, which is deliberate: Flyway
 checks only its configured schemas (`FLYWAY`), so a `migrate` on a database that was never baselined stops with
 "Found non-empty schema(s) ... but no schema history table" instead of replaying every migration against live data.
+A grants file that names a role (e) did not create fails on that runway, and its Failed row blocks every later
+deploy there until RUNBOOKS R1.
 
 ### B4. Jenkins credentials
 
@@ -438,9 +479,17 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups, a host inside the Jenk
    `casc-snippet.yaml` assigns exactly these group names. Nobody outside edw-jenkins-admins gets Job/Configure or
    Run/Replay on `EDW/deploy/*`: either would let them edit the approval out of a deploy.
 
+   These Build permissions hold only for runs a person starts. A pipeline `build` step runs as SYSTEM, so a branch or
+   PR Jenkinsfile could otherwise start `EDW/deploy/SAN/deploy` with its own branch bundle. The deploy job therefore
+   accepts a run only when a **user started it** (Jenkins has checked that user's Build permission on the job), or
+   when it is the **CI main job's own DEV trigger** (one upstream cause from `EDW/ci/edw-flyway/main`, the same
+   build as `SOURCE_BUILD`, `TARGET = DEV`). Every other cause, such as an upstream branch or PR job, a remote API
+   call or a timer, is refused with an error.
+
 2. **Human Snowflake access.** People never hold an `EDW_<ID>_DEPLOYER` role: on every runway
-   `SHOW GRANTS OF ROLE` lists only SYSADMIN and the runway's service user. People work with functional (read/write)
-   roles, and `EDW_FLYWAY_AUDITOR` is granted on request to read Flyway history. When someone must run Flyway or
+   `SHOW GRANTS OF ROLE` lists only SYSADMIN and the runway's service user. People work with functional roles,
+   which are granted the runway's access roles (B3 step e), and `EDW_FLYWAY_AUDITOR` is granted on request to read
+   Flyway history. When someone must run Flyway or
    deploy-role SQL by hand (RUNBOOKS R0), they use the runway's **service login**, whose encrypted key and
    passphrase live in the enterprise vault (B2 step 4). Vault access per runway:
 
@@ -583,17 +632,26 @@ from the verified bundle, which never contains it).
    misspelt lock name fails instead of silently creating a new lock.
 6. Set the controller environment variables the jobs read (`casc-snippet.yaml` `globalNodeProperties`):
    `BITBUCKET_WORKSPACE` and `BITBUCKET_REPO` (filled from the JCasC placeholders `EDW_BITBUCKET_WORKSPACE` and
-   `EDW_BITBUCKET_REPO`; used by the seed job and the `deploy-<ID>` statuses), `EDW_AGENT_LABEL` (label of the
-   Docker-capable agents, default `docker`), and behind a proxy `EDW_JAVA_PROXY_ARGS`, `HTTPS_PROXY` and
-   `PIP_INDEX_URL` (A2). The agents must be able
-   to pull `redgate/flyway:13.8.1` and `python:3.11-slim` (if you mirror images, point `runways.toml` `flyway_image`
-   and `python_image` at the mirror, keeping the exact version tag).
+   `EDW_BITBUCKET_REPO`; used by the seed job and the `deploy-<ID>` statuses), `EDW_AGENT_LABEL` (label of the CI
+   agents, default `docker`), `EDW_DEPLOY_AGENT_LABEL` (label of the deploy agents, A2 point 4), and behind a proxy
+   `EDW_JAVA_PROXY_ARGS`, `HTTPS_PROXY`, `PIP_INDEX_URL` and, while the python image has no git, the lower-case
+   `http_proxy` / `https_proxy` that apt reads (A2). The agents must be able to pull the two `runways.toml` images:
+   `flyway_image` (`redgate/flyway:13.8.1`, the exact version tag) and `python_image`, preferably the internal
+   python + git + snowflake-cli image of A2 point 4. If you mirror images, point both keys at the mirror; either
+   way, pin them by digest (`<image>:<tag>@sha256:<digest>`, A2 point 4).
+7. **Keep the deploy agents for the deploy jobs.** Give the deploy nodes the `EDW_DEPLOY_AGENT_LABEL` label and
+   restrict them on the node side to jobs whose full name matches `EDW/deploy/.*` (Job Restrictions plugin), or
+   serve them from a separate cloud / agent template that the `EDW/ci` folder cannot use; ideally single-use agents
+   for MGM and PRD. Never give a CI agent the deploy label, and never let the deploy nodes run CI builds.
 
 **Verify:** Lockable Resources lists the eight resources; Role Strategy shows the AD groups; a user in
-edw-developers can read `EDW/ci` but sees no Build button under `EDW/deploy/PRD`.
+edw-developers can read `EDW/ci` but sees no Build button under `EDW/deploy/PRD`; a test branch whose Jenkinsfile
+asks for `node('<deploy label>')` waits forever or is refused, and never runs on a deploy node.
 
 **What can go wrong:** Role Strategy item roles need the parent folders readable too (`EDW`, `EDW/deploy`) or users
-see nothing; a global role with Job/Build overrides every item restriction.
+see nothing; a global role with Job/Build overrides every item restriction; deploy nodes without the node-side
+restriction let any branch build run next to a PRD deploy (A2 point 4); behind a proxy, a python image without git
+makes every CI build fail at Guard while `apt-get` cannot reach the Debian mirrors.
 
 ### C3. Seed the jobs and connect the webhook
 
@@ -701,6 +759,9 @@ database while its ownership moves and it is baselined.
 4. Objects now owned by the deploy role also **execute** as the deploy role: owner's-rights procedures, tasks, pipes
    and secure views. Grant `EDW_<ID>_DEPLOYER` whatever they read or use outside the database (landing databases,
    storage or API integrations, other warehouses) before re-enabling the ETL.
+5. bootstrap/20 also switches every adopted schema to **managed access** (`ALTER SCHEMA <S> ENABLE MANAGED ACCESS`),
+   so the deploy role, as schema owner, can define the layer-90 future grants (B3). Existing grants stay; from now on
+   only the schema owner grants on objects in the schema, so access requests go through the schema's grants file.
 
 Do DEV first as the rehearsal of the procedure, then PRD. MGM, SAN, SEA and PHX either repeat this step in place or
 are re-cloned from PRD in D6 (bootstrap/30 hands a clone over to the runway's role).
@@ -709,8 +770,10 @@ are re-cloned from PRD in D6 (bootstrap/30 hands a clone over to the runway's ro
 
 ```sql
 SHOW SCHEMAS IN DATABASE ALFA_EDW_PRD;
-SELECT "name", "owner" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "owner" <> 'EDW_PRD_DEPLOYER';
--- expect only INFORMATION_SCHEMA; then re-run the D1 owner inventory: one owner, EDW_PRD_DEPLOYER
+SELECT "name", "owner", "options" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+WHERE "name" NOT IN ('INFORMATION_SCHEMA', 'FLYWAY')
+  AND ("owner" <> 'EDW_PRD_DEPLOYER' OR COALESCE("options", '') NOT LIKE '%MANAGED ACCESS%');
+-- expect no rows; then re-run the D1 owner inventory: one owner, EDW_PRD_DEPLOYER
 SHOW TASKS IN DATABASE ALFA_EDW_PRD;
 SELECT "schema_name", "name", "owner", "state" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) ORDER BY 1, 2;
 ```
@@ -804,6 +867,13 @@ ORDER BY "installed_rank";
 
 and, with the auditor login, `fw.py env --runway PRD --auditor` + `flyway -environment=PRD info` works.
 
+**A brand-new runway database** (not one of the six adopted ones) is prepared the same way, because the deploy job
+never migrates a database without a schema version and has no switch to skip that check: run bootstrap/20 (B3),
+then, from an R0 session, `flyway -environment=<ID> baseline -baselineVersion="$EDW_BASELINE_VERSION"` (the kit's
+baseline_version is below every V file, so every V then applies), run bootstrap/20's post-baseline section, and
+deploy normally. The usual way to fill a new test runway is still a clone of PRD (D6), which arrives baselined;
+building a database from migrations alone is unproven here (D4).
+
 **What can go wrong:** never run `migrate` before `baseline` (B3's safety net and the deploy job's schema-version
 check both stop it, but a manual run with other settings would not);
 baselining twice with different versions makes runways disagree (fix with RUNBOOKS before any deploy); the history
@@ -815,13 +885,17 @@ table is case-sensitive: always quote `"flyway_schema_history"` and its lower-ca
 
 **Do:** for each database choose one route.
 
-* **Refresh by clone (recommended for MGM and the test runways):** run `bootstrap/30_refresh_runway.sql` with the
+* **Refresh by clone (recommended for MGM and the test runways):** reserve the target's lock and, for the clone
+  part (bootstrap/30 PART 3), `ALFA_EDW_PRD` as well, so a PRD deploy cannot run while PRD is being cloned and
+  leave the clone half-applied. Then run `bootstrap/30_refresh_runway.sql` with the
   target runway. It runs its pre-checks (dangling policy references, hybrid and external tables, internal-stage
   pipes, `ALFA_EDW_PRD.` references inside PRD code), clones PRD as `EDW_PRD_DEPLOYER` (it owns the tasks, pipes and
   streams, which a clone only includes for their owner), hands every schema to `EDW_<ID>_DEPLOYER`, re-applies
   database-level grants and lists the suspended tasks, alerts, dynamic tables and pipes. The clone carries PRD's
   `FLYWAY` schema, so the runway is already baselined at PRD's state. MGM is accepted only when the script's
-  explicit MGM switch is set.
+  explicit MGM switch is set. The first deploy afterwards reports **every cloned object as drift** (LAST_DDL is the
+  clone time, LAST_DDL_BY the admin who cloned): review the list once and, where the runway's `drift_gate` is
+  `fail`, re-run that deploy with `ACK_DRIFT = true`, citing the refresh ticket (RUNBOOKS R8).
 * **Reconcile in place (DEV, or a database you cannot clone over):** compare it with PRD, turn real differences
   into migrations or drop them, then baseline it exactly as D5. Run as SYSADMIN:
 
@@ -912,7 +986,9 @@ functional-role grants come along on child objects (bootstrap/30 re-grants them 
 **Verify:** six green dry runs; `SHOW GRANTS OF ROLE` audits from B7; the freeze lifted.
 
 **What can go wrong:** a forgotten DDL-issuing process (D1) shows up as drift at the first deploy: fix the process or
-add it to `allowed_ddl_users` by PR.
+add it to `allowed_ddl_users` by PR. On a runway refreshed by clone (D6) the first dry run and deploy also list every
+cloned object as drift (clone time, cloning admin); that is expected once: review it and acknowledge it with
+`ACK_DRIFT = true` where `drift_gate` is `fail`, citing the refresh ticket.
 
 ---
 
@@ -928,7 +1004,7 @@ add it to `allowed_ddl_users` by PR.
 git fetch origin && git switch -c feature/EDW-1234-order-status origin/main
 python3 scripts/fw.py new --schema SALES --desc add_order_status           # versioned (tables, data)
 #   -> migrations/SALES/V2026.10.14.0912__sales_add_order_status.sql   (UTC timestamp version)
-python3 scripts/fw.py new --schema SALES --desc add_order_status --undo    # same, plus the U undo script
+# python3 scripts/fw.py new --schema SALES --desc add_order_status --undo  # INSTEAD of the line above: V + U pair
 python3 scripts/fw.py new --schema SALES --repeatable --layer 30 --object v_open_orders   # new view
 # edit the files following docs/CONVENTIONS.md, then:
 python3 scripts/fw.py guard --base origin/main
@@ -945,8 +1021,10 @@ Tips:
 
 1. Tables and data: versioned files only (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`,
    idempotent `MERGE`). Views, functions, procedures, tasks, grants: edit the repeatable file in place; `fw.py new
-   --repeatable` refuses to create one that already exists.
-2. One logical change per versioned file: Snowflake commits each DDL statement, so a failed file is half applied.
+   --repeatable` refuses to create one that already exists. Fill in every `<...>` marker the scaffold wrote: FG021
+   fails the file until you do.
+2. One logical change per versioned file: on Snowflake Flyway runs every statement in autocommit, DML included, so a
+   failed file is half applied. DML that must be atomic is one `MERGE` or one explicit transaction (CONVENTIONS 5.3).
 3. Never edit or rename a migration that is on `main`; write a new one (guard FG003 fails the PR otherwise).
 4. Changing an object that predates adoption: first add its current definition (from D4's extract or `GET_DDL`) as
    the repeatable file in its own PR, then change it in a second PR, so reviewers see the real diff.
@@ -962,23 +1040,35 @@ deploy (F1) is green.
 | FG002 | two people scaffolded in the same minute        | re-scaffold with `fw.py new`; delete the old    |
 | FG003 | edited an applied migration                     | revert it; write a new migration                |
 | FG004 | warning: older than main's newest version       | fine if independent (runs out of order)         |
-| FG005 | `${...}` not defined for every environment      | declare it in flyway.toml (JavaScript: below)   |
+| FG005 | `${...}` undeclared (comments too), `${ x }`    | declare it in flyway.toml (JavaScript: below)   |
 | FG006 | DROP / TRUNCATE / CREATE OR REPLACE TABLE       | ALTER instead, or a waiver with a ticket        |
 | FG008 | `USE ...` / `ALTER SESSION`                     | schema-qualify instead                          |
-| FG009 | `ALFA_EDW_...` in code                          | `SCHEMA.OBJECT`; never name the database        |
+| FG009 | `ALFA_EDW_...` in code; any `${home_db}`        | `SCHEMA.OBJECT`; never name the database        |
 | FG010 | unqualified CREATE target                       | `SCHEMA.OBJECT` (it would land in FLYWAY)       |
 | FG011 | CREATE OR REPLACE view/proc without COPY GRANTS | add `COPY GRANTS`                               |
+| FG011 | warning: schema without managed access          | `CREATE SCHEMA ... WITH MANAGED ACCESS`         |
+| FG012 | table DDL or DML in a repeatable                | move it to a V script                           |
 | FG013 | repeatable uses one that runs later             | raise its layer number (e.g. 30 -> 31)          |
 | FG014 | task change without gate and resume             | start from the layer-80 template of `fw.py new` |
-| FG015 | bare `BEGIN` / `DECLARE` block                  | wrap it in `EXECUTE IMMEDIATE $$ ... $$;`       |
+| FG015 | bare `BEGIN` / `DECLARE` block, or a bare `IF`  | wrap it in `EXECUTE IMMEDIATE $$ ... $$;`       |
+| FG021 | `<JIRA-KEY>`, `<TABLE>`, ... left unfilled      | fill in every scaffold marker                   |
 
 FG004 is a warning: the migration will apply out of order wherever newer versions already ran; if it depends on
 them, re-scaffold it (renaming is fine until it reaches `main`). FG005 in a JavaScript UDF whose body uses `${...}`
-template literals: add `<file>.sql.conf` with `placeholderReplacement=false` (CONVENTIONS.md).
+template literals: add `<file>.sql.conf` with `placeholderReplacement=false` (CONVENTIONS.md). FG015's bare `IF`:
+`CREATE ALERT ... IF (EXISTS ...)`, `ALTER TABLE ... ADD IF NOT EXISTS` without COLUMN, `ALTER/DROP ALERT IF EXISTS`
+and `CREATE SECRET IF NOT EXISTS` stop Flyway's parser with "Incomplete statement"; write `ADD COLUMN IF NOT EXISTS`,
+or wrap the statement (`fw.py new --layer 85` writes alerts that way). FG013's layer bump renames a file that may
+already have run; that is safe, and a retired repeatable also needs a V script that drops its object (CONVENTIONS
+5.15). FG006, FG007 and FG008 also look inside `EXECUTE IMMEDIATE $$ ... $$` and `EXECUTE IMMEDIATE '...'`.
 
 A waiver is one line in the file: `-- FLYWAY-WAIVER: FG006 EDW-1234 drop retired staging table after archive`
-(rule, ticket, reason). `DROP DATABASE`, `CREATE OR REPLACE DATABASE/SCHEMA` and `USE DATABASE/SCHEMA/ROLE` cannot
-be waived.
+(rule, ticket, reason). `DROP DATABASE`, `CREATE OR REPLACE DATABASE/SCHEMA`, `USE DATABASE/SCHEMA/ROLE`,
+`${home_db}` in a migration and an unfilled scaffold marker (FG021) cannot be waived. A waived file passes code
+review: the guard is the gate for every waivable rule, and the code-review rules that repeat one (ALFA03 for
+CREATE OR REPLACE TABLE and DROP SCHEMA, ALFA06 for account-level statements, RG06, RG13, RG08, RG11) are warnings
+that list the statement for the reviewers. An intended `UPDATE` without `WHERE` has no guard rule but fails code
+review (RG09): end its line with `-- noqa: RG09` (CONVENTIONS section 8).
 
 ---
 
@@ -1062,7 +1152,12 @@ refresh between projects.
    clone with tasks off, and drops the clone.
 3. **Review:** the dry-run report, the rehearsal log, the drift output, any out-of-order migrations (versions older
    than ones already applied: allowed, but read them), and the waivers in the release
-   (`grep -rn FLYWAY-WAIVER migrations repeatable`).
+   (`grep -rn FLYWAY-WAIVER migrations repeatable`). The rehearsal runs **more repeatables than MGM will**: the
+   rehearsal environment sets `tasks_enabled = "false"` and `edw_db = ALFA_EDW_RH_MGM`, and repeatable checksums
+   include placeholder values, so every repeatable that uses `${tasks_enabled}` or `${edw_db}` (every task file,
+   for a start) is Outdated on the clone and re-runs there, changed or not. What MGM itself will run is the
+   pre-flight `flyway info` pending list and the dry-run report. A rehearsal failure in such an unchanged file still
+   needs a fix forward: the same file re-runs on every test runway refreshed from PRD (SHORTCOMINGS S09).
 4. **Deploy:** same parameters with `DRY_RUN = false`. The job repeats the checks and the rehearsal, then pauses for
    approval; an edw-release-approvers member clicks Proceed (the prompt times out after a day). It records the Time
    Travel point, migrates MGM, restores task graphs (`tasks_enabled = true`), archives `flyway info` and posts
@@ -1091,7 +1186,9 @@ reconcile before PRD, RUNBOOKS R5); a rehearsal clone left behind after an abort
 3. **The job:** main-only bundle check, licence, promotion check against MGM, lock, pre-flight, drift gate, dry-run
    report, rehearsal on `ALFA_EDW_RH_PRD`, then the approval prompt.
 4. **Approve (four-eyes):** the approver reads the dry-run report, rehearsal result, drift output and ticket number,
-   then clicks Proceed. The job refuses an approval by the person who started it.
+   then clicks Proceed. The job refuses an approval by the person who started it. As on MGM (F3 step 3), the
+   rehearsal on `ALFA_EDW_RH_PRD` re-runs every `${tasks_enabled}` / `${edw_db}` repeatable; the dry-run report and
+   the pre-flight pending list show what PRD itself will run.
 5. **The job continues:** records the Time Travel point (UTC timestamp in the console and the DEPLOY_LOG STARTED
    row), migrates PRD, restores task graphs, archives `flyway info`, posts `deploy-PRD`.
 6. **Post-checks (DBA):** DEPLOY_LOG SUCCEEDED row; task roots back in their previous state; release smoke tests;
@@ -1274,8 +1371,11 @@ python3 scripts/fw.py drift-eval --runway MGM --rows rows.json      # exit 1 = t
 ### H1. First deploy to a runway
 
 - [ ] B2: `DESC USER SVC_EDW_FLYWAY_<ID>` fingerprint matches the key stored in `sf-flyway-<ID>`.
+- [ ] B2: `EXECUTE TASK` granted; `EXECUTE ALERT` too if the repository has (or will soon have) layer-85 alerts.
 - [ ] B3: `FLYWAY` schema with `DEPLOY_LOG` and `DEPLOY_TASK_STATE`, owned by `EDW_<ID>_DEPLOYER`.
-- [ ] D2: every schema owned by `EDW_<ID>_DEPLOYER`; `EXECUTE TASK` granted.
+- [ ] B3: the access roles `EDW_<ID>_<SCHEMA>_READ` (and `_WRITE`) exist for every schema with a grants file.
+- [ ] D2: every schema owned by `EDW_<ID>_DEPLOYER` and managed access.
+- [ ] A2/C2: the deploy job runs on a deploy agent (console: node name), and that node takes no `EDW/ci` builds.
 - [ ] D5/D6: Baseline row present; auditor can `SELECT` the history table.
 - [ ] Jenkins: `/EDW/deploy/<ID>` holds `sf-flyway-<ID>`, `sf-flyway-AUDIT`, `flyway-license`,
       `bitbucket-status-token`; the lock `ALFA_EDW_<ID>` exists.
@@ -1300,8 +1400,10 @@ python3 scripts/fw.py drift-eval --runway MGM --rows rows.json      # exit 1 = t
 
 - [ ] **Key rotation** for every `SVC_EDW_FLYWAY_*` user, including AUDIT (RUNBOOKS R11): generate a new pair (B2),
       `ALTER USER <user> SET RSA_PUBLIC_KEY_2 = '<new key>';`, update the Jenkins credential (every copy for AUDIT),
-      prove it with a `DRY_RUN = true` deploy, then `ALTER USER <user> UNSET RSA_PUBLIC_KEY;`. Next quarter rotate the
-      other slot.
+      replace the user's vault entry with the new `.p8` and passphrase (access list as in B7), prove the key with a
+      `DRY_RUN = true` deploy and with an R0 `flyway info` using the key checked out of the vault, then
+      `ALTER USER <user> UNSET RSA_PUBLIC_KEY;` and destroy the old key's copies, old vault version included. Next
+      quarter rotate the other slot.
 - [ ] **Licence:** `flyway version -outputType=json` shows Enterprise and a `permitExpiry` more than 90 days away;
       CI PAT valid; offline permit renewed if used.
 - [ ] **Bitbucket tokens:** the Jenkins repository access token and any webhook secret still valid; rotate per policy.

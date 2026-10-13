@@ -1,12 +1,14 @@
-# ALFA04 -- no DROP SCHEMA / DROP DATABASE, nor their CREATE OR REPLACE forms. Flyway Enterprise regex rule.
+# ALFA04 -- no DROP DATABASE, CREATE OR REPLACE DATABASE or CREATE OR REPLACE SCHEMA.   Flyway Enterprise regex rule.
 #
-# Why: a migration replays on all six runways. DROP SCHEMA destroys every object in the schema, including objects
-# other projects created there later; DROP DATABASE / CREATE OR REPLACE DATABASE removes a whole runway, and
-# CREATE OR REPLACE SCHEMA is a DROP SCHEMA in disguise. Databases are created and retired only by a Snowflake admin
-# (bootstrap/); schemas are created with CREATE SCHEMA IF NOT EXISTS and retired by a reviewed, ticketed change.
-# DATABASE ROLE statements are not reported (database roles are not databases).
+# Why: a migration replays on all six runways. DROP DATABASE / CREATE OR REPLACE DATABASE removes a whole runway, and
+# CREATE OR REPLACE SCHEMA is a DROP SCHEMA in disguise: it destroys every object in the schema, including objects
+# other projects created there later. Databases are created and retired only by a Snowflake admin (bootstrap/);
+# schemas are created with CREATE SCHEMA IF NOT EXISTS ... WITH MANAGED ACCESS. DATABASE ROLE statements are not
+# reported (database roles are not databases).
 #
-# Mirror of guard rule FG006 (DROP DATABASE and the CREATE OR REPLACE forms are never waivable there either).
+# Severity ERROR. Mirror of guard rule FG006, which never waives these forms either, so the two gates agree: no
+# waiver and no override makes them shippable. A planned DROP SCHEMA (waivable in the guard with a ticket) is reported
+# by ALFA03 as a warning instead (docs/CONVENTIONS.md section 8); this file's name predates that move.
 #
 # Patterns are TOML literal strings ('...'): the regex is exactly what is written, no backslash escaping.
 code = "ALFA04"

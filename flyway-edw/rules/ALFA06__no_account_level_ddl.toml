@@ -1,4 +1,4 @@
-# ALFA06 -- no account-level DDL or grants in a migration.        Flyway Enterprise regex rule (`flyway check -code`)
+# ALFA06 -- account-level DDL or grants in a migration.           Flyway Enterprise regex rule (`flyway check -code`)
 #
 # Why: warehouses, roles, users, databases, integrations, network / authentication / password / session policies,
 # network rules, resource monitors, shares, replication / failover groups, connections, compute pools and the account
@@ -8,8 +8,11 @@
 # INTEGRATION / USER, GRANT ROLE ... TO USER and GRANT OWNERSHIP are reported for the same reason; schema-level
 # grants (repeatable layer 90) and DATABASE ROLE statements are not.
 #
-# Mirror of guard rule FG007. Regex rules have no per-file waiver: a change the guard would waive with a ticket is run
-# by an admin from bootstrap/ instead of shipping in a migration.
+# Severity WARNING. Guard rule FG007 is the hard gate: it fails these statements unless the file carries a ticketed
+# `-- FLYWAY-WAIVER: FG007 <ticket> <reason>` line (rare: security approved, and right to replay on all six runways).
+# A regex rule has no per-file waiver, so as an error this rule would block every approved exception; as a warning it
+# lists each occurrence in the code-review report for the reviewer (docs/CONVENTIONS.md section 8). DROP DATABASE /
+# CREATE OR REPLACE DATABASE are also ALFA04 errors, which FG006 never waives either.
 #
 # Patterns are TOML literal strings ('...'): the regex is exactly what is written, no backslash escaping.
 code = "ALFA06"

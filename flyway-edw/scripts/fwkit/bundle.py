@@ -11,6 +11,8 @@ import gzip
 import hashlib
 import io
 import json
+import re
+import subprocess
 import tarfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -187,3 +189,80 @@ def verify(bundle_dir: Path, *, require_branch: str | None = None) -> dict[str, 
         raise BundleError(f"bundle was built from {manifest.get('branch')!r}; this runway accepts only "
                           f"{require_branch!r} builds")
     return dict(manifest)
+
+
+def verify_against_git(manifest: dict[str, Any], git_dir: Path, *, prefix: str = "",
+                       require_ancestor: str | None = None) -> int:
+    """Prove the bundle IS its commit: every file byte-identical to the git blob at manifest['git_sha'], and the same
+    file set. A bundle built on a shared CI agent could be altered (with a self-consistent manifest) before it was
+    hashed; the repository, read by the deploy job itself, cannot. With `require_ancestor` (MGM/PRD: origin/main) the
+    commit must also be on that branch. Returns the number of files compared."""
+    sha = str(manifest.get("git_sha", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise BundleError(f"manifest git_sha {sha!r} is not a full commit hash")
+
+    def git(*args: str, data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(["git", "-C", str(git_dir), *args], input=data, capture_output=True, check=False)
+
+    if git("cat-file", "-e", f"{sha}^{{commit}}").returncode != 0:
+        raise BundleError(f"commit {sha} is not in {git_dir} (fetch it first); the bundle cannot be traced to git")
+    if require_ancestor and git("merge-base", "--is-ancestor", sha, require_ancestor).returncode != 0:
+        raise BundleError(f"commit {sha} is not on {require_ancestor}: refused")
+    pre = prefix.strip("/")
+    pre = pre + "/" if pre else ""
+    listing = git("ls-tree", "-r", "--name-only", sha, "--", *[pre + item for item in PAYLOAD])
+    if listing.returncode != 0:
+        raise BundleError(f"git ls-tree failed: {listing.stderr.decode('utf-8', 'replace').strip()}")
+    in_git = set()
+    for line in listing.stdout.decode("utf-8", "replace").splitlines():
+        rel = line[len(pre):] if line.startswith(pre) else line
+        if not (SKIP_PARTS & set(PurePosixPath(rel).parts)) and not rel.endswith(".pyc"):
+            in_git.add(rel)
+    files: dict[str, str] = manifest.get("files", {})
+    problems = [f"not in commit: {r}" for r in sorted(set(files) - in_git)]
+    problems += [f"in commit but not in bundle: {r}" for r in sorted(in_git - set(files))]
+    names = sorted(set(files) & in_git)
+    batch = git("cat-file", "--batch", data="".join(f"{sha}:{pre}{r}\n" for r in names).encode())
+    out, pos = batch.stdout, 0
+    for rel in names:
+        header_end = out.index(b"\n", pos)
+        header = out[pos:header_end].decode("utf-8", "replace").split()
+        if len(header) != 3 or header[1] != "blob":
+            problems.append(f"cannot read {rel} at {sha}")
+            pos = header_end + 1
+            continue
+        size = int(header[2])
+        blob = out[header_end + 1:header_end + 1 + size]
+        pos = header_end + 1 + size + 1
+        if hashlib.sha256(blob).hexdigest() != files[rel]:
+            problems.append(f"differs from the commit: {rel}")
+    if problems:
+        raise BundleError("bundle does not match commit " + sha[:12] + ": " + "; ".join(problems[:20]))
+    return len(names)
+
+
+def verify_against_archive(manifest: dict[str, Any], archive: Path, *, prefix: str = "") -> int:
+    """Same proof as verify_against_git, from `git archive --format=tar <git_sha>` made on the agent host (whose git
+    the deploy job's checkout already uses), for containers that have no git. The ancestry check then runs on the
+    host: `git merge-base --is-ancestor <git_sha> HEAD`."""
+    pre = prefix.strip("/")
+    pre = pre + "/" if pre else ""
+    in_git: dict[str, str] = {}
+    with tarfile.open(archive, "r:*") as tar:
+        for member in tar.getmembers():
+            if not member.isfile() or not member.name.startswith(pre):
+                continue
+            rel = member.name[len(pre):]
+            if rel.split("/", 1)[0] not in PAYLOAD or SKIP_PARTS & set(PurePosixPath(rel).parts) or rel.endswith(".pyc"):
+                continue
+            fh = tar.extractfile(member)
+            if fh is not None:
+                in_git[rel] = hashlib.sha256(fh.read()).hexdigest()
+    files: dict[str, str] = manifest.get("files", {})
+    problems = [f"not in commit: {r}" for r in sorted(set(files) - set(in_git))]
+    problems += [f"in commit but not in bundle: {r}" for r in sorted(set(in_git) - set(files))]
+    problems += [f"differs from the commit: {r}" for r in sorted(set(files) & set(in_git)) if files[r] != in_git[r]]
+    if problems:
+        raise BundleError("bundle does not match commit " + str(manifest.get("git_sha", ""))[:12] + ": "
+                          + "; ".join(problems[:20]))
+    return len(files)

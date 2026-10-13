@@ -65,16 +65,21 @@ You need git, Python 3.11+ and push access to the repository. Run everything fro
    git fetch origin
    git switch -c feature/EDW-1234-order-status origin/main
    ```
-2. Scaffold the file; never hand-type a migration name (the version is the current UTC time):
+2. Scaffold the file; never hand-type a migration name (the version is the current UTC time). Run ONE of these per
+   change (the second is the first plus its U undo script; running both would create two migrations):
    ```
-   python3 scripts/fw.py new --schema SALES --desc add_order_status            # versioned migration
-   python3 scripts/fw.py new --schema SALES --desc add_order_status --undo     # ... plus its U undo script
+   python3 scripts/fw.py new --schema SALES --desc add_order_status            # versioned migration, or
+   python3 scripts/fw.py new --schema SALES --desc add_order_status --undo     # versioned + U undo pair
+   ```
+   and, for a view, function, procedure, task or grants file:
+   ```
    python3 scripts/fw.py new --schema SALES --repeatable --layer 30 --object v_open_orders
    ```
    It prints the new path, e.g. `migrations/SALES/V2026.10.13.1415__sales_add_order_status.sql`, with the house
-   header and a template for the object type. Replace every `<...>` marker; the guard fails until you do.
+   header and a template for the object type. Replace every `<...>` marker; the guard fails until you do (FG021).
 3. Write the change following `docs/CONVENTIONS.md`: `SCHEMA.OBJECT` everywhere, never a database name,
-   `COPY GRANTS` on every `CREATE OR REPLACE`, Snowflake Scripting inside `EXECUTE IMMEDIATE $$ ... $$`.
+   `COPY GRANTS` on every `CREATE OR REPLACE`, Snowflake Scripting and alerts inside `EXECUTE IMMEDIATE $$ ... $$`,
+   new schemas `WITH MANAGED ACCESS`.
 4. Run the guard against `main` (it also checks that no already-merged migration was edited):
    ```
    python3 scripts/fw.py guard --base origin/main
@@ -93,7 +98,7 @@ You need git, Python 3.11+ and push access to the repository. Run everything fro
 
 | Command | What it does (who runs it) |
 |---|---|
-| `guard [--base <ref>] [--junit f] [--json f] [--strict]` | rules FG001-FG020 (developers, every build) |
+| `guard [--base <ref>] [--junit f] [--json f] [--strict]` | rules FG001-FG021 (developers, every build) |
 | `new --schema S --desc d [--undo] [--at ISO]` | scaffold a versioned migration (developers) |
 | `new --schema S --repeatable --layer N --object o` | scaffold a repeatable (developers) |
 | `bundle ...` / `verify-bundle ...` | build / re-hash the immutable deploy bundle (Jenkins) |
@@ -106,14 +111,17 @@ You need git, Python 3.11+ and push access to the repository. Run everything fro
 
 | Gate | Enforced by | When |
 |---|---|---|
-| Guard FG001-FG020 | `python3 scripts/fw.py guard` | locally, every PR build, every deploy |
+| Guard FG001-FG021 | `python3 scripts/fw.py guard` | locally, every PR build, every deploy |
 | SQLFluff + Redgate RG rules, regex rules ALFA01-06 | `flyway check -code` (failOnError) | every PR build |
 | Reviews, green build, no direct push to `main` | Bitbucket branch restrictions | every merge |
 | Lane, promotion, lock, drift, rehearsal, approval | `jenkins/Jenkinsfile.deploy` + `runways.toml` | every deploy |
 | Task graphs, deploy log, cross-environment refs | `callbacks/` | inside every `flyway migrate` |
 
-The guard is the primary gate; `check -code` is the Enterprise second line. Regex rules have no per-file waiver;
-SQLFluff findings are waived per line with `-- noqa: <code>`, which the code-review report lists.
+The guard is the primary gate; `check -code` is the Enterprise second line. The guard is also the gate for every
+waivable class: a code-review rule that repeats a waivable guard rule (ALFA03, ALFA06, RG06, RG13, RG08, RG11) is a
+warning, so a file with a ticketed `-- FLYWAY-WAIVER` line passes code review and the report lists the statement.
+Regex rules have no per-file waiver; the remaining SQLFluff errors (for example RG09, UPDATE without WHERE) are
+overridden per line with `-- noqa: <code>`, which the code-review report lists (`docs/CONVENTIONS.md` section 8).
 The Bitbucket merge checks (reviews, green build) block a merge only where the plan enforces them (believed to be
 Premium; verify yours); without that, the deploy jobs' own gates still hold.
 
@@ -136,12 +144,18 @@ Premium; verify yours); without that, the deploy jobs' own gates still hold.
       real deploy: they would create real objects on every runway.
 - [ ] `runways.toml`: set `kit.baseline_version` to the version you baseline with (GUIDE Part D); confirm the
       `flyway_version` / `flyway_image` / `snowflake_cli` pins and that the approval groups exist in Jenkins' security
-      realm. `flyway.toml`: confirm the `etl_wh` and `role_prefix` placeholder values match real warehouse / role names.
+      realm. Point `python_image` at an internal image with git and the Snowflake CLI, and pin both images by digest
+      (GUIDE A2). `flyway.toml`: confirm the `etl_wh` and `role_prefix` placeholder values match real warehouse /
+      role names.
 - [ ] `python3 scripts/fw.py guard` reports 0 errors.
-- [ ] Snowflake: run `bootstrap/10_account_objects.sql` and `bootstrap/20_runway_database.sql` per runway, then
-      baseline every database (GUIDE Parts B and D).
-- [ ] Jenkins: create the folder credentials named in `runways.toml`, run the `jenkins/jobs.groovy` seed and apply
-      `jenkins/casc-snippet.yaml` (GUIDE Part C).
+- [ ] Snowflake: run `bootstrap/10_account_objects.sql` (shared part, then per runway, including the access roles
+      the grants files use) and `bootstrap/20_runway_database.sql` per runway (GUIDE Part B).
+- [ ] Jenkins, in this order (GUIDE Part C, then B4): set up dedicated deploy agents that only `EDW/deploy/*` jobs
+      may use (GUIDE A2, C2); apply `jenkins/casc-snippet.yaml` (C2, it sets `BITBUCKET_WORKSPACE` / `BITBUCKET_REPO`
+      that the seed needs); run the `jenkins/jobs.groovy` seed (C3, it creates the folders); then create the folder
+      credentials named in `runways.toml` (B4).
+- [ ] Adopt the databases per GUIDE Part D: D2 ownership transfer, D5 baseline PRD and DEV, D6 refresh MGM / SAN /
+      SEA / PHX from PRD (they arrive baselined) or reconcile them in place.
 - [ ] Bitbucket: add default reviewers (individual users), then run
       `bitbucket/apply_branch_restrictions.sh --dry-run` and apply it (GUIDE Part B).
 - [ ] Open a first pull request, see it go green, merge, watch the DEV deploy; then follow GUIDE Part F.

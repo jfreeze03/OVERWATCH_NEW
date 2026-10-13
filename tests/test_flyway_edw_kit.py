@@ -683,6 +683,45 @@ def test_scaffold_alert_parses_and_markers_are_flagged(tmp_path):
     assert "FG021" in found and "FG015" not in found  # markers left; the alert itself is parser-safe
 
 
+def test_verify_bundle_against_git_catches_a_rehashed_tamper(tmp_path):
+    """A bundle altered on a shared CI agent with a self-consistent manifest passes `verify`, never the git check."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shutil.copytree(KIT, repo / "kit", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "kit")
+    sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    res = bundle_mod.build(repo / "kit", tmp_path / "d", build_id="1", git_sha=sha, branch="main")
+    bdir = bundle_mod.extract(res.archive, tmp_path / "x")
+    m = bundle_mod.verify(bdir, require_branch="main")
+    assert bundle_mod.verify_against_git(m, repo, prefix="kit", require_ancestor="main") == len(m["files"])
+    # tamper + re-hash the manifest: the bundle is internally consistent again
+    evil = bdir / "callbacks" / "afterMigrate__99_deploy_log.sql"
+    evil.write_text(evil.read_text() + "\n-- injected\n")
+    m["files"]["callbacks/afterMigrate__99_deploy_log.sql"] = __import__("hashlib").sha256(evil.read_bytes()).hexdigest()
+    m["digest"] = bundle_mod.digest_of(m["files"])
+    (bdir / bundle_mod.MANIFEST).write_text(json.dumps(m))
+    assert bundle_mod.verify(bdir)["digest"] == m["digest"]
+    with pytest.raises(bundle_mod.BundleError, match="differs from the commit"):
+        bundle_mod.verify_against_git(m, repo, prefix="kit")
+    tar = tmp_path / "commit.tar"
+    subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", "-o", str(tar), sha], check=True)
+    with pytest.raises(bundle_mod.BundleError, match="differs from the commit"):
+        bundle_mod.verify_against_archive(m, tar, prefix="kit")
+    clean = bundle_mod.verify(bundle_mod.extract(res.archive, tmp_path / "y"))
+    assert bundle_mod.verify_against_archive(clean, tar, prefix="kit") == len(clean["files"])
+    # a commit that is not on main is refused for the prod tier
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "kit" / "README.md").write_text("changed\n")
+    _git(repo, "commit", "-q", "-am", "feature")
+    side = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    with pytest.raises(bundle_mod.BundleError, match="not on main"):
+        bundle_mod.verify_against_git({**m, "git_sha": side}, repo, prefix="kit", require_ancestor="main")
+
+
 def test_verify_bundle_rederives_the_inventory(tmp_path):
     res = bundle_mod.build(KIT, tmp_path / "d", build_id="9", git_sha="abc", branch="main")
     bdir = bundle_mod.extract(res.archive, tmp_path / "x")
@@ -759,7 +798,9 @@ def test_jenkinsfiles_never_interpolate_into_shell():
 def test_jenkinsfiles_use_the_kit_contract():
     deploy = (KIT / "jenkins" / "Jenkinsfile.deploy").read_text()
     for needle in ("lock(", "disableRestartFromStage", "copyArtifacts", "verify-bundle", "promote-check",
-                   "drift-eval", "rehearsal-sql", "--entrypoint", "submitter", "migrate"):
+                   "drift-eval", "rehearsal-sql", "--entrypoint", "submitter", "migrate",
+                   # provenance: a main bundle must be byte-identical to a commit on main (shared CI agents)
+                   "--git-archive", "merge-base --is-ancestor", "getBuildCauses", "EDW_DEPLOY_AGENT_LABEL"):
         assert needle in deploy, needle
     ci = (KIT / "jenkins" / "Jenkinsfile").read_text()
     for needle in ("guard", "check -code", "bundle", "copyArtifactPermission", "archiveArtifacts"):

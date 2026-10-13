@@ -18,11 +18,15 @@
 //   -Dorg.jenkinsci.plugins.workflow.cps.DSL.UNSAFE_GROOVY_INTERPOLATION=fail (casc-snippet.yaml header).
 // * A PR runs its OWN copy of this file (FACTS I1-04): whatever /EDW/ci can see, a PR author can use. That is why
 //   this pipeline only ever holds the read-only auditor key, the licence and the status token - never a deploy key.
-// * Flyway reads FLYWAY_<SETTING> environment variables as its own configuration (FLYWAY_TARGET = migrate target
-//   version, FLYWAY_ENVIRONMENT, FLYWAY_BASELINE_VERSION; ConfigUtils.convertKey), which is why fw.py env reports
-//   EDW_* keys. The shell function fw() below also drops every FLYWAY_*/flyway_* variable except the connection and
-//   licence ones flyway.toml expects, so a stray controller/folder variable can never change what Flyway does. Our
-//   own variables use the KIT_/FW_ prefixes.
+//   It can also ask for any agent label, which is why the deploy jobs' agents (EDW_DEPLOY_AGENT_LABEL) are
+//   restricted on the node side to EDW/deploy/.* jobs (casc-snippet.yaml). Credentials bound for a container step
+//   reach it as `docker exec --env NAME=value`, visible in the agent host's process list while the step runs.
+// * Flyway reads FLYWAY_<SETTING> and ENVIRONMENTS_<ENV>_<SETTING> environment variables as its own configuration
+//   (FLYWAY_TARGET = migrate target version, FLYWAY_ENVIRONMENT, FLYWAY_BASELINE_VERSION; ConfigUtils.convertKey),
+//   which is why fw.py env reports EDW_* keys. The shell function fw() below drops every FLYWAY_*/flyway_* and
+//   environments_* variable (any case) except the connection and licence ones flyway.toml expects, and gives Flyway
+//   an empty user.home for every call; -configFiles=flyway.toml only ADDS that file to the ones Flyway auto-loads.
+//   Our own variables use the KIT_/FW_ prefixes.
 // * Placeholders and ignoreMigrationPatterns are passed as -environments.<ENV>.flyway.* overrides: in Flyway 13.10
 //   an environment's own [environments.<ENV>.flyway] table replaces the root value instead of merging
 //   (ClassicConfiguration.getPlaceholders / getIgnoreMigrationPatterns), so a root-level -placeholders.x or
@@ -32,7 +36,8 @@
 // cloudbees-folder, docker-workflow, credentials-binding, pipeline-utility-steps (readJSON/findFiles),
 // copyartifact (copyArtifactPermission), pipeline-build-step, junit, timestamper, git.
 //
-// Agent: a node with Docker whose label is the controller-wide env var EDW_AGENT_LABEL (default "docker").
+// Agent: a node with Docker whose label is the controller-wide env var EDW_AGENT_LABEL (default "docker"). The deploy
+// jobs use EDW_DEPLOY_AGENT_LABEL nodes, which must refuse this job (casc-snippet.yaml).
 // If the kit lives in a subfolder of the repository instead of its root, change kitDir() below and the Script
 // Paths in jenkins/jobs.groovy.
 // =====================================================================================================================
@@ -222,9 +227,28 @@ if ! command -v git > /dev/null 2>&1; then
     echo "kit.python_image has no git and this container is not root: use an image with git (FG003/FG004)" >&2
     exit 2
   fi
-  echo "kit.python_image has no git: installing it into this throw-away container (FG003/FG004 need it)"
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git > /dev/null
+  echo "NOTE: kit.python_image ${KIT_PYTHON_IMAGE} has no git, so it is apt-installed into this throw-away container"
+  echo "      on EVERY build (FG003/FG004 need it). Recommended: an internal image with git + snowflake-cli"
+  echo "      preinstalled, set as runways.toml [kit] python_image. This fallback needs the Debian mirrors"
+  echo "      (deb.debian.org, security.debian.org) or your apt mirror - behind a proxy, via http_proxy/https_proxy."
+  # apt reads only the lower-case proxy variables. Jenkins' EnvVars is case-insensitive, so withEnv cannot carry
+  # both spellings: derive them here from the controller's HTTP_PROXY / HTTPS_PROXY / NO_PROXY (casc-snippet.yaml).
+  # http_proxy falls back to HTTPS_PROXY, because the Debian sources in python:*-slim are http:// URLs.
+  if [ -z "${https_proxy:-}" ] && [ -n "${HTTPS_PROXY:-}" ]; then export https_proxy="$HTTPS_PROXY"; fi
+  if [ -z "${http_proxy:-}" ]; then
+    if [ -n "${HTTP_PROXY:-}" ]; then
+      export http_proxy="$HTTP_PROXY"
+    elif [ -n "${HTTPS_PROXY:-}" ]; then
+      export http_proxy="$HTTPS_PROXY"
+    fi
+  fi
+  if [ -z "${no_proxy:-}" ] && [ -n "${NO_PROXY:-}" ]; then export no_proxy="$NO_PROXY"; fi
+  if ! apt-get update -qq \
+      || ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git > /dev/null; then
+    echo "Could not apt-install git (no route to the Debian mirrors or the proxy?). Use an internal image with git" >&2
+    echo "+ snowflake-cli preinstalled as runways.toml [kit] python_image, or open the mirrors (docs/GUIDE.md A2)." >&2
+    exit 2
+  fi
 fi
 if [ "$(id -u)" = "0" ]; then
   # The checkout belongs to the Jenkins user; git refuses a repository owned by someone else ("dubious ownership").
@@ -310,6 +334,10 @@ fw_env "$FW_ENV" validate "-environments.${FW_ENV}.flyway.ignoreMigrationPattern
             if (s.outOfOrder) {
                 text += " (${s.outOfOrder.size()} out of order)"
             }
+            if (s.outdated) {
+                // Context only: each changed repeatable is already counted once above, as its pending R entry.
+                text += " (${s.outdated.size()} repeatable(s) changed since last applied)"
+            }
             // Shown on the PR's build status in Bitbucket (the plugin sends currentBuild.description).
             currentBuild.description = text
             echo(text)
@@ -343,14 +371,15 @@ rm -rf "${WORKSPACE}@tmp/bundle-selfcheck"
 
 void triggerDevDeploy() {
     // wait: false - the DEV deploy queues behind its own lock and reports separately (deploy-DEV status).
+    // The deploy job accepts this upstream trigger only from THIS main job, for DEV, with SOURCE_JOB = this job and
+    // SOURCE_BUILD = this build (Jenkinsfile.deploy startCause()); keep these parameters exactly so.
     build(job: env.KIT_DEV_DEPLOY_JOB, wait: false, parameters: [
         string(name: 'TARGET', value: env.KIT_DEV_ID),
         string(name: 'SOURCE_JOB', value: "/${env.JOB_NAME}"),
         string(name: 'SOURCE_BUILD', value: env.BUILD_NUMBER),
         string(name: 'CHANGE_TICKET', value: ''),
         booleanParam(name: 'DRY_RUN', value: false),
-        booleanParam(name: 'ACK_DRIFT', value: false),
-        booleanParam(name: 'ALLOW_UNBASELINED', value: false)
+        booleanParam(name: 'ACK_DRIFT', value: false)
     ])
     currentBuild.description = (currentBuild.description ?: '') + " -> ${env.KIT_DEV_DEPLOY_JOB} triggered"
 }
@@ -364,18 +393,39 @@ String shCommon() {
     return '''#!/bin/bash
 set -euo pipefail
 
-# Flyway with a controlled environment: drop every FLYWAY_*/flyway_* variable except the ones flyway.toml and
-# licensing read, then always load ./flyway.toml explicitly (no user-home or execution-dir config files).
+# Flyway with a controlled configuration:
+# * every FLYWAY_*/flyway_* and ENVIRONMENTS_*/environments_* variable (any case; Flyway reads both kinds as
+#   settings) is dropped, except the connection and licence variables flyway.toml and licensing read;
+# * user.home (FW_HOME, set by flywayEnv()) is deleted and recreated EMPTY for every call, so nothing can plant a
+#   flyway.toml / flyway.user.toml there between calls;
+# * a flyway.user.toml / flyway.conf / flyway.user.conf in the working directory is refused.
+# -configFiles=flyway.toml ADDS ./flyway.toml to the files Flyway auto-loads anyway (installation conf/, user.home,
+# working directory); it does not switch those off. The isolation comes from the empty per-call user.home and the
+# working directory: here the checked-out kit; in the deploy job the verified bundle.
 fw() {
   (
     for v in $(compgen -e); do
       case "$v" in
-        FLYWAY_EMAIL|FLYWAY_TOKEN|FLYWAY_OFFLINE_PERMIT_PATH) ;;
-        FLYWAY_SF_USER|FLYWAY_SF_ROLE|FLYWAY_SF_WAREHOUSE|FLYWAY_SF_KEY_FILE|FLYWAY_SF_KEY_PWD|FLYWAY_RH_DB) ;;
-        FLYWAY_*|flyway_*) unset "$v" ;;
+        FLYWAY_EMAIL|FLYWAY_TOKEN|FLYWAY_OFFLINE_PERMIT_PATH) continue ;;
+        FLYWAY_SF_USER|FLYWAY_SF_ROLE|FLYWAY_SF_WAREHOUSE|FLYWAY_SF_KEY_FILE|FLYWAY_SF_KEY_PWD|FLYWAY_RH_DB) continue ;;
+      esac
+      case "${v,,}" in
+        flyway_*|environments_*) unset "$v" ;;
       esac
     done
-    mkdir -p "${WORKSPACE}@tmp/flyway-home"
+    case "${FW_HOME:-}" in
+      *@tmp/flyway-home) ;;
+      *) echo "fw: FW_HOME '${FW_HOME:-}' is not <workspace>@tmp/flyway-home: run Flyway inside flywayEnv()" >&2
+         exit 2 ;;
+    esac
+    rm -rf "$FW_HOME"
+    mkdir -p -m 700 "$FW_HOME"
+    for f in flyway.user.toml flyway.conf flyway.user.conf; do
+      if [ -e "$f" ]; then
+        echo "fw: ${PWD}/${f} could be auto-loaded by Flyway on top of flyway.toml: refused" >&2
+        exit 2
+      fi
+    done
     exec flyway -configFiles=flyway.toml "$@"
   )
 }
@@ -404,17 +454,18 @@ check_login() {
 '''
 }
 
-// JAVA_ARGS for the Flyway launcher: user.home in <ws>@tmp keeps the licence permit/refresh token writable for the
-// arbitrary Jenkins uid and out of archived paths (FACTS I3-04); BouncyCastle decrypts the encrypted PKCS#8 key.
-// Behind a proxy, set the controller-wide env var EDW_JAVA_PROXY_ARGS (-Dhttps.proxyHost=.. -Dhttps.proxyPort=..):
-// Flyway 13.9+ ignores OS proxy settings.
+// JAVA_ARGS for the Flyway launcher: user.home = FW_HOME in <ws>@tmp, which fw() deletes and recreates EMPTY before
+// every Flyway call (no planted flyway.toml / flyway.user.toml); it is writable for the arbitrary Jenkins uid (the
+// licence permit lands there for that one call) and outside archived paths (FACTS I3-04). BouncyCastle decrypts the
+// encrypted PKCS#8 key. Behind a proxy, set the controller-wide env var EDW_JAVA_PROXY_ARGS
+// (-Dhttps.proxyHost=.. -Dhttps.proxyPort=..): Flyway 13.9+ ignores OS proxy settings.
 List flywayEnv() {
     String home = "${env.WORKSPACE}@tmp/flyway-home"
     String javaArgs = "-Duser.home=${home} -Dnet.snowflake.jdbc.useBundledBouncyCastleForPrivateKeyDecryption=true"
     if (env.EDW_JAVA_PROXY_ARGS?.trim()) {
         javaArgs += ' ' + env.EDW_JAVA_PROXY_ARGS.trim()
     }
-    return ["JAVA_ARGS=${javaArgs}".toString(), "HOME=${home}".toString()]
+    return ["JAVA_ARGS=${javaArgs}".toString(), "HOME=${home}".toString(), "FW_HOME=${home}".toString()]
 }
 
 void withLicence(Closure body) {
@@ -515,10 +566,12 @@ String clip(String s, int max) {
     return t.length() <= max ? t : t.substring(0, max - 3) + '...'
 }
 
-// Flyway's validate patterns per tier, as FG018 pins them in flyway.toml, optionally plus *:pending.
+// Flyway's validate patterns per tier, as FG018 pins them in flyway.toml, optionally plus *:pending. Prod tier
+// (MGM, PRD, RH_*) tolerates a renamed or retired repeatable (repeatable:missing); a missing VERSIONED migration
+// stays an error there.
 @NonCPS
 String validateIgnore(String tier, boolean withPending) {
-    String base = tier == 'prod' ? '*:future' : '*:missing,*:future'
+    String base = tier == 'prod' ? '*:future,repeatable:missing' : '*:missing,*:future'
     return withPending ? '*:pending,' + base : base
 }
 
@@ -541,29 +594,39 @@ Map flywayResult(Map json, String key) {
     return json
 }
 
-// Summary of `flyway info -outputType=json`: current version, what would run, what failed.
+// Summary of `flyway info -outputType=json`: current version, what would run, what failed. Only 'Pending' rows are
+// work to do. A changed repeatable shows twice in info: its last applied run as 'Outdated' and the new file as
+// 'Pending', so 'Outdated' rows are context only ("changed since last applied"), listed once per description.
 @NonCPS
 Map summarizeInfo(Map json) {
     Map info = flywayResult(json, 'migrations')
     String current = info.schemaVersion ? info.schemaVersion.toString() : ''
     List<String> pending = []
     List<String> outOfOrder = []
+    List<String> outdated = []
+    List<String> outdatedSeen = []
     List<String> failed = []
     for (Object o : (List) (info.migrations ?: [])) {
         Map m = (Map) o
         String state = m.state ? m.state.toString() : ''
         String version = m.version ? m.version.toString() : ''
-        String label = (version ? 'V' + version : 'R') + ' ' + (m.description ?: '').toString()
-        if (state == 'Pending' || state == 'Outdated') {
+        String description = (m.description ?: '').toString()
+        String label = (version ? 'V' + version : 'R') + ' ' + description
+        if (state == 'Pending') {
             pending.add(label)
             if (version && current && compareVersions(version, current) < 0) {
                 outOfOrder.add(label)
+            }
+        } else if (state == 'Outdated') {
+            if (!outdatedSeen.contains(description)) {
+                outdatedSeen.add(description)
+                outdated.add(label)
             }
         } else if (state.startsWith('Failed')) {
             failed.add(label + ' [' + state + ']')
         }
     }
-    return [schemaVersion: current, pending: pending, outOfOrder: outOfOrder, failed: failed]
+    return [schemaVersion: current, pending: pending, outOfOrder: outOfOrder, outdated: outdated, failed: failed]
 }
 
 // Flyway compares version parts numerically (2026.10.13.0900 == 2026.10.13.900).

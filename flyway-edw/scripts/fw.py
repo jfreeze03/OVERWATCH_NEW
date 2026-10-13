@@ -86,6 +86,16 @@ def cmd_verify_bundle(args: argparse.Namespace) -> int:
     bdir = bundle.extract(Path(args.bundle), Path(args.extract))
     m = bundle.verify(bdir, require_branch=args.require_branch)
     print(f"verified {bdir} digest {m['digest']} build {m['build_id']} branch {m['branch']} sha {m['git_sha']}")
+    if args.git_dir:
+        n = bundle.verify_against_git(m, Path(args.git_dir), prefix=args.git_prefix or "",
+                                      require_ancestor=args.require_ancestor)
+        print(f"verified against git: {n} files byte-identical to commit {m['git_sha']}"
+              + (f" (on {args.require_ancestor})" if args.require_ancestor else ""))
+    elif args.git_archive:
+        n = bundle.verify_against_archive(m, Path(args.git_archive), prefix=args.git_prefix or "")
+        print(f"verified against git archive: {n} files byte-identical to commit {m['git_sha']}")
+    if args.require_ancestor and not args.git_dir:
+        raise bundle.BundleError("--require-ancestor needs --git-dir (with --git-archive, check ancestry on the host)")
     if args.manifest_out:
         Path(args.manifest_out).write_text(json.dumps(m, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0
@@ -235,6 +245,10 @@ def parser() -> argparse.ArgumentParser:
     v.add_argument("--extract", required=True)
     v.add_argument("--require-branch", help="refuse bundles not built from this branch (MGM/PRD: main)")
     v.add_argument("--manifest-out", help="also write the verified manifest here")
+    v.add_argument("--git-dir", help="a checkout holding the bundle's commit: compare every file with its git blob")
+    v.add_argument("--git-archive", help="`git archive --format=tar <git_sha>` output (when the container has no git)")
+    v.add_argument("--git-prefix", help="the kit's folder inside that repository (default: the repository root)")
+    v.add_argument("--require-ancestor", help="the commit must be on this ref (MGM/PRD: origin/main)")
     v.set_defaults(fn=cmd_verify_bundle)
 
     e = sub.add_parser("env", help="print a runway's pipeline settings")

@@ -29,11 +29,15 @@
 // * Copy-artifact permission: multibranch branch jobs take job properties from their Jenkinsfile, so
 //   jenkins/Jenkinsfile sets options { copyArtifactPermission('/EDW/deploy/*') } itself.
 // * Permissions: Role Strategy item roles in jenkins/casc-snippet.yaml.
+// * Agents: the deploy jobs run on EDW_DEPLOY_AGENT_LABEL nodes that must be restricted to jobs matching
+//   EDW/deploy/.* on the node side (Job Restrictions plugin) or come from a cloud/ephemeral template the CI folder
+//   cannot use; a PR's Jenkinsfile can request any label (jenkins/casc-snippet.yaml, deploy agents).
 //
 // Required plugins: job-dsl, cloudbees-folder, workflow-job, workflow-cps, workflow-multibranch,
 // bitbucket-branch-source, git, credentials; the pipelines additionally need lockable-resources, copyartifact,
 // pipeline-utility-steps, docker-workflow, credentials-binding, pipeline-input-step, pipeline-build-step, junit,
-// timestamper; casc-snippet.yaml needs configuration-as-code and role-strategy.
+// timestamper; casc-snippet.yaml needs configuration-as-code and role-strategy, and the deploy agents job-restrictions
+// (unless they come from a restricted cloud).
 // =====================================================================================================================
 
 // ---- Settings ---------------------------------------------------------------------------------------------------
@@ -220,7 +224,7 @@ runways.each { String id, Map<String, String> rw ->
             stringParam('CHANGE_TICKET', '', 'Change ticket number. Required where runways.toml sets ticket_required.')
             booleanParam('DRY_RUN', false, 'Run every check, the dry-run report and the rehearsal, then stop.')
             booleanParam('ACK_DRIFT', false, 'Proceed although drift was found on a runway whose drift_gate is fail.')
-            booleanParam('ALLOW_UNBASELINED', false, 'Only for a brand-new, empty database without Flyway history.')
+            // No unbaselined override: a new runway is baselined from an R0 session first (docs/RUNBOOKS.md R0).
         }
         definition {
             cpsScm {

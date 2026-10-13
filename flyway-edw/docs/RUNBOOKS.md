@@ -27,9 +27,10 @@ docs/SHORTCOMINGS.md explains why each situation can happen. docs/GUIDE.md cover
 
 ## R0 Manual Flyway session (shared setup)
 
-**Who.** For DEV, SAN, SEA and PHX: the runway lead, who holds that runway's deployer key per GUIDE Part B. For MGM
-and PRD: a break-glass session per GUIDE Part B, which needs the release manager's approval and a change ticket. No
-human holds the MGM or PRD deployer role day to day.
+**Who.** For DEV: an edw-dba member. For SAN, SEA and PHX: an edw-dba member or the current lease's lead. Each
+checks the runway's deployer key out of the enterprise vault (GUIDE B7 vault table). For MGM and PRD: a break-glass
+session per GUIDE B7 (an edw-breakglass operator), which needs the release manager's approval and a change ticket.
+No human holds the MGM or PRD deployer role day to day.
 
 **When.** Any runbook below that runs `flyway` or SQL as the deployer.
 
@@ -103,7 +104,9 @@ break-glass session.
 - `FLYWAY.DEPLOY_LOG` has a FAILED row.
 - Every later deploy to that runway fails with "contains a failed migration to version ...".
 
-Snowflake DDL autocommits, so every statement before the failing one has been applied (SHORTCOMINGS S02).
+On Snowflake, Flyway runs every statement in autocommit, DDL and DML alike, so every statement before the failing
+one has been applied and committed (SHORTCOMINGS S02). Only an explicit `BEGIN TRANSACTION` ... `COMMIT` in the
+file is an exception; check whether the failing statement was inside one.
 
 **Steps.**
 
@@ -365,15 +368,23 @@ records the tool, the time, who did it, and the follow-up migration.
    ```sql
    SELECT CURRENT_TIMESTAMP() AS TIME_TRAVEL_POINT;
    ```
-4. Post the Bitbucket status by hand, so the commit shows the deploy. Use the Bitbucket repository access token kept
-   for the deploy jobs (`bitbucket-status-token`), and set `BITBUCKET_WORKSPACE`, `BITBUCKET_REPO` and `CHANGE_URL`
-   (the ticket link) first:
+4. Post the Bitbucket status by hand, so the commit shows the deploy. You need a token that may post commit statuses:
+   the repository access token behind the Jenkins credential `bitbucket-status-token` if your Bitbucket admin keeps
+   a copy in the enterprise vault, or else a short-lived repository access token with Repositories: Read that the
+   Bitbucket admin creates for the ticket and revokes afterwards (GUIDE B5). The break-glass operator cannot read a
+   credential back out of Jenkins. Set
+   `BITBUCKET_WORKSPACE`, `BITBUCKET_REPO` and `CHANGE_URL` (the ticket link) first, and pass the token through a
+   private header file, never on the command line, where `ps` would show it:
 
    ```bash
+   read -rsp 'Bitbucket status token: ' BITBUCKET_STATUS_TOKEN && echo
+   hdr=$(mktemp) && chmod 600 "$hdr"
+   printf 'Authorization: Bearer %s\n' "$BITBUCKET_STATUS_TOKEN" > "$hdr"
    BB_REPO_API="https://api.bitbucket.org/2.0/repositories/$BITBUCKET_WORKSPACE/$BITBUCKET_REPO"
-   curl -sS -X POST -H "Authorization: Bearer $BITBUCKET_STATUS_TOKEN" -H "Content-Type: application/json" \
+   curl -sS -X POST -H @"$hdr" -H "Content-Type: application/json" \
        "$BB_REPO_API/commit/$GIT_SHA/statuses/build" \
        -d "{\"key\":\"deploy-PRD\",\"state\":\"SUCCESSFUL\",\"name\":\"deploy-PRD (hotfix)\",\"url\":\"$CHANGE_URL\"}"
+   rm -f "$hdr"; unset BITBUCKET_STATUS_TOKEN
    ```
 5. **Back-merge.** The hotfix is already on `main` in this flow. If someone fixed it on a release branch instead,
    merge it to `main` the same day; FG003 then keeps it immutable. The rest of `main` reaches PRD with the next
@@ -535,14 +546,20 @@ out-of-band incident: `SHOW TASKS IN SCHEMA ...`, `SHOW GRANTS ON ...`.
 2. **Expired or revoked personal access token.** The Redgate account owner creates a new token at
    `identityprovider.red-gate.com/personaltokens`. The Jenkins admin then updates the username/password credential
    `flyway-license` in `EDW/ci` and in every `EDW/deploy/<ID>` folder. The credential id stays the same.
-3. **The agent cannot reach Redgate licensing.** Flyway 13.9 and later ignores operating-system proxy settings. Add
-   the proxy to `JAVA_ARGS` in the Jenkins stages, keeping the existing `-Duser.home=...` flag in the same variable:
+3. **The agent cannot reach Redgate licensing.** Flyway 13.9 and later ignores operating-system proxy settings, and
+   the JVM never reads `HTTPS_PROXY`. Do not edit the Jenkinsfiles: both build `JAVA_ARGS` themselves and append the
+   controller environment variable `EDW_JAVA_PROXY_ARGS`. In Jenkins (Manage Jenkins > System > Global properties,
+   or `casc-snippet.yaml` `globalNodeProperties`), set:
+   - `EDW_JAVA_PROXY_ARGS` = `-Dhttps.proxyHost=proxy.alfa.example -Dhttps.proxyPort=8080` (your real host and port);
+   - `HTTPS_PROXY` and `PIP_INDEX_URL` for the Snowflake CLI install, if those are blocked too;
+   - lower-case `http_proxy` / `https_proxy` if the CI Guard stage fails installing git with apt (GUIDE A2).
+
+   Then re-run the job. Only in a manual R0 session, append the same flags to `JAVA_ARGS` after the existing
+   `-Duser.home=...` flag:
 
    ```bash
-   export JAVA_ARGS="-Duser.home=$WORKSPACE@tmp/flyway-home -Dhttps.proxyHost=proxy.alfa.example -Dhttps.proxyPort=8080"
+   JAVA_ARGS="$JAVA_ARGS -Dhttps.proxyHost=proxy.alfa.example -Dhttps.proxyPort=8080"
    ```
-
-   Repeat with your real proxy host and port.
 4. **No internet access at all.** Use an offline permit:
    1. Download it from `permits.red-gate.com/offline?productCode=63`.
    2. Store it as a Jenkins **Secret file** in the same folders as `flyway-license`.
@@ -577,7 +594,9 @@ expiry date in GUIDE Part H's quarterly check.
 
 1. Announce the refresh. The outgoing project must merge, or at least push, its work. Anything that exists only in
    the runway is lost.
-2. Reserve the runway's lock, for example `ALFA_EDW_SAN`, in Jenkins (R0, step 1).
+2. Reserve the runway's lock, for example `ALFA_EDW_SAN`, in Jenkins (R0, step 1) for the whole refresh. For PART 3
+   only (the clone), also reserve `ALFA_EDW_PRD`, so no PRD deploy is half-applied in the clone; unreserve it as soon
+   as PART 3 has finished.
 3. In Snowsight, run `bootstrap/30_refresh_runway.sql` section by section, with its SET variables pointing at SAN.
    The script:
    - refuses PRD as a target;
@@ -601,7 +620,9 @@ expiry date in GUIDE Part H's quarterly check.
 **Verify.**
 - `flyway -environment=SAN info` shows no Failed rows, and the deploy is green.
 - `SHOW TASKS IN DATABASE ALFA_EDW_SAN;` shows the tasks suspended.
-- The deploy's drift check is clean.
+- The first deploy after the refresh lists the cloned objects as drift: their LAST_DDL is the clone time and
+  LAST_DDL_BY the admin who cloned. Review that list once. Where the runway's `drift_gate` is `fail`, re-run the
+  deploy with `ACK_DRIFT=true` and the refresh ticket in `CHANGE_TICKET` (R5). The deploy after that is clean.
 
 **Do not.**
 - Do not refresh MGM unless the bootstrap script's explicit MGM switch has been approved.
@@ -739,6 +760,7 @@ in `FLYWAY.DEPLOY_LOG`.
 **Who.**
 - A Snowflake security admin (USERADMIN or SECURITYADMIN, whichever owns the service users) sets the keys.
 - The Jenkins admin updates the credentials.
+- The vault administrator replaces the vault entries that manual and break-glass sessions use (GUIDE B7).
 
 **When.**
 - Every quarter (GUIDE Part H).
@@ -774,8 +796,13 @@ in `FLYWAY.DEPLOY_LOG`.
 5. In Jenkins, update the credential `sf-flyway-PRD` in folder `EDW/deploy/PRD`: an SSH username with private key,
    username `SVC_EDW_FLYWAY_PRD`, the new `.p8` key and its passphrase, same id. For the auditor, update
    `sf-flyway-AUDIT` in `EDW/ci` and in every `EDW/deploy/<ID>` folder that holds it.
-6. Prove the new key works. Run the PRD deploy job with `DRY_RUN=true`, which stops before Migrate, or run
-   `flyway -environment=PRD info` in an R0 session with the new key. Then check the logins:
+6. Replace the vault entry for `SVC_EDW_FLYWAY_PRD` (and for `SVC_EDW_FLYWAY_AUDIT`, if the vault holds it) with the
+   new `.p8` and its passphrase, keeping the access list of GUIDE B7 (MGM and PRD: edw-breakglass only). Manual and
+   break-glass sessions check the key out there (R0); a vault that still holds the old key fails the next incident
+   session at login.
+7. Prove the new key works, both copies of it. Run the PRD deploy job with `DRY_RUN=true`, which stops before Migrate
+   (the Jenkins copy), and run `flyway -environment=PRD info` in an R0 session with the key checked out of the vault
+   (the vault copy; for MGM and PRD this check-out is itself a ticketed break-glass step). Then check the logins:
 
    ```sql
    SELECT lh.EVENT_TIMESTAMP, lh.USER_NAME, lh.CLIENT_IP, lh.REPORTED_CLIENT_TYPE,
@@ -784,20 +811,22 @@ in `FLYWAY.DEPLOY_LOG`.
             USER_NAME => 'SVC_EDW_FLYWAY_PRD', RESULT_LIMIT => 20)) lh
    ORDER BY lh.EVENT_TIMESTAMP DESC;
    ```
-7. Remove the old key from the other slot. Next quarter, rotate into that slot:
+8. Remove the old key from the other slot. Next quarter, rotate into that slot:
 
    ```sql
    ALTER USER SVC_EDW_FLYWAY_PRD UNSET RSA_PUBLIC_KEY;
    ```
-8. Destroy every copy of the old private key. Record the rotation date, the slot now in use and the fingerprint in
-   the ticket.
+9. Destroy every copy of the old private key: the old vault version (or the vault's history of it, as your vault
+   allows), any copy left from a break-glass session, and the generation files on the admin workstation
+   (`shred -u`). Record the rotation date, the slot now in use and the fingerprint in the ticket.
 
-**Suspected exposure.** Run step 7 for the exposed slot **first**, accepting that deploys stop, and then rotate.
+**Suspected exposure.** Run step 8 for the exposed slot **first**, accepting that deploys stop, and then rotate.
 Afterwards, check `LOGIN_HISTORY_BY_USER` for logins from addresses outside the Jenkins egress list.
 
 **Verify.**
 - `DESC USER` shows exactly one fingerprint, and it matches the new key.
-- The dry run or `flyway info` succeeds with the new key.
+- The dry run and the R0 `flyway info` with the vault copy both succeed with the new key.
+- The vault entry's fingerprint matches `DESC USER`; no copy of the old key remains.
 
 **Do not.**
 - Do not paste a private key into a ticket, a chat or the repository. FG017 scans the kit's files for key material.
