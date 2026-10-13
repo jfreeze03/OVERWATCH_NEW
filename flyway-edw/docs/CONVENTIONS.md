@@ -23,19 +23,20 @@ python3 scripts/fw.py guard --base origin/main
    idempotent definitions (FG012).
 4. Every `CREATE OR REPLACE` of a view, function, procedure, materialized view, dynamic table or stream says
    `COPY GRANTS` (FG011, ALFA05).
-5. Wrap every Snowflake Scripting block as `EXECUTE IMMEDIATE $$ ... $$;` (FG015).
+5. Wrap every Snowflake Scripting block, and every `CREATE ALERT`, as `EXECUTE IMMEDIATE $$ ... $$;` (FG015).
 6. No `USE` statements and no `ALTER SESSION` (FG008, ALFA02).
 7. Never change, rename or delete a V/U file once it is on `main`. Write a new migration instead (FG003).
 8. A file that creates or alters a task also contains the `${tasks_enabled}` gate and the resume (FG014).
 9. Keep account-level objects out of migrations: warehouses, roles, users, integrations and policies belong in
    `bootstrap/` (FG007, ALFA06).
-10. One logical change per V script. Snowflake DDL autocommits, so a failed script is half-applied (RUNBOOKS R1).
+10. One logical change per V script. On Snowflake Flyway runs every statement in autocommit, DML included, so a
+    failed script is half-applied (section 5.3, RUNBOOKS R1).
 
 ## 1. Where each object type goes
 
 | Object | File | Layer | Statement form | Rules |
 |--------|------|-------|----------------|-------|
-| Schema | V | - | `CREATE SCHEMA IF NOT EXISTS SALES` | FG006 |
+| Schema | V | - | `CREATE SCHEMA IF NOT EXISTS SALES WITH MANAGED ACCESS` | FG006, FG011 |
 | Table, column, constraint, clustering | V | - | `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE` | FG006, FG010 |
 | Data fix, reference data | V | - | idempotent `MERGE`, guarded `UPDATE` | FG006 |
 | Sequence, file format, stage | R | 10 | `CREATE ... IF NOT EXISTS`, `CREATE OR REPLACE` | FG010, FG012 |
@@ -46,7 +47,7 @@ python3 scripts/fw.py guard --base origin/main
 | Stream | R | 70 | `CREATE OR REPLACE STREAM ... COPY GRANTS` | FG011 |
 | Pipe | R (+ V to change it) | 75 | `CREATE PIPE IF NOT EXISTS`, bare COPY target | FG016 |
 | Task graph, one file per graph | R | 80 | `CREATE OR ALTER TASK` + gated resume | FG014 |
-| Alert | R | 85 | `CREATE OR REPLACE ALERT` + gated resume | review |
+| Alert | R | 85 | `EXECUTE IMMEDIATE $$ CREATE OR REPLACE ALERT ... $$` + gated resume | FG015, review |
 | Grants inside the schema | R | 90 | `GRANT ... TO ROLE ${role_prefix}_<SCHEMA>_<ACCESS>` | FG007 |
 | Warehouse, role, user, integration, policy | bootstrap/ | - | run by a Snowflake admin | FG007 |
 
@@ -64,7 +65,7 @@ python3 scripts/fw.py new --schema SALES --repeatable --layer 30 --object v_open
 python3 scripts/fw.py new --schema SALES --desc backfill_channel --at 2026-10-20T10:15+00:00
 ```
 
-`--at` takes an ISO timestamp. A time with no offset is read as the machine's local time, then converted to UTC.
+`--at` takes an ISO timestamp. A time with no offset is read as UTC; a time with an offset is converted to UTC.
 
 - **Versioned**: `migrations/<SCHEMA>/V<YYYY>.<MM>.<DD>.<HHMM>[.<N>]__<schema_lower>_<desc>.sql`, for example
   `migrations/SALES/V2026.10.20.1015__sales_add_order_channel.sql`.
@@ -76,21 +77,23 @@ python3 scripts/fw.py new --schema SALES --desc backfill_channel --at 2026-10-20
   `V2026.10.20.1015__sales_add_order_channel.sql.conf`.
 
 - The version is a UTC timestamp. Flyway compares version parts as numbers, so `.0900` and `.900` collide (FG002).
-  The scaffold adds `.1`, `.2` ... when that minute is already taken in the schema folder. FG002 catches collisions
-  across folders and across branches.
+  Versions are global, not per schema: the scaffold adds `.1`, `.2` ... when that minute is already taken by a V or U
+  file in any schema folder. FG002 catches the collisions it cannot see, such as the same minute on two branches.
 - A timestamp more than a day in the future is an error (FG004). A new V older than the newest V on `main` is a
   warning (FG004), because it will apply OUT OF ORDER. Make sure it does not depend on ordering.
 - Repeatables run in order of their Flyway description, which is the file name after `R__` with `_` turned into
   spaces: `30 SALES  v open orders`. The comparison is ordinal: space, then digits, then upper case, then lower case.
   The layer number goes first, so it decides the order. If a repeatable uses an object from another repeatable that
-  sorts after it, FG013 fails it. Bump the dependent file to the next number in its band (30 to 31).
+  sorts after it, FG013 fails it. Bump the dependent file to the next number in its band (30 to 31). That is a rename,
+  and it is safe even for a file that already ran: see section 5.15.
 - A description may be at most 200 characters, and a path at most 1000 (FG001). Those are the history table's column
   sizes.
 
 ## 3. Header template
 
-`fw.py new` writes this header. Fill it in. Do not edit it after the file is on `main`: comments are part of a V
-checksum.
+`fw.py new` writes this header and a template for the object. Fill both in: FG021 fails a file in `migrations/` or
+`repeatable/` that still holds a scaffold marker such as `<JIRA-KEY>`, `<name>`, `<TABLE>`, `<column_list>` or
+`<PROCEDURE>`. Do not edit the header after the file is on `main`: comments are part of a V checksum.
 
 ```sql
 -- Versioned migration: SALES.sales_add_order_channel
@@ -102,14 +105,18 @@ checksum.
 
 ## 4. Placeholders
 
-Flyway replaces `${name}` everywhere in a file before running it, inside `$$` bodies too. Names match
-case-insensitively. Every `${name}` must be declared for every environment in flyway.toml, or FG005 fails the file.
+Flyway replaces `${name}` everywhere in a file before running it: in comments and inside `$$` bodies too. Names match
+case-insensitively but are not trimmed, so `${ env }` is an error. Every `${name}` must be declared for every
+environment in flyway.toml, or FG005 fails the file. FG005 scans the whole file, comments included, because an
+undeclared name in a comment fails the deploy just the same. Of Flyway's own `${flyway:...}` names only the
+documented built-ins exist (defaultSchema, user, database, timestamp, filename, workingDirectory, table,
+environment); FG005 rejects any other.
 
 | Placeholder | DEV value | Meaning and use |
 |-------------|-----------|-----------------|
 | `${env}` | `DEV` | Runway id; rehearsals use the target's id (`MGM`/`PRD`). Use it in `shouldExecute` |
 | `${edw_db}` | `ALFA_EDW_DEV` | Database being migrated (`ALFA_EDW_RH_<ID>` in rehearsal). DDL target only |
-| `${home_db}` | `ALFA_EDW_DEV` | The runway's own database, also during rehearsal. Callbacks only |
+| `${home_db}` | `ALFA_EDW_DEV` | The runway's own database, so the LIVE target during rehearsal. Callbacks only (FG009) |
 | `${etl_wh}` | `WH_EDW_ETL_DEV` | Warehouse for tasks, alerts and dynamic tables |
 | `${role_prefix}` | `EDW_DEV` | Prefix of the runway's access roles: `${role_prefix}_SALES_READ` |
 | `${tasks_enabled}` | `false` | `true` on MGM/PRD. Gates task/alert resumes; pauses pipes and dynamic tables |
@@ -121,12 +128,20 @@ case-insensitively. Every `${name}` must be declared for every environment in fl
 
 Rules:
 - **Repeatables re-run whenever a placeholder value changes.** Flyway checksums a repeatable after replacing its
-  placeholders. A repeatable that used `${deploy_id}` or `${flyway:timestamp}` would therefore re-run on every deploy
-  (FG005 rejects the per-deploy placeholders in `repeatable/`). Changing a value in flyway.toml, such as `etl_wh` for SAN, re-runs every repeatable that uses it on
-  that runway. Say so in the PR.
+  placeholders, comments included. A repeatable that used `${deploy_id}` or `${flyway:timestamp}`, even in a
+  comment, would therefore re-run on every deploy (FG005 rejects the per-deploy placeholders anywhere in
+  `repeatable/`). Changing a value in flyway.toml, such as `etl_wh` for SAN, re-runs every repeatable that uses it
+  on that runway. Say so in the PR.
+- **Rehearsals re-run some repeatables.** `RH_MGM` and `RH_PRD` set `tasks_enabled = "false"` and
+  `edw_db = "ALFA_EDW_RH_<ID>"`, so every repeatable that uses `${tasks_enabled}` or `${edw_db}` (every task file,
+  for a start) has a different checksum on the clone and re-runs in every MGM and PRD rehearsal, changed or not.
+  The target itself runs only what is pending there (GUIDE F3).
 - **`${edw_db}` may only qualify a DDL target, and you almost never need it.** Flyway's session database is already
-  the runway. FG009 fails `${edw_db}` or `${home_db}` inside a VIEW, FUNCTION, PROCEDURE, TASK, PIPE, DYNAMIC TABLE or
-  ALERT body: there it becomes a literal database name, and a clone would keep pointing at the original.
+  the runway. FG009 fails `${edw_db}` inside a VIEW, FUNCTION, PROCEDURE, TASK, PIPE, DYNAMIC TABLE or ALERT body,
+  and inside a body set by `ALTER TASK|ALERT ... MODIFY`: there it becomes a literal database name, and a clone
+  would keep pointing at the original.
+- **`${home_db}` never appears in `migrations/` or `repeatable/`** (FG009, never waivable). During a rehearsal it
+  is the live target database, so a migration that named it would change MGM or PRD before the approval.
 - **Placeholders in versioned scripts are fine.** A V checksum is computed on the raw file, so it is identical on
   every runway.
 
@@ -142,8 +157,8 @@ SELECT o.ORDER_STATUS, COUNT(*) AS ORDER_COUNT FROM ${edw_db}.SALES.ORDERS o GRO
 
 ### Cross-database references
 
-- **Another EDW runway.** Never reference one. FG009 rejects any `ALFA_EDW_` literal, and the
-  `afterMigrate__80_cross_env_guard` callback fails the deploy when any stored definition names another runway.
+- **Another EDW runway.** Never reference one. FG009 rejects any `ALFA_EDW_` literal, `ALFA_EDW_${env}` included, and
+  the `afterMigrate__80_cross_env_guard` callback fails the deploy when any stored definition names another runway.
 - **A database with the same name everywhere** (for example `SNOWFLAKE`, or a share mounted under one name). Write it
   directly: `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`.
 - **A non-EDW database whose name differs per runway** (for example a reference database `REF_DEV` / `REF_PRD`). Add a
@@ -164,11 +179,17 @@ JOIN ${ref_db}.GEO.REGIONS r ON r.REGION_ID = o.REGION_ID;
 
 ```sql
 -- migrations/SALES/V2026.10.13.0855__sales_create_schema.sql
-CREATE SCHEMA IF NOT EXISTS SALES;
+CREATE SCHEMA IF NOT EXISTS SALES WITH MANAGED ACCESS;
 ```
 
-Never use `CREATE OR REPLACE SCHEMA` or `DROP SCHEMA`. The first can never be waived (FG006). The second needs a
-ticketed waiver (FG006, ALFA04).
+Every EDW schema is a **managed-access** schema owned by the runway's deployer. Only then may the deployer, as schema
+owner, define the schema-level future grants of the layer-90 file (section 5.13). FG011 warns about a
+`CREATE SCHEMA` without `WITH MANAGED ACCESS`. Schemas that existed before adoption are switched over by
+bootstrap/20 (`ALTER SCHEMA <S> ENABLE MANAGED ACCESS`, GUIDE D2). A new schema also needs its access roles before
+its first grants file deploys (section 5.13).
+
+Never use `CREATE OR REPLACE SCHEMA` or `DROP SCHEMA`. The first can never be waived (FG006, ALFA04). The second
+needs a ticketed FG006 waiver; code review then lists it as an ALFA03 warning (section 8).
 
 ### 5.2 Tables (V scripts only)
 
@@ -190,16 +211,24 @@ ALTER TABLE SALES.ORDERS ADD COLUMN IF NOT EXISTS ORDER_CHANNEL VARCHAR(20);
 CREATE OR REPLACE TABLE SALES.ORDERS (ORDER_ID NUMBER);  -- FG006: drops data, Time Travel history, stales streams
 CREATE TABLE ORDER_RETURNS (RETURN_ID NUMBER);           -- FG010: lands in the FLYWAY schema
 ALTER TABLE SALES.ORDERS DROP COLUMN LEGACY_FLAG;        -- FG006: data loss; needs a ticketed waiver
+ALTER TABLE SALES.ORDERS DROP LEGACY_FLAG;               -- FG006 as well: COLUMN is optional in Snowflake
+ALTER TABLE SALES.ORDERS ADD IF NOT EXISTS ORDER_CHANNEL VARCHAR(20);  -- FG015: write ADD COLUMN IF NOT EXISTS
 ```
 
 - Make DDL idempotent (`IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`). After a partial failure, the fixed deploy re-runs
   the whole script (RUNBOOKS R1).
+- Always write the `COLUMN` keyword with `IF [NOT] EXISTS`: without it Flyway's parser reads the `IF` as the start of
+  a block and fails the deploy with "Incomplete statement" (FG015, section 6).
+- Dropping a column property (`ALTER COLUMN c DROP NOT NULL`, `ALTER COLUMN c DROP DEFAULT`) loses no data, and
+  FG006 does not flag it. A column drop is flagged with or without the `COLUMN` keyword, quoted names included.
 - A statement that cannot be repeated, such as `ALTER TABLE ... RENAME COLUMN`, goes alone in its own V script.
 - **`CREATE OR ALTER TABLE`** is allowed in a V script only, and only with the complete column list:
-  - any column that is not listed is dropped, and its data can be recovered only through Time Travel;
+  - any column that is not listed is dropped, and its data can be recovered only through Time Travel; FG006 warns
+    about every `CREATE OR ALTER TABLE` in a V script as a reminder;
   - on a very wide table the statement can be partially applied, so follow it with a `DESCRIBE` check in the PR
     description;
-  - never use it in a repeatable (**review**: the guard cannot tell).
+  - never use it in a repeatable: FG012 fails it there, because every edit of the file would re-run it on every
+    runway, PRD included.
 
 ```sql
 CREATE OR ALTER TABLE SALES.ORDER_STATUS_CODES (
@@ -210,7 +239,8 @@ CREATE OR ALTER TABLE SALES.ORDER_STATUS_CODES (
 ```
 
 - To delete a table or column on purpose, write a V script with a waiver, a ticket and a reason. Put the waived
-  statement alone in its own file, because a waiver covers the whole file:
+  statement alone in its own file, because a waiver covers the whole file. Code review lists the drop as a warning
+  (SQLFluff RG01 / RG14), which needs no override (section 8):
 
 ```sql
 -- FLYWAY-WAIVER: FG006 EDW-1250 LEGACY_FLAG unused since 2025, approved by the data owner
@@ -222,9 +252,16 @@ ALTER TABLE SALES.ORDERS DROP COLUMN IF EXISTS LEGACY_FLAG;
 
 ### 5.3 Data fixes and reference data (V scripts)
 
-Flyway runs each migration inside a transaction, and Snowflake rolls back a DML-only script that fails. Any DDL in the
-same script commits that transaction, so never mix DDL and DML in one data fix. Write every fix so that running it
-twice changes nothing.
+On Snowflake, Flyway runs every migration in **autocommit**: the Snowflake database type hands Flyway a plain,
+non-transactional execution template (SHORTCOMINGS S02), and `executeInTransaction` changes nothing. Each statement
+commits on its own, DML included, so a fix that fails at statement N leaves statements 1 to N-1 applied. Therefore:
+
+- Write every fix so that running it twice changes nothing. After a failure, the corrected deploy re-runs the whole
+  script (RUNBOOKS R1), and it must converge.
+- DML that must succeed or fail as a whole is **one statement** (one `MERGE`), or an explicit transaction written as
+  one-line `BEGIN TRANSACTION;` ... `COMMIT;` (section 6) with no DDL inside: DDL commits the open transaction.
+  Verify the failure behaviour of such a transaction on DEV first.
+- Keep DDL and DML in separate V scripts: one logical change per file.
 
 ```sql
 -- Correct: MERGE converges no matter how many times it runs.

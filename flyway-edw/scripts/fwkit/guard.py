@@ -38,12 +38,13 @@ RULES: dict[str, str] = {
     "FG012": "non-idempotent statement in a repeatable migration",
     "FG013": "repeatable ordering: dependency sorts after its dependant",
     "FG014": "task change without the tasks_enabled gate and a resume",
-    "FG015": "Flyway Snowflake parser hazard (bare DECLARE/BEGIN block, unbalanced $$)",
+    "FG015": "Flyway Snowflake parser hazard (bare DECLARE/BEGIN block, unclosed IF block, unbalanced $$)",
     "FG016": "pipe COPY INTO target is qualified (a cloned pipe would load the source table)",
     "FG017": "secret material in a kit file",
     "FG018": "flyway.toml safety settings",
     "FG019": "runways.toml consistency",
     "FG020": "script configuration (.sql.conf) keys and values",
+    "FG021": "unfinished scaffold marker (<JIRA-KEY>, <TABLE>, ...) left in a migration",
 }
 
 V_RE = re.compile(
@@ -76,6 +77,12 @@ SECRET_PATTERNS = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"(?i)\bPASSWORD\s*=\s*'[^'\s][^']*'"),
 )
+# Config formats only (not prose, Groovy or SQL comments): key = value / key: value assignments of a password,
+# passphrase or key material, unless the value is a resolver / variable (${...}, $VAR) or a placeholder (<...>).
+CONFIG_SECRET_PATTERN = re.compile(
+    r"(?im)^[ \t]*[\"']?[A-Za-z0-9_.-]*(?:password|passphrase|private_key(?:_file)?_pwd|private_key_base64|privatekey)"
+    r"[\"']?[ \t]*[:=][ \t]*[\"']?(?![\"'$<{]|(?:NULL|TRUE|FALSE|NONE)\b)[^\s\"'#,}]+")
+CONFIG_SUFFIXES = {".toml", ".conf", ".json", ".yaml", ".yml", ".cfg", ".properties"}
 SECRET_SCAN_SUFFIXES = {".sql", ".toml", ".conf", ".json", ".yaml", ".yml", ".sh", ".groovy", ".cfg", ".properties"}
 FLYWAY_HISTORY_DESCRIPTION_MAX = 200  # "description" VARCHAR(200) in the Snowflake history table
 FLYWAY_HISTORY_SCRIPT_MAX = 1000  # "script" VARCHAR(1000)
@@ -102,7 +109,59 @@ BODY_KINDS = re.compile(
     r"SEMANTIC\s+VIEW)\b",
     re.IGNORECASE,
 )
-EDW_DB_RE = re.compile(r"\bALFA_EDW_[A-Z0-9_]+", re.IGNORECASE)
+EDW_DB_RE = re.compile(r"\bALFA_EDW_(?:[A-Z0-9_]+|\$\{[^}]*\})", re.IGNORECASE)
+MODIFY_BODY = re.compile(r"^ALTER (?:TASK|ALERT)\b.*\bMODIFY (?:AS|WHEN|CONDITION|ACTION)\b")
+# Flyway's documented built-in placeholders (Flyway Placeholders Namespace); any other flyway: name fails to resolve.
+FLYWAY_BUILTINS = {"flyway:defaultschema", "flyway:user", "flyway:database", "flyway:timestamp", "flyway:filename",
+                   "flyway:workingdirectory", "flyway:table", "flyway:environment"}
+# Markers `fw.py new` writes for the author to replace (scaffold.py HEADER / TEMPLATES).
+SCAFFOLD_MARKER = re.compile(r"<(?:JIRA-KEY|name|one or two lines[^>\n]*|TABLE(?:_NAME)?|column_list|PROCEDURE|STAGE|"
+                             r"FILE_FORMAT|condition|what [^>\n]*)>")
+# SnowflakeParser.CONDITIONALLY_CREATABLE_OBJECTS (Flyway 13.10): an IF after one of these does not open a block.
+_FLYWAY_CCO = {"AGENT", "COLUMN", "COMMENT", "CONNECTION", "CONSTRAINT", "DATABASE", "FORMAT", "FUNCTION", "GROUP",
+               "INDEX", "INTEGRATION", "MONITOR", "PIPE", "POLICY", "PROCEDURE", "ROLE", "SCHEMA", "SEQUENCE", "STAGE",
+               "STREAM", "STREAMLIT", "TABLE", "TAG", "TASK", "USER", "VIEW", "WAREHOUSE"}
+_FLYWAY_TOKEN = re.compile(r'"(?:[^"]|"")*"|\$\{[^}]*\}|[A-Za-z_][A-Za-z0-9_$]*(?:\.(?:"(?:[^"]|"")*"|'
+                           r'[A-Za-z_][A-Za-z0-9_$]*|\$\{[^}]*\}))*|\(|\)|;|\S')
+
+
+def _flyway_unclosed_blocks(masked: str) -> list[tuple[str, int]]:
+    """Emulate SnowflakeParser.adjustBlockDepth (Flyway 13.10) over a comment/string-blanked script.
+
+    A keyword is a word of letters/underscores only (a dotted name or a word with digits is an identifier); only
+    keywords outside parentheses change the block depth. BEGIN (unless BEGIN TRANSACTION/WORK/NAME or BEGIN;) opens a
+    block; IF, FOR and CASE open one when the previous keyword exists and is not END or CURSOR, and for IF not a
+    creatable object type; END closes one; EACH/SQLEXCEPTION after FOR closes one. Flyway does not end a statement
+    at ';' while a block is open, so a block still open at the end of the file is an 'Incomplete statement'."""
+    stack: list[tuple[str, int]] = []
+    paren = 0
+    prev: str | None = None
+    for m in _FLYWAY_TOKEN.finditer(masked):
+        t = m.group(0)
+        if t == "(":
+            paren += 1
+            continue
+        if t == ")":
+            paren = max(0, paren - 1)
+            continue
+        if t == ";":
+            if paren == 0 and not stack:
+                prev = None  # Flyway ends the statement here and starts a new token list
+            continue
+        if not re.fullmatch(r"[A-Za-z_]+", t):
+            continue
+        kw = t.upper()
+        if paren == 0:
+            if kw == "BEGIN":
+                if not re.match(r"(?i) (?:TRANSACTION|WORK|NAME)\b|;", masked[m.end():m.end() + 13]):
+                    stack.append((kw, m.start()))
+            elif kw in ("IF", "FOR", "CASE") and prev is not None and prev not in ("END", "CURSOR") \
+                    and not (kw == "IF" and prev in _FLYWAY_CCO):
+                stack.append((kw, m.start()))
+            elif stack and (kw == "END" or (kw in ("EACH", "SQLEXCEPTION") and prev == "FOR")):
+                stack.pop()
+        prev = kw
+    return stack
 
 
 @dataclass(frozen=True)
@@ -183,9 +242,10 @@ class Guard:
             for path in sorted(p for p in base.rglob("*") if p.is_file()):
                 rel = path.relative_to(self.root).as_posix()
                 if path.suffix == ".sql":
-                    text = path.read_text(encoding="utf-8")
+                    # utf-8-sig: Flyway strips a byte-order mark (BomStrippingReader); so must the scanner
+                    text = path.read_text(encoding="utf-8-sig")
                     conf_path = path.with_name(path.name + ".conf")
-                    conf = _parse_conf(conf_path.read_text(encoding="utf-8")) if conf_path.exists() else {}
+                    conf = _parse_conf(conf_path.read_text(encoding="utf-8-sig")) if conf_path.exists() else {}
                     pr = conf.get("placeholderReplacement", "true").lower()
                     waivers = set()
                     for m in WAIVER_RE.finditer(text):
@@ -217,6 +277,7 @@ class Guard:
             self._parser_hazards(f)
             if f.area == "callbacks":
                 continue
+            self._scaffold_markers(f)
             self._statements(f)
         self._repeatable_order()
         self._secrets()
@@ -312,7 +373,10 @@ class Guard:
             raise GuardUsageError(f"cannot resolve git base {self.base!r}: {exc}") from exc
         prefix = self.root.relative_to(top).as_posix()
         prefix = "" if prefix == "." else prefix + "/"
-        listing = self._git("ls-tree", "-r", "--name-only", self.base, "--", f"{prefix}migrations")
+        # run from the repository top: a pathspec given with -C <kit dir> would be resolved against the kit folder
+        listing = subprocess.run(["git", "-C", str(top), "ls-tree", "-r", "--name-only", self.base, "--",
+                                  f"{prefix}migrations"], check=True, capture_output=True).stdout.decode("utf-8",
+                                                                                                         "replace")
         base_max: tuple[int, ...] = ()
         for repo_path in filter(None, listing.splitlines()):
             rel = repo_path[len(prefix):]
@@ -353,21 +417,37 @@ class Guard:
 
     # ------------------------------------------------------------------ FG005
     def _placeholders(self, f: SqlFile) -> None:
+        """Flyway replaces ${...} everywhere in the file, comments included (PlaceholderReplacingReader wraps the whole
+        reader), matches names case-insensitively but does not trim them, and accepts only its documented flyway:
+        built-ins. So the raw text is scanned, not the comment-blanked code."""
         if not f.placeholder_replacement:
             return
         declared = self.kit.declared_placeholders()
-        for m in PLACEHOLDER_RE.finditer(f.script.code):
-            name = m.group(1).strip().lower()
+        for m in PLACEHOLDER_RE.finditer(f.text):
+            raw = m.group(1)
+            name = raw.lower()
+            line = f.line_of(m.start())
+            if raw != raw.strip() or not raw:
+                self.add("FG005", "error", f.rel, line,
+                         f"placeholder ${{{raw}}}: Flyway does not trim names, so it would fail to resolve", f=f)
+                continue
             if f.area == "repeatable" and name in PER_DEPLOY_PLACEHOLDERS:
-                self.add("FG005", "error", f.rel, f.line_of(m.start()),
-                         f"${{{m.group(1)}}} changes on every deploy, and a repeatable's checksum is taken AFTER "
-                         "placeholder replacement: this file would re-run on every deploy", f=f)
+                self.add("FG005", "error", f.rel, line,
+                         f"${{{raw}}} changes on every deploy, and a repeatable's checksum is taken AFTER placeholder "
+                         "replacement (comments included): this file would re-run on every deploy", f=f)
                 continue
-            if name.startswith("flyway:") or name in declared:
+            if name.startswith("flyway:"):
+                if name not in FLYWAY_BUILTINS:
+                    self.add("FG005", "error", f.rel, line,
+                             f"${{{raw}}} is not a Flyway built-in placeholder ({', '.join(sorted(FLYWAY_BUILTINS))})",
+                             f=f)
                 continue
-            self.add("FG005", "error", f.rel, f.line_of(m.start()),
-                     f"placeholder ${{{m.group(1)}}} is not defined for every environment in flyway.toml "
-                     "(a JavaScript template literal? set placeholderReplacement=false in <file>.sql.conf)", f=f)
+            if name in declared:
+                continue
+            self.add("FG005", "error", f.rel, line,
+                     f"placeholder ${{{raw}}} is not defined for every environment in flyway.toml (in a comment too: "
+                     "Flyway replaces those; a JavaScript template literal? set placeholderReplacement=false in "
+                     "<file>.sql.conf)", f=f)
 
     # ------------------------------------------------------------------ FG015
     def _parser_hazards(self, f: SqlFile) -> None:
@@ -385,70 +465,116 @@ class Guard:
                     self.add("FG015", "error", f.rel, st.line,
                              "bare BEGIN block (Flyway's Snowflake parser only exempts 'BEGIN TRANSACTION' with one "
                              "space): wrap it as EXECUTE IMMEDIATE $$ ... $$;", f=f)
+            if re.match(r"^CREATE\b.*?\b(?:PROCEDURE|FUNCTION)\b", head) and re.search(r"\bLANGUAGE SQL\b", head) \
+                    and not st.bodies and not re.search(r"\bAS\s*'", st.code, re.IGNORECASE):
+                self.add("FG015", "error", f.rel, st.line,
+                         "a LANGUAGE SQL body must be a $$ ... $$ (or '...') literal: Flyway's parser and every client "
+                         "split an unquoted Snowflake Scripting body differently", f=f)
+        for kw, offset in _flyway_unclosed_blocks(f.script.masked):
+            self.add("FG015", "error", f.rel, f.line_of(offset),
+                     f"Flyway's Snowflake parser opens a block at this {kw} and never closes it, so it reports "
+                     "'Incomplete statement' (an IF after a word that is not a creatable object type, e.g. CREATE "
+                     "ALERT ... IF (...), ALTER TABLE ... ADD IF NOT EXISTS, ALTER/DROP ALERT IF EXISTS, CREATE SECRET "
+                     "IF NOT EXISTS): write ADD/DROP COLUMN IF ..., or wrap the statement in EXECUTE IMMEDIATE $$ ... $$",
+                     f=f)
 
     # ------------------------------------------------------------------ statement rules
+    def _dangerous(self, f: SqlFile, head: str, line: int, *, inner: bool) -> None:
+        """FG006 / FG007 / FG008 on one statement head (top level, or inside an EXECUTE IMMEDIATE block/string)."""
+        where = " (inside EXECUTE IMMEDIATE)" if inner else ""
+        # non-destructive column-property drops are not data loss
+        h2 = re.sub(r"\b(?:ALTER|MODIFY)(?: COLUMN)? (?:\"[^\"]*\"|\S+) (?:SET NOT NULL|DROP NOT NULL|DROP DEFAULT)\b",
+                    "", head)
+        if re.match(r"^DROP DATABASE\b|^CREATE OR REPLACE (?:TRANSIENT )?(?:DATABASE|SCHEMA)\b", head):
+            self.add("FG006", "error", f.rel, line,
+                     "DROP DATABASE / CREATE OR REPLACE DATABASE|SCHEMA is never allowed in a migration" + where,
+                     f=f, waivable=False)
+        elif re.match(r"^DROP SCHEMA\b", head):
+            self.add("FG006", "error", f.rel, line, "DROP SCHEMA destroys every object in it" + where, f=f)
+        elif re.match(r"^DROP (?:TRANSIENT |HYBRID |ICEBERG |EXTERNAL )?TABLE\b", head):
+            self.add("FG006", "error", f.rel, line, "DROP TABLE loses data (waive with a ticket if intended)" + where,
+                     f=f)
+        elif re.match(r"^TRUNCATE\b", head):
+            self.add("FG006", "error", f.rel, line, "TRUNCATE loses data" + where, f=f)
+        elif re.match(r"^CREATE OR REPLACE (?:TRANSIENT |HYBRID |ICEBERG )?TABLE\b", head):
+            self.add("FG006", "error", f.rel, line,
+                     "CREATE OR REPLACE TABLE drops the data, its Time Travel history and staleness-breaks streams; "
+                     "use ALTER TABLE (or CREATE TABLE IF NOT EXISTS for new tables)" + where, f=f)
+        elif re.match(r"^ALTER TABLE (?:IF EXISTS )?\S+ (?:.*\s)?DROP (?:COLUMN\b|(?:IF EXISTS )?(?:\"|(?!(?:"
+                      r"CONSTRAINT|PRIMARY KEY|UNIQUE|FOREIGN KEY|CLUSTERING KEY|ROW ACCESS POLICY|SEARCH "
+                      r"OPTIMIZATION|ALL ROW ACCESS POLICIES|AGGREGATION POLICY|JOIN POLICY|MASKING POLICY|PROJECTION "
+                      r"POLICY|TAG|STORAGE LIFECYCLE POLICY|CONTACT|DATA METRIC FUNCTION)\b)\w))", h2):
+            self.add("FG006", "error", f.rel, line, "ALTER TABLE ... DROP COLUMN loses data" + where, f=f)
+        elif re.match(r"^DELETE FROM \S+\s*$", head):
+            self.add("FG006", "error", f.rel, line, "DELETE without WHERE empties the table" + where, f=f)
+        elif re.match(r"^CREATE OR ALTER (?:TRANSIENT |HYBRID |ICEBERG )?TABLE\b", head) and f.area == "migrations":
+            self.add("FG006", "warning", f.rel, line,
+                     "CREATE OR ALTER TABLE drops every column the statement does not list (and is not atomic on "
+                     "wide tables); prefer ALTER TABLE ... ADD COLUMN IF NOT EXISTS" + where, f=f)
+        if re.match(r"^(?:CREATE|ALTER|DROP)(?: OR REPLACE| OR ALTER)? (?:WAREHOUSE|ROLE|USER|DATABASE(?! ROLE)|"
+                    r"(?:API |STORAGE |NOTIFICATION |SECURITY |EXTERNAL ACCESS |CATALOG )?INTEGRATION|"
+                    r"NETWORK POLICY|NETWORK RULE|RESOURCE MONITOR|SHARE|AUTHENTICATION POLICY|PASSWORD POLICY|"
+                    r"SESSION POLICY|FAILOVER GROUP|REPLICATION GROUP|CONNECTION|COMPUTE POOL|ACCOUNT)\b", head) \
+                or re.match(r"^ALTER ACCOUNT\b", head) \
+                or re.match(r"^(?:GRANT|REVOKE)\b.*\bON (?:ACCOUNT|DATABASE|WAREHOUSE|INTEGRATION|USER)\b", head) \
+                or re.match(r"^GRANT ROLE \S+ TO USER\b", head) \
+                or re.match(r"^GRANT OWNERSHIP\b", head):
+            self.add("FG007", "error", f.rel, line,
+                     "account-level object or grant: belongs in bootstrap/ (run by a Snowflake admin), not in a "
+                     "migration that every runway replays" + where, f=f)
+        if re.match(r"^USE WAREHOUSE\b", head):
+            self.add("FG008", "error", f.rel, line,
+                     "USE WAREHOUSE persists for the rest of the Flyway run (waive for a heavy backfill)" + where, f=f)
+        elif re.match(r"^ALTER SESSION\b", head):
+            self.add("FG008", "error", f.rel, line,
+                     "ALTER SESSION persists for every later migration in the same Flyway run (Flyway resets only "
+                     "ROLE and SCHEMA); waive it only with a matching ALTER SESSION UNSET at the end" + where, f=f)
+        elif re.match(r"^USE\b", head):
+            self.add("FG008", "error", f.rel, line,
+                     "USE DATABASE/SCHEMA/ROLE: Flyway resets ROLE and SCHEMA before each migration but never the "
+                     "DATABASE, so this leaks into later migrations; schema-qualify instead" + where,
+                     f=f, waivable=False)
+
+    def _execute_immediate(self, f: SqlFile, st: sqlscan.Statement) -> None:
+        """EXECUTE IMMEDIATE runs NOW, at migrate time: check the SQL inside its $$ block or '...' string too."""
+        chunks: list[tuple[str, int]] = [(b.text, b.offset) for b in st.bodies]
+        if not chunks:
+            m = re.match(r"EXECUTE\s+IMMEDIATE\s+'((?:[^'\\]|\\.|'')*)'", st.code, re.IGNORECASE | re.DOTALL)
+            if m:
+                chunks.append((m.group(1).replace("''", "'"), st.offset + m.start(1)))
+        for text, base in chunks:
+            for inner in sqlscan.scan(text).statements:
+                h = inner.head
+                # control flow before the statement: IF (...) THEN DELETE ..., BEGIN DROP ..., LOOP ..., etc.
+                heads = [h] + [h[m.end():] for m in re.finditer(r"\b(?:THEN|ELSE|DO|BEGIN|LOOP|REPEAT)\s+", h)]
+                for cand in heads:
+                    if cand:
+                        self._dangerous(f, cand, f.line_of(base + inner.offset), inner=True)
+
     def _statements(self, f: SqlFile) -> None:
         file_code = f.script.code
         is_rep = f.area == "repeatable"
         touches_task = False
+        for m in re.finditer(r"\$\{\s*home_db\s*\}", f.text, re.IGNORECASE):
+            self.add("FG009", "error", f.rel, f.line_of(m.start()),
+                     "${home_db} is the LIVE target database during a rehearsal (RH_MGM / RH_PRD): anything it "
+                     "qualifies would change MGM/PRD before approval. Only callbacks may use it.", f=f, waivable=False)
         for st in f.script.statements:
             head = st.head
             line = st.line
-            # FG006 destructive DDL
-            if re.match(r"^DROP DATABASE\b|^CREATE OR REPLACE (?:TRANSIENT )?(?:DATABASE|SCHEMA)\b", head):
-                self.add("FG006", "error", f.rel, line,
-                         "DROP DATABASE / CREATE OR REPLACE DATABASE|SCHEMA is never allowed in a migration",
-                         f=f, waivable=False)
-            elif re.match(r"^DROP SCHEMA\b", head):
-                self.add("FG006", "error", f.rel, line, "DROP SCHEMA destroys every object in it", f=f)
-            elif re.match(r"^DROP (?:TRANSIENT |HYBRID |ICEBERG |EXTERNAL )?TABLE\b", head):
-                self.add("FG006", "error", f.rel, line, "DROP TABLE loses data (waive with a ticket if intended)", f=f)
-            elif re.match(r"^TRUNCATE\b", head):
-                self.add("FG006", "error", f.rel, line, "TRUNCATE loses data", f=f)
-            elif re.match(r"^CREATE OR REPLACE (?:TRANSIENT |HYBRID |ICEBERG )?TABLE\b", head):
-                self.add("FG006", "error", f.rel, line,
-                         "CREATE OR REPLACE TABLE drops the data, its Time Travel history and staleness-breaks "
-                         "streams; use ALTER TABLE (or CREATE TABLE IF NOT EXISTS for new tables)", f=f)
-            elif re.match(r"^ALTER TABLE (?:IF EXISTS )?\S+ (?:.*\s)?DROP (?:COLUMN\b|(?!CONSTRAINT|PRIMARY|UNIQUE|"
-                          r"FOREIGN|CLUSTERING|ROW|SEARCH|ALL|AGGREGATION|JOIN|MASKING|PROJECTION|TAG|STORAGE|"
-                          r"CONTACT|DATA METRIC)\w)", head):
-                self.add("FG006", "error", f.rel, line, "ALTER TABLE ... DROP COLUMN loses data", f=f)
-            elif re.match(r"^DELETE FROM \S+\s*$", head):
-                self.add("FG006", "error", f.rel, line, "DELETE without WHERE empties the table", f=f)
-            # FG007 account-level
-            if re.match(r"^(?:CREATE|ALTER|DROP)(?: OR REPLACE| OR ALTER)? (?:WAREHOUSE|ROLE|USER|DATABASE(?! ROLE)|"
-                        r"(?:API |STORAGE |NOTIFICATION |SECURITY |EXTERNAL ACCESS |CATALOG )?INTEGRATION|"
-                        r"NETWORK POLICY|NETWORK RULE|RESOURCE MONITOR|SHARE|AUTHENTICATION POLICY|PASSWORD POLICY|"
-                        r"SESSION POLICY|FAILOVER GROUP|REPLICATION GROUP|CONNECTION|COMPUTE POOL|ACCOUNT)\b", head) \
-                    or re.match(r"^ALTER ACCOUNT\b", head) \
-                    or re.match(r"^(?:GRANT|REVOKE)\b.*\bON (?:ACCOUNT|DATABASE|WAREHOUSE|INTEGRATION|USER)\b", head) \
-                    or re.match(r"^GRANT ROLE \S+ TO USER\b", head) \
-                    or re.match(r"^GRANT OWNERSHIP\b", head):
-                self.add("FG007", "error", f.rel, line,
-                         "account-level object or grant: belongs in bootstrap/ (run by a Snowflake admin), "
-                         "not in a migration that every runway replays", f=f)
-            # FG008 USE
-            if re.match(r"^USE WAREHOUSE\b", head):
-                self.add("FG008", "error", f.rel, line,
-                         "USE WAREHOUSE persists for the rest of the Flyway run (waive for a heavy backfill)", f=f)
-            elif re.match(r"^ALTER SESSION\b", head):
-                self.add("FG008", "error", f.rel, line,
-                         "ALTER SESSION persists for every later migration in the same Flyway run (Flyway resets only "
-                         "ROLE and SCHEMA); waive it only with a matching ALTER SESSION UNSET at the end", f=f)
-            elif re.match(r"^USE\b", head):
-                self.add("FG008", "error", f.rel, line,
-                         "USE DATABASE/SCHEMA/ROLE: Flyway resets ROLE and SCHEMA before each migration but never the "
-                         "DATABASE, so this leaks into later migrations; schema-qualify instead", f=f, waivable=False)
+            self._dangerous(f, head, line, inner=False)
+            if re.match(r"^EXECUTE IMMEDIATE\b", head):
+                self._execute_immediate(f, st)
             # FG009 hard-coded environment database / ${edw_db} in bodies
             for m in EDW_DB_RE.finditer(st.code):
                 self.add("FG009", "error", f.rel, f.line_of(st.offset + m.start()),
                          f"hard-coded {m.group(0)}: code must not name its database (clone safety, one artifact "
                          "for every runway); use SCHEMA.OBJECT, or a placeholder for another database", f=f)
-            if BODY_KINDS.match(head):
+            if BODY_KINDS.match(head) or MODIFY_BODY.match(head):
                 # offsets must be taken on `masked` (same length as `code`), not on the collapsed `head`
                 tm = TARGET_RE.match(st.masked)
-                cut = tm.end("name") if tm else 0
-                for m in re.finditer(r"\$\{\s*(?:edw_db|home_db|flyway:database)\s*\}", st.code, re.IGNORECASE):
+                cut = tm.end("name") if tm and BODY_KINDS.match(head) else 0
+                for m in re.finditer(r"\$\{\s*(?:edw_db|flyway:database)\s*\}", st.code, re.IGNORECASE):
                     if m.start() >= cut:
                         self.add("FG009", "error", f.rel, f.line_of(st.offset + m.start()),
                                  "${edw_db} inside an object body becomes a literal database name: a clone of this "
@@ -463,21 +589,29 @@ class Guard:
                     self.add("FG010", "error", f.rel, line,
                              f"{kind.upper()} {name} is not schema-qualified: Flyway runs USE SCHEMA FLYWAY before "
                              "every migration, so it would land in FLYWAY", f=f)
-            # FG011 COPY GRANTS
-            if re.match(r"^CREATE OR REPLACE (?:SECURE )?(?:RECURSIVE )?(?:MATERIALIZED VIEW|VIEW|FUNCTION|"
-                        r"AGGREGATE FUNCTION|PROCEDURE|DYNAMIC TABLE|STREAM)\b", head) \
-                    and not re.search(r"\bCOPY GRANTS\b", head):
+            # FG011 COPY GRANTS / managed access
+            if re.match(r"^CREATE OR REPLACE (?:SECURE )?(?:RECURSIVE )?(?:TRANSIENT )?(?:MATERIALIZED VIEW|SEMANTIC "
+                        r"VIEW|VIEW|EXTERNAL FUNCTION|AGGREGATE FUNCTION|FUNCTION|PROCEDURE|DYNAMIC TABLE|STREAM)\b",
+                        head) and not re.search(r"\bCOPY GRANTS\b", head):
                 self.add("FG011", "error", f.rel, line,
                          "CREATE OR REPLACE without COPY GRANTS drops every explicit grant on the object "
                          "(add COPY GRANTS, or use CREATE OR ALTER)", f=f)
+            if re.match(r"^CREATE (?:OR ALTER |TRANSIENT )?SCHEMA\b", head) and "MANAGED ACCESS" not in head:
+                self.add("FG011", "warning", f.rel, line,
+                         "schema without WITH MANAGED ACCESS: the deployer (schema owner) can define the layer-90 "
+                         "FUTURE grants only in a managed access schema (docs/CONVENTIONS.md, grants)", f=f)
             # FG012 repeatable idempotency
             if is_rep:
+                if re.match(r"^CREATE OR ALTER (?:TRANSIENT |HYBRID |ICEBERG )?TABLE\b", head):
+                    self.add("FG012", "error", f.rel, line,
+                             "CREATE OR ALTER TABLE drops every column it does not list, on every runway, each time "
+                             "this file changes: tables belong in V migrations", f=f)
                 ok = (
                     re.match(r"^CREATE OR (?:REPLACE|ALTER)\b", head)
                     or re.match(r"^CREATE\b.*?\bIF NOT EXISTS\b", head)
                     or re.match(r"^(?:GRANT|REVOKE|COMMENT|EXECUTE IMMEDIATE|SELECT|SHOW|DESC|DESCRIBE)\b", head)
                     or re.match(r"^ALTER (?:TASK|ALERT|PIPE|DYNAMIC TABLE)\b.*\b(?:SUSPEND|RESUME|SET|UNSET|"
-                                r"REFRESH)\b", head)
+                                r"REFRESH|MODIFY)\b", head)
                     or re.match(r"^ALTER (?:VIEW|FUNCTION|PROCEDURE|STREAM|MATERIALIZED VIEW) .*\b(?:SET|UNSET)\b",
                                 head)
                 )
@@ -504,6 +638,13 @@ class Guard:
                          "a created/modified task is left SUSPENDED: resume it with SYSTEM$TASK_DEPENDENTS_ENABLE "
                          "gated on '${tasks_enabled}' = 'true' (see docs/CONVENTIONS.md, Tasks)", f=f)
 
+    # ------------------------------------------------------------------ FG021
+    def _scaffold_markers(self, f: SqlFile) -> None:
+        for m in SCAFFOLD_MARKER.finditer(f.text):
+            self.add("FG021", "error", f.rel, f.line_of(m.start()),
+                     f"unfinished scaffold marker {m.group(0)}: fill it in (ticket, author, why, object names)",
+                     f=f, waivable=False)
+
     # ------------------------------------------------------------------ FG013
     def _repeatable_order(self) -> None:
         reps = [f for f in self.files if f.area == "repeatable" and R_RE.match(Path(f.rel).name)]
@@ -524,7 +665,7 @@ class Guard:
                 if g is f or name in own or "." not in name:
                     continue
                 schema, obj = name.split(".", 1)
-                pat = re.compile(rf'(?<![\w$."]){re.escape(schema)}\s*\.\s*"?{re.escape(obj)}"?(?![\w$])',
+                pat = re.compile(rf'(?<![\w$.])"?{re.escape(schema)}"?\s*\.\s*"?{re.escape(obj)}"?(?![\w$])',
                                  re.IGNORECASE)
                 m = pat.search(text)
                 if m and theirs > mine:
@@ -545,7 +686,8 @@ class Guard:
             except UnicodeDecodeError:
                 continue
             rel = path.relative_to(self.root).as_posix()
-            for pat in SECRET_PATTERNS:
+            pats = [*SECRET_PATTERNS, CONFIG_SECRET_PATTERN] if path.suffix in CONFIG_SUFFIXES else SECRET_PATTERNS
+            for pat in pats:
                 for m in pat.finditer(text):
                     self.add("FG017", "error", rel, text.count("\n", 0, m.start()) + 1,
                              "secret material in a repository file: use Jenkins credentials / ${env.*} resolvers")
@@ -555,7 +697,7 @@ class Guard:
         sql = path.with_name(path.name[: -len(".conf")])
         if not sql.exists():
             self.add("FG001", "error", rel, 1, f"script configuration without its script {sql.name}")
-        conf = _parse_conf(path.read_text(encoding="utf-8"))
+        conf = _parse_conf(path.read_text(encoding="utf-8-sig"))
         for key, val in conf.items():
             if key not in CONF_KEYS:
                 hint = next((k for k in CONF_KEYS if k.lower() == key.lower()), None)

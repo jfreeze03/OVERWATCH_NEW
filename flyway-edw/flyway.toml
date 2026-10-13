@@ -24,14 +24,15 @@
 # * outOfOrder=true everywhere: versions are timestamps written on many branches; merge order != author order.
 #   MGM rehearses exactly what PRD will receive, and the deploy job prints any out-of-order item for the approver.
 # * ignoreMigrationPatterns: test runways carry other projects' unmerged migrations (*:missing) and newer main
-#   builds (*:future); MGM/PRD only tolerate *:future (a newer build already deployed).
+#   builds (*:future); MGM/PRD tolerate *:future (a newer build already deployed) and repeatable:missing (a
+#   repeatable renamed to a new layer number or retired); a missing VERSIONED migration stays an error there.
+# * schemas sits in each environment (an EnvironmentModel field): Flyway 13 rejects it under [flyway].
 # * Placeholders are per environment (each environment's table replaces the root one; see [flyway] below): VERSIONED checksums ignore them (raw file), REPEATABLE checksums include
 #   them (changing a value re-runs that repeatable in that environment only).
 
 [flyway]
 locations = ["filesystem:migrations", "filesystem:repeatable", "filesystem:callbacks"]
 defaultSchema = "FLYWAY"
-schemas = ["FLYWAY"]
 createSchemas = false
 cleanDisabled = true
 validateOnMigrate = true
@@ -60,6 +61,7 @@ rulesDialect = "snowflake"
 # ---------------------------------------------------------------- DEV  (ALFA_EDW_DEV, nonprod)
 [environments.DEV]
 url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_DEV&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+schemas = ["FLYWAY"]
 user = "${env.FLYWAY_SF_USER}"
 jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
 
@@ -84,6 +86,7 @@ approver = "manual"
 # ---------------------------------------------------------------- SAN  (ALFA_EDW_SAN, nonprod)
 [environments.SAN]
 url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_SAN&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+schemas = ["FLYWAY"]
 user = "${env.FLYWAY_SF_USER}"
 jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
 
@@ -108,6 +111,7 @@ approver = "manual"
 # ---------------------------------------------------------------- SEA  (ALFA_EDW_SEA, nonprod)
 [environments.SEA]
 url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_SEA&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+schemas = ["FLYWAY"]
 user = "${env.FLYWAY_SF_USER}"
 jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
 
@@ -132,6 +136,7 @@ approver = "manual"
 # ---------------------------------------------------------------- PHX  (ALFA_EDW_PHX, nonprod)
 [environments.PHX]
 url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_PHX&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+schemas = ["FLYWAY"]
 user = "${env.FLYWAY_SF_USER}"
 jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
 
@@ -156,13 +161,14 @@ approver = "manual"
 # ---------------------------------------------------------------- MGM  (ALFA_EDW_MGM, prod)
 [environments.MGM]
 url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_MGM&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+schemas = ["FLYWAY"]
 user = "${env.FLYWAY_SF_USER}"
 jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
 
 [environments.MGM.flyway]
 outOfOrder = true
 cleanDisabled = true
-ignoreMigrationPatterns = ["*:future"]
+ignoreMigrationPatterns = ["*:future", "repeatable:missing"]
 
 [environments.MGM.flyway.placeholders]
 env = "MGM"
@@ -180,13 +186,14 @@ approver = "manual"
 # ---------------------------------------------------------------- PRD  (ALFA_EDW_PRD, prod)
 [environments.PRD]
 url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=ALFA_EDW_PRD&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+schemas = ["FLYWAY"]
 user = "${env.FLYWAY_SF_USER}"
 jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
 
 [environments.PRD.flyway]
 outOfOrder = true
 cleanDisabled = true
-ignoreMigrationPatterns = ["*:future"]
+ignoreMigrationPatterns = ["*:future", "repeatable:missing"]
 
 [environments.PRD.flyway.placeholders]
 env = "PRD"
@@ -206,13 +213,14 @@ approver = "manual"
 # Use the ${env} placeholder -- not ${flyway:environment} -- in shouldExecute so rehearsals behave like MGM.
 [environments.RH_MGM]
 url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=${env.FLYWAY_RH_DB}&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+schemas = ["FLYWAY"]
 user = "${env.FLYWAY_SF_USER}"
 jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
 
 [environments.RH_MGM.flyway]
 outOfOrder = true
 cleanDisabled = true
-ignoreMigrationPatterns = ["*:future"]
+ignoreMigrationPatterns = ["*:future", "repeatable:missing"]
 
 [environments.RH_MGM.flyway.placeholders]
 env = "MGM"
@@ -232,13 +240,14 @@ approver = "manual"
 # Use the ${env} placeholder -- not ${flyway:environment} -- in shouldExecute so rehearsals behave like PRD.
 [environments.RH_PRD]
 url = "jdbc:snowflake://${env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=${env.FLYWAY_RH_DB}&warehouse=${env.FLYWAY_SF_WAREHOUSE}&role=${env.FLYWAY_SF_ROLE}&JDBC_QUERY_RESULT_FORMAT=JSON"
+schemas = ["FLYWAY"]
 user = "${env.FLYWAY_SF_USER}"
 jdbcProperties = { authenticator = "snowflake_jwt", private_key_file = "${env.FLYWAY_SF_KEY_FILE}", private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}" }
 
 [environments.RH_PRD.flyway]
 outOfOrder = true
 cleanDisabled = true
-ignoreMigrationPatterns = ["*:future"]
+ignoreMigrationPatterns = ["*:future", "repeatable:missing"]
 
 [environments.RH_PRD.flyway.placeholders]
 env = "PRD"

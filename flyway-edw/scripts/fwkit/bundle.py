@@ -177,6 +177,10 @@ def verify(bundle_dir: Path, *, require_branch: str | None = None) -> dict[str, 
                [f"modified {r}" for r in changed]
     if digest_of(files) != manifest.get("digest"):
         problems.append("manifest digest does not match its own file list")
+    if not problems:
+        versioned, repeatable = _inventory(bundle_dir, actual)
+        if versioned != manifest.get("versioned") or repeatable != manifest.get("repeatable"):
+            problems.append("manifest migration inventory does not match the files (promote-check reads it)")
     if problems:
         raise BundleError("bundle verification failed: " + "; ".join(problems[:20]))
     if require_branch and manifest.get("branch") != require_branch:

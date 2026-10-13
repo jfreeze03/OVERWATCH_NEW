@@ -988,6 +988,8 @@ None open. The four gaps found while writing this catalogue were closed in the s
 `fw.py env` emits `EDW_*` keys (S14), FG020 matches `.sql.conf` keys case-sensitively (S17), FG009 flags
 `${flyway:database}` inside an object body (S20), and FG005 rejects per-deploy placeholders (`deploy_id`, `git_sha`,
 `build_url`, `approver`, `flyway:timestamp`) in repeatables, whose checksum would change on every deploy (S09).
+The review that followed added FG021: a scaffold marker left in a migration (`<JIRA-KEY>`, `<TABLE>`, ...) is an
+error, so unfinished SQL from `fw.py new` cannot reach a deploy.
 
 ## Summary
 

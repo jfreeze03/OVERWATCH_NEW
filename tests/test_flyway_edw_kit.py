@@ -77,6 +77,15 @@ def test_runway_ids_are_the_airport_codes_in_order():
         assert kit.runways[r].promote_from == ("DEV",)
 
 
+def test_prod_tier_tolerates_repeatable_rename_but_not_missing_versioned():
+    kit = manifest_mod.load_kit(KIT)
+    for env in ("MGM", "PRD", "RH_MGM", "RH_PRD"):
+        pats = kit.flyway["environments"][env]["flyway"]["ignoreMigrationPatterns"]
+        assert pats == ["*:future", "repeatable:missing"], env
+    assert "schemas" not in kit.flyway["flyway"]  # Flyway 13 rejects [flyway] schemas (an environment field)
+    assert all(e["schemas"] == ["FLYWAY"] for e in kit.flyway["environments"].values())
+
+
 def test_flyway_toml_safety_settings_are_locked():
     kit = manifest_mod.load_kit(KIT)
     fw_ = kit.flyway["flyway"]
@@ -117,6 +126,19 @@ def test_fg018_trips_on_wrong_db_and_missing_json_format(tmp_path):
     msgs = [f.message for f in _run(root) if f.rule == "FG018"]
     assert any("db=ALFA_EDW_SAN" in m for m in msgs)
     assert any("JDBC_QUERY_RESULT_FORMAT" in m for m in msgs)
+
+
+def test_fg018_environment_overrides_and_literal_jdbc_secrets(tmp_path):
+    root = _mini_kit(tmp_path)
+    t = (root / "flyway.toml").read_text()
+    t = t.replace("[environments.PRD.flyway]\n", "[environments.PRD.flyway]\nvalidateOnMigrate = false\n", 1)
+    t = t.replace('private_key_file_pwd = "${env.FLYWAY_SF_KEY_PWD}"', 'private_key_file_pwd = "hunter2-literal"', 1)
+    t = t.replace('defaultSchema = "FLYWAY"\n', 'defaultSchema = "FLYWAY"\nschemas = ["FLYWAY"]\n', 1)
+    (root / "flyway.toml").write_text(t)
+    msgs = [f.message for f in _run(root) if f.rule == "FG018"]
+    assert any("flyway.validateOnMigrate may not be overridden" in m for m in msgs)
+    assert any("private_key_file_pwd" in m for m in msgs)
+    assert any("[flyway] schemas" in m for m in msgs)
 
 
 def test_fg019_trips_on_prod_runway_without_approval(tmp_path):
@@ -239,6 +261,30 @@ def test_guard_unknown_base_is_usage_error(tmp_path):
     ("FG015", "BEGIN\n  SELECT 1;\nEND;"),
     ("FG015", "CREATE OR REPLACE PROCEDURE SALES.P() COPY GRANTS RETURNS INT LANGUAGE SQL AS $$ BEGIN RETURN 1;"),
     ("FG016", "CREATE PIPE IF NOT EXISTS SALES.P AS COPY INTO SALES.RAW FROM @SALES.S;"),
+    # review round 1: ${home_db} is the LIVE target during a rehearsal (unwaivable anywhere in a migration)
+    ("FG009", "-- FLYWAY-WAIVER: FG009 EDW-1 nope\nCREATE TABLE IF NOT EXISTS ${home_db}.SALES.AUDIT (ID INT);"),
+    ("FG009", "CREATE TABLE IF NOT EXISTS SALES.T AS SELECT * FROM ALFA_EDW_${env}.SALES.ORDERS;"),
+    ("FG009", "ALTER TASK SALES.T MODIFY AS SELECT * FROM ${edw_db}.SALES.ORDERS;"),
+    # review round 1: Flyway's SnowflakeParser opens a block at these IFs and never closes it
+    ("FG015", "CREATE OR REPLACE ALERT SALES.A WAREHOUSE = W SCHEDULE = '60 MINUTE' "
+              "IF (EXISTS (SELECT 1 FROM SALES.ORDERS)) THEN CALL SALES.P();"),
+    ("FG015", "ALTER TABLE SALES.ORDERS ADD IF NOT EXISTS C1 NUMBER;"),
+    ("FG015", "DROP ALERT IF EXISTS SALES.A;"),
+    ("FG015", "CREATE OR REPLACE PROCEDURE SALES.P() COPY GRANTS RETURNS INT LANGUAGE SQL AS\nBEGIN\n  RETURN 1;\nEND;"),
+    # review round 1: statements inside EXECUTE IMMEDIATE run at migrate time
+    ("FG006", "EXECUTE IMMEDIATE $$\nBEGIN\n  DELETE FROM SALES.ORDERS;\nEND;\n$$;"),
+    ("FG006", "EXECUTE IMMEDIATE $$\nBEGIN\n  IF (1 = 1) THEN TRUNCATE TABLE SALES.ORDERS; END IF;\nEND;\n$$;"),
+    ("FG008", "EXECUTE IMMEDIATE $$\nBEGIN\n  ALTER SESSION SET TIMEZONE = 'UTC';\nEND;\n$$;"),
+    ("FG006", "EXECUTE IMMEDIATE 'DROP TABLE SALES.ORDERS';"),
+    # review round 1: column drops without the COLUMN keyword
+    ("FG006", "ALTER TABLE SALES.ORDERS DROP CONTACT_EMAIL;"),
+    ("FG006", "ALTER TABLE SALES.ORDERS DROP \"Legacy Col\";"),
+    ("FG011", "CREATE OR REPLACE SEMANTIC VIEW SALES.SV TABLES (SALES.ORDERS);"),
+    # review round 1: Flyway replaces placeholders in comments too, and does not trim names
+    ("FG005", "-- owner: ${team_name}\nSELECT 1;"),
+    ("FG005", "SELECT '${ env }';"),
+    ("FG005", "SELECT '${flyway:env}';"),
+    ("FG021", "-- Ticket : <JIRA-KEY>          Author: <name>\nSELECT 1;"),
 ])
 def test_statement_rules_trip(tmp_path, rule, sql):
     root = _mini_kit(tmp_path)
@@ -262,6 +308,14 @@ def test_statement_rules_trip(tmp_path, rule, sql):
     "$$\nBEGIN\n  -- USE DATABASE in a comment; a ';' inside the body\n  RETURN 1;\nEND;\n$$;",
     "CREATE PIPE IF NOT EXISTS SALES.P AS COPY INTO RAW_ORDERS FROM @SALES.S;",
     "CREATE TABLE IF NOT EXISTS ${edw_db}.SALES.T (ID INT);",
+    "ALTER TABLE SALES.ORDERS ADD COLUMN IF NOT EXISTS C1 NUMBER;",
+    "ALTER TABLE SALES.ORDERS ALTER COLUMN STATUS DROP NOT NULL;",
+    "ALTER TABLE SALES.ORDERS MODIFY COLUMN STATUS DROP DEFAULT;",
+    "CREATE OR REPLACE VIEW SALES.V COPY GRANTS AS\nSELECT CASE WHEN ID > 0 THEN 'P' ELSE 'N' END AS SIGN FROM SALES.ORDERS;",
+    "EXECUTE IMMEDIATE $$\nCREATE OR REPLACE ALERT SALES.A WAREHOUSE = W SCHEDULE = '60 MINUTE'\n"
+    "  IF (EXISTS (SELECT 1 FROM SALES.ORDERS)) THEN CALL SALES.P()\n$$;",
+    "EXECUTE IMMEDIATE $$\nBEGIN\n  DELETE FROM SALES.ORDERS WHERE ID < 0;\nEND;\n$$;",
+    "SELECT '${flyway:timestamp}' AS T;",
 ])
 def test_statement_rules_do_not_trip_on_good_sql(tmp_path, sql):
     root = _mini_kit(tmp_path)
@@ -335,6 +389,71 @@ def test_fg005_per_deploy_placeholder_in_a_repeatable(tmp_path):
     assert "FG005" in _rules(_run(root))
     _write(root, V, "INSERT INTO SALES.AUDIT (NOTE) VALUES ('${git_sha}');\n")  # fine in a versioned migration
     assert [f for f in _run(root) if f.path == V] == []
+
+
+def test_fg005_per_deploy_placeholder_in_a_repeatable_comment(tmp_path):
+    root = _mini_kit(tmp_path)
+    _write(root, "repeatable/SALES/R__30_SALES__v_x.sql",
+           "-- deployed by ${deploy_id}\nCREATE OR REPLACE VIEW SALES.V_X COPY GRANTS AS SELECT 1 AS A;\n")
+    assert "FG005" in _rules(_run(root))
+
+
+def test_fg012_create_or_alter_table_in_a_repeatable_and_warning_in_v(tmp_path):
+    root = _mini_kit(tmp_path)
+    _write(root, "repeatable/SALES/R__30_SALES__codes.sql",
+           "CREATE OR ALTER TABLE SALES.CODES (C VARCHAR);\n")
+    assert "FG012" in _rules(_run(root))
+    root2 = _mini_kit(tmp_path / "b")
+    _write(root2, V, "CREATE OR ALTER TABLE SALES.CODES (C VARCHAR);\n")
+    assert "FG006" in _rules(_run(root2), "warning") and _rules(_run(root2)) == set()
+
+
+def test_fg012_allows_alter_task_modify_in_a_repeatable(tmp_path):
+    root = _mini_kit(tmp_path)
+    _write(root, "repeatable/SALES/R__80_SALES__task_x.sql",
+           "ALTER TASK IF EXISTS SALES.TASK_X SUSPEND;\nALTER TASK SALES.TASK_X MODIFY AS CALL SALES.P();\n"
+           "EXECUTE IMMEDIATE $$\nBEGIN\n  IF ('${tasks_enabled}' = 'true') THEN\n"
+           "    LET r VARCHAR := (SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('SALES.TASK_X'));\n  END IF;\nEND;\n$$;\n")
+    assert _rules(_run(root)) == set(), [f.render() for f in _run(root)]
+
+
+def test_fg013_quoted_schema_reference(tmp_path):
+    root = _mini_kit(tmp_path)
+    _write(root, "repeatable/SALES/R__30_SALES__v_a.sql",
+           'CREATE OR REPLACE VIEW SALES.V_A COPY GRANTS AS SELECT * FROM "SALES"."V_B";\n')
+    _write(root, "repeatable/SALES/R__30_SALES__v_b.sql",
+           "CREATE OR REPLACE VIEW SALES.V_B COPY GRANTS AS SELECT 1 AS X;\n")
+    assert "FG013" in _rules(_run(root))
+
+
+def test_utf8_bom_does_not_hide_the_first_statement(tmp_path):
+    root = _mini_kit(tmp_path)
+    (root / "migrations" / "SALES").mkdir(parents=True)
+    (root / V).write_bytes("\ufeffDROP TABLE SALES.ORDERS;\n".encode())
+    assert "FG006" in _rules(_run(root))
+
+
+def test_fg017_config_files_and_not_prose(tmp_path):
+    root = _mini_kit(tmp_path)
+    _write(root, "conf/snow.properties", "snowflake.password=Hunter2xyz\n")
+    _write(root, "conf/cli.yaml", "connection:\n  private_key_passphrase: s3cr3t-value\n")
+    _write(root, "jenkins/jobs.groovy", "// Username with password: Redgate email + personal access token\n")
+    _write(root, "conf/ok.yaml", "password: ${SNOWFLAKE_PASSWORD}\npassphrase: <from the vault>\n")
+    assert {f.path for f in _run(root) if f.rule == "FG017"} == {"conf/snow.properties", "conf/cli.yaml"}
+
+
+def test_fg003_when_the_kit_is_a_subfolder_of_the_repository(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _mini_kit(repo)  # repo/kit
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    a = _write(root, "migrations/SALES/V2026.10.13.0900__sales_a.sql", "CREATE TABLE IF NOT EXISTS SALES.A (X INT);\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    a.write_text("CREATE TABLE IF NOT EXISTS SALES.A (X INT, Y INT);\n")
+    assert "FG003" in _rules(_run(root, base="main"))
 
 
 def test_fg020_conf_keys(tmp_path):
@@ -540,11 +659,38 @@ def test_scaffold_files_pass_the_guard(tmp_path):
                        (90, "grants")):
         scaffold_mod.new_repeatable(root, "SALES", layer, obj)
     for p in root.rglob("*.sql"):  # templates carry <angle> slots for the author; make them parseable SQL
-        p.write_text(re.sub(r"<[A-Za-z_ -]+>", "X", p.read_text()).replace("SALES.X", "SALES.T"))
+        p.write_text(re.sub(r"<[^<>\n]+>", "X", p.read_text()).replace("SALES.X", "SALES.T"))
     errors = [f.render() for f in _run(root) if f.severity == "error"]
     assert errors == []
     with pytest.raises(scaffold_mod.ScaffoldError):
         scaffold_mod.new_repeatable(root, "SALES", 30, "v_x")
+
+
+def test_scaffold_versions_are_unique_across_schemas_and_at_is_utc(tmp_path):
+    root = _mini_kit(tmp_path)
+    at = datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
+    a = scaffold_mod.new_versioned(root, "SALES", "x", at=at)[0]
+    b = scaffold_mod.new_versioned(root, "FINANCE", "y", at=at)[0]
+    assert a.name.startswith("V2026.10.13.0900__") and b.name.startswith("V2026.10.13.0900.1__")
+    assert fw.main(["--root", str(root), "new", "--schema", "OPS", "--desc", "z", "--at", "2026-10-13T07:00"]) == 0
+    assert any(p.name.startswith("V2026.10.13.0700__") for p in (root / "migrations" / "OPS").iterdir())
+
+
+def test_scaffold_alert_parses_and_markers_are_flagged(tmp_path):
+    root = _mini_kit(tmp_path)
+    scaffold_mod.new_repeatable(root, "SALES", 85, "alert_x")
+    found = _rules(_run(root))
+    assert "FG021" in found and "FG015" not in found  # markers left; the alert itself is parser-safe
+
+
+def test_verify_bundle_rederives_the_inventory(tmp_path):
+    res = bundle_mod.build(KIT, tmp_path / "d", build_id="9", git_sha="abc", branch="main")
+    bdir = bundle_mod.extract(res.archive, tmp_path / "x")
+    m = json.loads((bdir / bundle_mod.MANIFEST).read_text())
+    m["versioned"] = m["versioned"][:1]
+    (bdir / bundle_mod.MANIFEST).write_text(json.dumps(m))
+    with pytest.raises(bundle_mod.BundleError, match="inventory"):
+        bundle_mod.verify(bdir)
 
 
 def test_env_command_formats(capsys):

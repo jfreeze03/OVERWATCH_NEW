@@ -20,7 +20,7 @@ import argparse
 import json
 import shlex
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -65,6 +65,8 @@ def cmd_new(args: argparse.Namespace) -> int:
         if not args.desc:
             raise scaffold.ScaffoldError("--desc is required for a versioned migration")
         at = datetime.fromisoformat(args.at) if args.at else None
+        if at is not None and at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)  # a naive --at is UTC, like the versions themselves
         paths = scaffold.new_versioned(root, args.schema, args.desc, at=at, undo=args.undo)
     for p in paths:
         print(p.relative_to(root.resolve()) if p.is_absolute() and p.is_relative_to(root.resolve()) else p)
@@ -214,7 +216,7 @@ def parser() -> argparse.ArgumentParser:
     n.add_argument("--schema", required=True)
     n.add_argument("--desc", help="versioned: lower_snake_case description (schema prefix added)")
     n.add_argument("--undo", action="store_true", help="also create the U undo script")
-    n.add_argument("--at", help="ISO timestamp for the version (default: now, UTC)")
+    n.add_argument("--at", help="ISO timestamp for the version, UTC unless it carries an offset (default: now)")
     n.add_argument("--repeatable", action="store_true")
     n.add_argument("--layer", type=int, help="repeatable layer 10-99 (see docs/CONVENTIONS.md)")
     n.add_argument("--object", help="repeatable: lower_snake_case object name")

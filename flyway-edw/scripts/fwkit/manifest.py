@@ -22,9 +22,13 @@ TIERS = ("nonprod", "prod")
 LANES = ("main", "branch")
 DRIFT_GATES = ("warn", "fail")
 NONPROD_PATTERNS = ["*:missing", "*:future"]
-PROD_PATTERNS = ["*:future"]
+PROD_PATTERNS = ["*:future", "repeatable:missing"]
 PER_DEPLOY_PLACEHOLDERS = ("deploy_id", "git_sha", "build_url", "approver")
 SECRET_KEYS = ("password", "token", "email", "licensekey", "offlinepermitpath")
+SECRET_KEY_PARTS = ("pwd", "passphrase", "password", "privatekey", "secret", "token")
+# The only keys an [environments.<ID>.flyway] table may set: anything else would silently override a [flyway] safety
+# setting for that runway (ClassicConfiguration prefers getEnvironmentOverrides()).
+ENV_FLYWAY_KEYS = {"outOfOrder", "cleanDisabled", "baselineOnMigrate", "ignoreMigrationPatterns", "placeholders"}
 
 
 class ConfigError(Exception):
@@ -177,7 +181,9 @@ def _walk_secret_keys(node: Any, trail: str) -> list[str]:
     if isinstance(node, dict):
         for k, v in node.items():
             here = f"{trail}.{k}" if trail else str(k)
-            if str(k).lower().replace("_", "") in SECRET_KEYS and isinstance(v, str) and not v.startswith("${env."):
+            norm = str(k).lower().replace("_", "")
+            secretish = norm in SECRET_KEYS or any(part in norm for part in SECRET_KEY_PARTS)
+            if secretish and isinstance(v, str) and not v.startswith("${env."):
                 hits.append(here)
             hits.extend(_walk_secret_keys(v, here))
     return hits
@@ -208,6 +214,16 @@ def config_findings(kit: Kit) -> list[ConfigFinding]:
     for key, want in expect.items():
         if fw.get(key) != want:
             err("FG018", "flyway.toml", f"[flyway] {key} must be {want!r} (found {fw.get(key)!r})")
+    if "schemas" in fw:
+        err("FG018", "flyway.toml", "[flyway] schemas is not a Flyway-namespace setting (Flyway 13 rejects it): set "
+                                    "schemas in each [environments.<ID>] table")
+    if "table" in fw:
+        err("FG018", "flyway.toml", '[flyway] table must stay the default "flyway_schema_history" (drift.py, the auditor '
+                                    "grants and the runbooks read it)")
+    if fw.get("skipExecutingMigrations") is True:
+        err("FG018", "flyway.toml", "[flyway] skipExecutingMigrations would record migrations as applied without running")
+    if fw.get("placeholderReplacement") is False:
+        err("FG018", "flyway.toml", "[flyway] placeholderReplacement=false would deploy ${...} literally everywhere")
     locs = set(fw.get("locations", []))
     for loc in ("filesystem:migrations", "filesystem:repeatable", "filesystem:callbacks"):
         if loc not in locs:
@@ -220,13 +236,13 @@ def config_findings(kit: Kit) -> list[ConfigFinding]:
         if env is None:
             err("FG018", "flyway.toml", f"[environments.{rid}] missing (runways.toml defines runway {rid})")
             continue
-        _check_env(env, rid, rw, rehearsal=False, err=err)
+        _check_env(env, rid, rw, rehearsal=False, err=err, history_schema=hs)
         if rw.rehearsal:
             renv = envs.get(rw.rehearsal_env)
             if renv is None:
                 err("FG018", "flyway.toml", f"[environments.{rw.rehearsal_env}] missing (runway {rid} rehearses)")
             else:
-                _check_env(renv, rw.rehearsal_env, rw, rehearsal=True, err=err)
+                _check_env(renv, rw.rehearsal_env, rw, rehearsal=True, err=err, history_schema=hs)
     known = set(kit.runways) | {r.rehearsal_env for r in kit.runways.values() if r.rehearsal}
     for name in envs:
         if name not in known:
@@ -287,7 +303,8 @@ def config_findings(kit: Kit) -> list[ConfigFinding]:
     return out
 
 
-def _check_env(env: dict[str, Any], name: str, rw: Runway, *, rehearsal: bool, err: Any) -> None:
+def _check_env(env: dict[str, Any], name: str, rw: Runway, *, rehearsal: bool, err: Any,
+               history_schema: str = "FLYWAY") -> None:
     p = f"flyway.toml [environments.{name}]"
     url = str(env.get("url", ""))
     want_db = "${env.FLYWAY_RH_DB}" if rehearsal else rw.database
@@ -308,9 +325,18 @@ def _check_env(env: dict[str, Any], name: str, rw: Runway, *, rehearsal: bool, e
     props = env.get("jdbcProperties", {})
     if str(props.get("authenticator", "")).lower() != "snowflake_jwt":
         err("FG018", p, "jdbcProperties.authenticator must be snowflake_jwt (key-pair)")
-    if not str(props.get("private_key_file", "")).startswith("${env."):
-        err("FG018", p, "jdbcProperties.private_key_file must come from an ${env.*} resolver")
+    if "private_key_file" not in props:
+        err("FG018", p, "jdbcProperties.private_key_file is required (key-pair authentication)")
+    for key, val in props.items():
+        if key != "authenticator" and not str(val).startswith("${env."):
+            err("FG018", p, f"jdbcProperties.{key} must come from an ${{env.*}} resolver, never a literal")
+    if env.get("schemas", [history_schema]) != [history_schema]:
+        err("FG018", p, f'schemas must be ["{history_schema}"] (the history schema only)')
     fwe = env.get("flyway", {})
+    for key in fwe:
+        if key not in ENV_FLYWAY_KEYS:
+            err("FG018", p, f"flyway.{key} may not be overridden per environment (allowed: "
+                            f"{', '.join(sorted(ENV_FLYWAY_KEYS))}); it would silently change this runway's safety")
     if fwe.get("cleanDisabled", True) is not True:
         err("FG018", p, "cleanDisabled must not be overridden to false on a runway")
     if fwe.get("baselineOnMigrate", False) is not False:

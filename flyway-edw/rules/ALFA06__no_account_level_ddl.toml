@@ -27,4 +27,6 @@ rules = [
     '(?im)^[ \t]*GRANT\s+OWNERSHIP\b',
 ]
 description = "Account-level DDL or grant in a migration replays on every runway: use bootstrap/ (guard FG007)"
-severity = "error"
+# WARNING, not error: guard FG007 is the gate and honours a ticketed waiver; account-level changes normally go to
+# bootstrap/ (run by a Snowflake admin), and the code-review report still lists every occurrence.
+severity = "warning"

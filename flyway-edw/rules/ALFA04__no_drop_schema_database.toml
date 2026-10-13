@@ -12,8 +12,9 @@
 code = "ALFA04"
 dialects = ["TEXT"]
 rules = [
-    '(?im)^[ \t]*DROP\s+(?:SCHEMA\b|DATABASE\b(?!\s+ROLE\b))',
+    '(?im)^[ \t]*DROP\s+DATABASE\b(?!\s+ROLE\b)',
     '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:TRANSIENT\s+)?(?:SCHEMA\b|DATABASE\b(?!\s+ROLE\b))',
 ]
-description = "DROP / CREATE OR REPLACE of a SCHEMA or DATABASE destroys it on every runway (guard FG006)"
+description = "DROP DATABASE / CREATE OR REPLACE SCHEMA|DATABASE: never allowed in a migration (guard FG006, unwaivable)"
+# DROP SCHEMA (waivable in the guard) moved to ALFA03 as a warning.
 severity = "error"

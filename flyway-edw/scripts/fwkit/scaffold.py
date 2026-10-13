@@ -1,7 +1,8 @@
 """``fw.py new``: create a correctly named migration file with the house header, so naming is never hand-typed.
 
-Versioned files get a UTC timestamp version (two engineers on two branches cannot collide unless they create a file
-for the same schema in the same minute; the guard catches that too). Repeatable files get a template for their layer
+Versioned files get a UTC timestamp version. Versions are global across every schema folder, so two migrations
+created in the same minute would collide: `new` adds a .1, .2 ... suffix against every folder, and the guard
+(FG002) catches a collision with a file on another branch. Repeatable files get a template for their layer
 that already satisfies the guard (schema-qualified, COPY GRANTS, task gate + resume).
 """
 
@@ -11,7 +12,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .guard import LAYERS, SCHEMA_RE
+from .guard import LAYERS, SCHEMA_RE, version_key
 
 DESC_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 
@@ -59,9 +60,11 @@ TEMPLATES: dict[int, str] = {
         "    END IF;\nEND;\n$$;\n"
     ),
     85: (
-        "CREATE OR REPLACE ALERT {schema}.{obj_upper}\n    WAREHOUSE = ${{etl_wh}}\n"
+        "-- Wrapped in EXECUTE IMMEDIATE $$ ... $$: Flyway's Snowflake parser opens a block at the alert's own IF\n"
+        "-- (ALERT is not one of its creatable object types) and would report 'Incomplete statement' (guard FG015).\n"
+        "EXECUTE IMMEDIATE $$\nCREATE OR REPLACE ALERT {schema}.{obj_upper}\n    WAREHOUSE = ${{etl_wh}}\n"
         "    SCHEDULE = '60 MINUTE'\n    IF (EXISTS (SELECT 1 FROM {schema}.<TABLE> WHERE <condition>))\n"
-        "    THEN CALL {schema}.<PROCEDURE>();\n\n"
+        "    THEN CALL {schema}.<PROCEDURE>()\n$$;\n\n"
         "EXECUTE IMMEDIATE $$\nBEGIN\n    IF ('${{tasks_enabled}}' = 'true') THEN\n"
         "        ALTER ALERT {schema}.{obj_upper} RESUME;\n    END IF;\nEND;\n$$;\n"
     ),
@@ -103,11 +106,13 @@ def new_versioned(root: Path, schema: str, desc: str, *, at: datetime | None = N
     full_desc = desc if desc.startswith(schema.lower() + "_") else f"{schema.lower()}_{desc}"
     version = version_for(at or datetime.now(UTC))
     folder = root / "migrations" / schema
+    taken = {version_key(m.group(0)[1:]) for p in (root / "migrations").glob("*/[VU]*.sql")
+             if (m := re.match(r"^[VU][0-9.]+(?=__)", p.name))}
     seq = 0
     while True:
         v = version if seq == 0 else f"{version}.{seq}"
         path = folder / f"V{v}__{full_desc}.sql"
-        if not any(folder.glob(f"[VU]{v}__*.sql")):
+        if version_key(v) not in taken:
             break
         seq += 1
     folder.mkdir(parents=True, exist_ok=True)

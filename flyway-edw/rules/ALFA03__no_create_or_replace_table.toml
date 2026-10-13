@@ -14,6 +14,9 @@ code = "ALFA03"
 dialects = ["TEXT"]
 rules = [
     '(?im)^[ \t]*CREATE\s+OR\s+REPLACE\s+(?:(?:TRANSIENT|HYBRID|ICEBERG)\s+)?TABLE\b',
+    '(?im)^[ \t]*DROP\s+SCHEMA\b',
 ]
-description = "CREATE OR REPLACE TABLE drops data, Time Travel and streams: use IF NOT EXISTS / ALTER (guard FG006)"
-severity = "error"
+description = "Data-loss DDL (CREATE OR REPLACE TABLE, DROP SCHEMA): guard FG006 decides, with a ticketed waiver"
+# WARNING, not error: guard FG006 is the gate for these and honours a ticketed `-- FLYWAY-WAIVER: FG006 ...` line;
+# a regex rule has no per-file waiver, so an error here would make every approved exception unmergeable.
+severity = "warning"
