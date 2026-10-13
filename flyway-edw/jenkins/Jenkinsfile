@@ -1,0 +1,585 @@
+// =====================================================================================================================
+// EDW Flyway kit - multibranch CI pipeline.
+// Job: EDW/ci/edw-flyway (Bitbucket Branch Source, created by jenkins/jobs.groovy), Script Path jenkins/Jenkinsfile.
+//
+//   every branch and PR    Checkout -> Guard (fw.py guard) -> Flyway licence + code review (flyway check -code)
+//   PR-<id> builds          + flyway info/validate of the merge result against ALFA_EDW_DEV, READ-ONLY auditor login
+//   main + plain branches   + Bundle: the immutable deploy bundle, archived once with fingerprints
+//   main                    + Trigger EDW/deploy/DEV/deploy for this build (wait: false)
+//
+// Design rules (docs/GUIDE.md part C, FACTS I-section):
+// * agent none at the top: every stage gets its own docker agent, so no executor is held between stages.
+// * Nothing a runway or the kit owns is hard-coded here: images, versions, credential ids, the auditor login and
+//   the DEV deploy job come from runways.toml through `python3 scripts/fw.py env ... --format json` + readJSON.
+//   The only manifest value read without fw.py is [kit] python_image (fw.py needs a Python 3.11 image to run at
+//   all) and [kit] edition (fw.py env does not report it).
+// * Every sh step is a single-quoted Groovy string (often a single-quoted prelude + a single-quoted body); values
+//   reach the shell only as environment variables. Run the controller with
+//   -Dorg.jenkinsci.plugins.workflow.cps.DSL.UNSAFE_GROOVY_INTERPOLATION=fail (casc-snippet.yaml header).
+// * A PR runs its OWN copy of this file (FACTS I1-04): whatever /EDW/ci can see, a PR author can use. That is why
+//   this pipeline only ever holds the read-only auditor key, the licence and the status token - never a deploy key.
+// * Flyway reads FLYWAY_* environment variables as configuration (FLYWAY_TARGET = migrate target version, ...).
+//   The shell function fw() below drops every FLYWAY_* variable except the ones flyway.toml expects, so a stray
+//   controller/folder variable can never change what Flyway does. Our own variables use the KIT_/FW_ prefixes.
+// * Placeholders and ignoreMigrationPatterns are passed as -environments.<ENV>.flyway.* overrides: in Flyway 13.10
+//   an environment's own [environments.<ENV>.flyway] table replaces the root value instead of merging
+//   (ClassicConfiguration.getPlaceholders / getIgnoreMigrationPatterns), so a root-level -placeholders.x or
+//   -ignoreMigrationPatterns would be ignored for every runway that defines its own table.
+//
+// Required plugins: workflow-aggregator (Pipeline), pipeline-model-definition, bitbucket-branch-source,
+// cloudbees-folder, docker-workflow, credentials-binding, pipeline-utility-steps (readJSON/findFiles),
+// copyartifact (copyArtifactPermission), pipeline-build-step, junit, timestamper, git.
+//
+// Agent: a node with Docker whose label is the controller-wide env var EDW_AGENT_LABEL (default "docker").
+// If the kit lives in a subfolder of the repository instead of its root, change kitDir() below and the Script
+// Paths in jenkins/jobs.groovy.
+// =====================================================================================================================
+
+pipeline {
+    agent none
+
+    options {
+        // main keeps its bundles promotable for months (PRD promotes an old main build); others are cheap to rebuild.
+        // Evaluated before the kit is read, hence the literal 'main' (= runways.toml [kit] main_branch).
+        buildDiscarder(logRotator(numToKeepStr: "${env.BRANCH_NAME == 'main' ? '500' : '30'}",
+                                  artifactNumToKeepStr: "${env.BRANCH_NAME == 'main' ? '500' : '10'}"))
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        // The deploy jobs (/EDW/deploy/<ID>/deploy) copy the bundle with copyArtifacts; '*' also matches across '/'.
+        copyArtifactPermission('/EDW/deploy/*')
+    }
+
+    stages {
+        stage('Checkout') {
+            // Declarative checks out the pinned revision on this node; we only read the kit settings here.
+            agent { label "${env.EDW_AGENT_LABEL ?: 'docker'}" }
+            steps {
+                script { resolveKit() }
+            }
+        }
+
+        stage('Guard') {
+            agent {
+                docker {
+                    image "${env.KIT_PYTHON_IMAGE}"
+                    label "${env.EDW_AGENT_LABEL ?: 'docker'}"
+                    // Root only so `git` can be installed when kit.python_image lacks it (python:*-slim does):
+                    // FG003/FG004 compare against the base branch with git. Every file written is handed back to
+                    // the workspace owner on exit, and nothing else runs in this container. With an image that
+                    // already ships git (recommended: an internal image with git + snowflake-cli), drop this line.
+                    args '-u 0:0'
+                }
+            }
+            steps {
+                script { runGuard() }
+            }
+        }
+
+        stage('Flyway licence + code review') {
+            agent {
+                docker {
+                    image "${env.KIT_FLYWAY_IMAGE}"
+                    label "${env.EDW_AGENT_LABEL ?: 'docker'}"
+                    // redgate/flyway has ENTRYPOINT ["flyway"]; Jenkins needs to start the container with `cat`.
+                    args '--entrypoint=""'
+                }
+            }
+            steps {
+                script { licenceAndCodeReview() }
+            }
+        }
+
+        stage('PR: info + validate vs DEV') {
+            when {
+                beforeAgent true
+                changeRequest()
+            }
+            agent {
+                docker {
+                    image "${env.KIT_FLYWAY_IMAGE}"
+                    label "${env.EDW_AGENT_LABEL ?: 'docker'}"
+                    args '--entrypoint=""'
+                }
+            }
+            steps {
+                script { prValidateAgainstDev() }
+            }
+        }
+
+        stage('Bundle') {
+            // main AND plain branch builds bundle: runways.toml gives DEV/SAN/SEA/PHX the "branch" lane (unmerged
+            // project work). PR-<id> builds never bundle: they build a synthetic merge commit that exists nowhere in
+            // Bitbucket. With branch discovery strategy 1, a branch with an open PR builds only as PR-<id>, so a
+            // project deploys its branch bundle before opening the PR (docs/GUIDE.md F1/F2).
+            when {
+                beforeAgent true
+                not { changeRequest() }
+            }
+            agent {
+                docker {
+                    image "${env.KIT_PYTHON_IMAGE}"
+                    label "${env.EDW_AGENT_LABEL ?: 'docker'}"
+                }
+            }
+            steps {
+                script { buildBundle() }
+            }
+        }
+
+        stage('Trigger DEV deploy') {
+            // Equivalent of `when { branch 'main' }`, with the branch name taken from runways.toml [kit] main_branch.
+            when {
+                branch pattern: "${env.KIT_MAIN_BRANCH}", comparator: 'EQUALS'
+            }
+            steps {
+                script { triggerDevDeploy() }
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                echo('CI failed. Guard findings: reports/guard (FGnnn ids: docs/SHORTCOMINGS.md, docs/CONVENTIONS.md);'
+                     + ' code review: reports/code/report.html; a DEV validate error usually means an applied'
+                     + ' migration was edited (docs/RUNBOOKS.md R2) or this branch lacks a migration DEV has.')
+            }
+        }
+    }
+}
+
+// =====================================================================================================================
+// Stage bodies
+// =====================================================================================================================
+
+String kitDir() {
+    return '.'
+}
+
+void resolveKit() {
+    dir(kitDir()) {
+        String toml = readFile(file: 'runways.toml', encoding: 'UTF-8')
+        env.KIT_PYTHON_IMAGE = kitValue(toml, 'python_image')
+        env.KIT_EDITION = kitValue(toml, 'edition')
+        if (!isImageRef(env.KIT_PYTHON_IMAGE) || !env.KIT_EDITION) {
+            error('runways.toml [kit] must set python_image (an image reference) and edition')
+        }
+        docker.image(env.KIT_PYTHON_IMAGE).inside {
+            withEnv(['PYTHONDONTWRITEBYTECODE=1']) {
+                // DEV + --auditor: the PR stage validates against DEV with the read-only login only.
+                sh(shCommon() + '''
+mkdir -p reports
+python3 scripts/fw.py env --runway DEV --auditor --format json > reports/kit-env.json
+''')
+            }
+        }
+        Map s = readJSON(file: 'reports/kit-env.json', returnPojo: true)
+        env.KIT_FLYWAY_IMAGE = required(s, 'EDW_FLYWAY_IMAGE')
+        env.KIT_FLYWAY_VERSION = required(s, 'EDW_FLYWAY_VERSION')
+        env.KIT_MAIN_BRANCH = required(s, 'EDW_MAIN_BRANCH')
+        env.KIT_DEV_ID = required(s, 'EDW_TARGET')
+        env.KIT_DEV_TIER = required(s, 'EDW_TIER')
+        env.KIT_DEV_DEPLOY_JOB = '/' + required(s, 'EDW_JENKINS_FOLDER') + '/deploy'
+        env.KIT_AUDIT_CREDENTIALS_ID = required(s, 'EDW_CREDENTIALS_ID')
+        env.KIT_AUDIT_SF_USER = required(s, 'FLYWAY_SF_USER').toUpperCase()
+        env.KIT_AUDIT_SF_ROLE = required(s, 'FLYWAY_SF_ROLE')
+        env.KIT_AUDIT_SF_WAREHOUSE = required(s, 'FLYWAY_SF_WAREHOUSE')
+        if (!isImageRef(env.KIT_FLYWAY_IMAGE)) {
+            error("runways.toml [kit] flyway_image '${env.KIT_FLYWAY_IMAGE}' is not an image reference")
+        }
+        if (required(s, 'EDW_PYTHON_IMAGE') != env.KIT_PYTHON_IMAGE) {
+            error('python_image read from runways.toml differs from fw.py env: check the [kit] table syntax')
+        }
+        echo("Kit: flyway ${env.KIT_FLYWAY_VERSION} (${env.KIT_FLYWAY_IMAGE}), python ${env.KIT_PYTHON_IMAGE}, "
+             + "main branch '${env.KIT_MAIN_BRANCH}', DEV deploy job ${env.KIT_DEV_DEPLOY_JOB}")
+    }
+}
+
+void runGuard() {
+    // PR builds: compare with the PR target branch (the MERGE strategy fetches it as origin/<target>).
+    // main builds: compare with the previous successful main commit, so a direct push that edited an applied
+    // migration is caught before it is bundled. Other branch builds: static rules only (origin/main is not fetched).
+    String base = ''
+    String baseRequired = 'false'
+    if (env.CHANGE_ID) {
+        base = "origin/${env.CHANGE_TARGET}"
+        baseRequired = 'true'
+    } else if (env.BRANCH_NAME == env.KIT_MAIN_BRANCH && env.GIT_PREVIOUS_SUCCESSFUL_COMMIT) {
+        base = env.GIT_PREVIOUS_SUCCESSFUL_COMMIT
+    }
+    dir(kitDir()) {
+        try {
+            withEnv(["GUARD_BASE=${base}", "GUARD_BASE_REQUIRED=${baseRequired}", 'PYTHONDONTWRITEBYTECODE=1']) {
+                sh(shCommon() + '''
+mkdir -p reports/guard
+owner="$(stat -c '%u:%g' .)"
+trap 'chown -R "$owner" reports' EXIT
+if ! command -v git > /dev/null 2>&1; then
+  if [ "$(id -u)" != "0" ]; then
+    echo "kit.python_image has no git and this container is not root: use an image with git (FG003/FG004)" >&2
+    exit 2
+  fi
+  echo "kit.python_image has no git: installing it into this throw-away container (FG003/FG004 need it)"
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git > /dev/null
+fi
+if [ "$(id -u)" = "0" ]; then
+  # The checkout belongs to the Jenkins user; git refuses a repository owned by someone else ("dubious ownership").
+  git config --system --add safe.directory '*'
+fi
+set --
+if [ -n "$GUARD_BASE" ]; then
+  if git rev-parse --verify --quiet "${GUARD_BASE}^{commit}" > /dev/null; then
+    set -- --base "$GUARD_BASE"
+  elif [ "$GUARD_BASE_REQUIRED" = "true" ]; then
+    echo "guard: base ${GUARD_BASE} is not in this checkout; the PR merge build should have fetched it" >&2
+    exit 2
+  else
+    echo "guard: previous successful commit ${GUARD_BASE} is not in this clone; FG003/FG004 skipped this build"
+  fi
+fi
+python3 scripts/fw.py guard "$@" --junit reports/guard/guard.xml --json reports/guard/guard.json
+''')
+            }
+        } finally {
+            // One JUnit testcase per rule: failed rules show in the build and turn the Bitbucket status red.
+            junit(testResults: 'reports/guard/guard.xml', allowEmptyResults: true)
+            archiveArtifacts(artifacts: 'reports/guard/**', allowEmptyArchive: true)
+        }
+    }
+}
+
+void licenceAndCodeReview() {
+    dir(kitDir()) {
+        try {
+            withLicence {
+                withEnv(flywayEnv()) {
+                    sh(shCommon() + '''
+mkdir -p reports/flyway reports/code
+fw version -outputType=json > reports/flyway/version.json
+''')
+                    assertEnterprise('reports/flyway/version.json')
+                    // No environment selected: a static review of every file (scope ALL), no database connection.
+                    // Severity is decided per rule (rules/*.toml, sqlfluff.cfg); failOnError turns errors into a
+                    // non-zero exit. The HTML report needs a Resource Root URL to render inside Jenkins (CSP).
+                    sh(shCommon() + '''
+fw check -code -check.code.failOnError=true -check.scope=ALL -reportFilename=reports/code/report.html
+''')
+                }
+            }
+        } finally {
+            archiveArtifacts(artifacts: 'reports/flyway/**,reports/code/**', allowEmptyArchive: true)
+        }
+    }
+}
+
+void prValidateAgainstDev() {
+    dir(kitDir()) {
+        try {
+            withLicence {
+                withLogin(env.KIT_AUDIT_CREDENTIALS_ID, env.KIT_AUDIT_SF_USER, env.KIT_AUDIT_SF_ROLE,
+                          env.KIT_AUDIT_SF_WAREHOUSE) {
+                    // The PR's migrations are pending on DEV by definition (*:pending); other branches' work may be
+                    // applied there (*:missing); newer main builds may be ahead (*:future).
+                    withEnv(flywayEnv() + [
+                        "FW_ENV=${env.KIT_DEV_ID}",
+                        "FW_DEPLOY_ID=PR-${env.CHANGE_ID}-${env.BUILD_NUMBER}",
+                        "FW_GIT_SHA=${env.GIT_COMMIT ?: 'unknown'}",
+                        "FW_BUILD_URL=${safeUrl(env.BUILD_URL)}",
+                        'FW_APPROVER=none',
+                        "FW_VALIDATE_IGNORE=${validateIgnore(env.KIT_DEV_TIER, true)}"
+                    ]) {
+                        sh(shCommon() + '''
+check_login
+mkdir -p reports/dev
+echo "== flyway info / validate: this PR against ${FW_ENV} (read-only login ${EXPECT_SF_USER})"
+fw_env "$FW_ENV" info -outputType=json > reports/dev/info.json
+fw_env "$FW_ENV" validate "-environments.${FW_ENV}.flyway.ignoreMigrationPatterns=${FW_VALIDATE_IGNORE}"
+''')
+                    }
+                }
+            }
+            Map s = summarizeInfo(readJSON(file: 'reports/dev/info.json', returnPojo: true))
+            String text = "${env.KIT_DEV_ID}: ${s.pending.size()} pending"
+            if (s.pending) {
+                text += ': ' + clip(s.pending.join(', '), 180)
+            }
+            if (s.outOfOrder) {
+                text += " (${s.outOfOrder.size()} out of order)"
+            }
+            // Shown on the PR's build status in Bitbucket (the plugin sends currentBuild.description).
+            currentBuild.description = text
+            echo(text)
+        } finally {
+            archiveArtifacts(artifacts: 'reports/dev/**', allowEmptyArchive: true)
+        }
+    }
+}
+
+void buildBundle() {
+    dir(kitDir()) {
+        withEnv(['PYTHONDONTWRITEBYTECODE=1']) {
+            // GIT_COMMIT and BRANCH_NAME come from this stage's checkout; build id = this build's number, which is
+            // what the deploy jobs pass as SOURCE_BUILD. The bundle is verified once right after it is written.
+            sh(shCommon() + '''
+rm -rf dist "${WORKSPACE}@tmp/bundle-selfcheck"
+python3 scripts/fw.py bundle --out dist --build-id "$BUILD_NUMBER" --git-sha "$GIT_COMMIT" \
+  --branch "$BRANCH_NAME" --build-url "${BUILD_URL:-}"
+python3 scripts/fw.py verify-bundle --bundle "dist/edw-flyway-bundle-${BUILD_NUMBER}.tar.gz" \
+  --extract "${WORKSPACE}@tmp/bundle-selfcheck" --require-branch "$BRANCH_NAME"
+rm -rf "${WORKSPACE}@tmp/bundle-selfcheck"
+''')
+        }
+        archiveArtifacts(artifacts: 'dist/edw-flyway-bundle-*.tar.gz,dist/bundle-manifest.json', fingerprint: true)
+        Map m = readJSON(file: 'dist/bundle-manifest.json', returnPojo: true)
+        String lane = env.BRANCH_NAME == env.KIT_MAIN_BRANCH ? 'main' : 'branch'
+        currentBuild.description = "bundle #${env.BUILD_NUMBER} (${lane} lane) ${head(env.GIT_COMMIT, 12)}: " +
+            "${m.versioned?.size() ?: 0} versioned, ${m.repeatable?.size() ?: 0} repeatable"
+    }
+}
+
+void triggerDevDeploy() {
+    // wait: false - the DEV deploy queues behind its own lock and reports separately (deploy-DEV status).
+    build(job: env.KIT_DEV_DEPLOY_JOB, wait: false, parameters: [
+        string(name: 'TARGET', value: env.KIT_DEV_ID),
+        string(name: 'SOURCE_JOB', value: "/${env.JOB_NAME}"),
+        string(name: 'SOURCE_BUILD', value: env.BUILD_NUMBER),
+        string(name: 'CHANGE_TICKET', value: ''),
+        booleanParam(name: 'DRY_RUN', value: false),
+        booleanParam(name: 'ACK_DRIFT', value: false),
+        booleanParam(name: 'ALLOW_UNBASELINED', value: false)
+    ])
+    currentBuild.description = (currentBuild.description ?: '') + " -> ${env.KIT_DEV_DEPLOY_JOB} triggered"
+}
+
+// =====================================================================================================================
+// Helpers (Jenkinsfile.deploy carries the same ones; keep them in step)
+// =====================================================================================================================
+
+// Shell prelude for every sh step. bash (both kit images have it) for pipefail; no -x, so we echo what matters.
+String shCommon() {
+    return '''#!/bin/bash
+set -euo pipefail
+
+# Flyway with a controlled environment: drop every FLYWAY_*/flyway_* variable except the ones flyway.toml and
+# licensing read, then always load ./flyway.toml explicitly (no user-home or execution-dir config files).
+fw() {
+  (
+    for v in $(compgen -e); do
+      case "$v" in
+        FLYWAY_EMAIL|FLYWAY_TOKEN|FLYWAY_OFFLINE_PERMIT_PATH) ;;
+        FLYWAY_SF_USER|FLYWAY_SF_ROLE|FLYWAY_SF_WAREHOUSE|FLYWAY_SF_KEY_FILE|FLYWAY_SF_KEY_PWD|FLYWAY_RH_DB) ;;
+        FLYWAY_*|flyway_*) unset "$v" ;;
+      esac
+    done
+    mkdir -p "${WORKSPACE}@tmp/flyway-home"
+    exec flyway -configFiles=flyway.toml "$@"
+  )
+}
+
+# fw_env <ENV> <args...>: an environment-bound Flyway command with the pipeline placeholders scoped to <ENV>.
+fw_env() {
+  local e="$1"
+  shift
+  fw -environment="$e" \
+    "-environments.${e}.flyway.placeholders.deploy_id=${FW_DEPLOY_ID}" \
+    "-environments.${e}.flyway.placeholders.git_sha=${FW_GIT_SHA}" \
+    "-environments.${e}.flyway.placeholders.build_url=${FW_BUILD_URL}" \
+    "-environments.${e}.flyway.placeholders.approver=${FW_APPROVER}" \
+    "$@"
+}
+
+# The bound Jenkins credential must be the login runways.toml names (catches a key filed in the wrong folder).
+check_login() {
+  local got
+  got="$(printf '%s' "${FLYWAY_SF_USER:-}" | tr '[:lower:]' '[:upper:]')"
+  if [ -z "${EXPECT_SF_USER:-}" ] || [ "$got" != "$EXPECT_SF_USER" ]; then
+    echo "Jenkins credential user is not ${EXPECT_SF_USER:-<unset>} (runways.toml): wrong key in this folder?" >&2
+    return 1
+  fi
+}
+'''
+}
+
+// JAVA_ARGS for the Flyway launcher: user.home in <ws>@tmp keeps the licence permit/refresh token writable for the
+// arbitrary Jenkins uid and out of archived paths (FACTS I3-04); BouncyCastle decrypts the encrypted PKCS#8 key.
+// Behind a proxy, set the controller-wide env var EDW_JAVA_PROXY_ARGS (-Dhttps.proxyHost=.. -Dhttps.proxyPort=..):
+// Flyway 13.9+ ignores OS proxy settings.
+List flywayEnv() {
+    String home = "${env.WORKSPACE}@tmp/flyway-home"
+    String javaArgs = "-Duser.home=${home} -Dnet.snowflake.jdbc.useBundledBouncyCastleForPrivateKeyDecryption=true"
+    if (env.EDW_JAVA_PROXY_ARGS?.trim()) {
+        javaArgs += ' ' + env.EDW_JAVA_PROXY_ARGS.trim()
+    }
+    return ["JAVA_ARGS=${javaArgs}".toString(), "HOME=${home}".toString()]
+}
+
+void withLicence(Closure body) {
+    withCredentials([usernamePassword(credentialsId: 'flyway-license', usernameVariable: 'FLYWAY_EMAIL',
+                                      passwordVariable: 'FLYWAY_TOKEN')]) {
+        body()
+    }
+}
+
+// Key-pair login for flyway.toml (${env.FLYWAY_SF_*}) from an "SSH Username with private key" credential.
+void withLogin(String credentialsId, String expectUser, String role, String warehouse, Closure body) {
+    withCredentials([
+        sshUserPrivateKey(credentialsId: credentialsId, keyFileVariable: 'FLYWAY_SF_KEY_FILE',
+                          passphraseVariable: 'FLYWAY_SF_KEY_PWD', usernameVariable: 'FLYWAY_SF_USER'),
+        string(credentialsId: 'sf-account', variable: 'SNOWFLAKE_ACCOUNT')
+    ]) {
+        withEnv(["EXPECT_SF_USER=${expectUser}", "FLYWAY_SF_ROLE=${role}", "FLYWAY_SF_WAREHOUSE=${warehouse}"]) {
+            body()
+        }
+    }
+}
+
+// A lapsed or unreachable permit silently downgrades Flyway to Community (FACTS F12): stop unless the edition and
+// the version are exactly what runways.toml pins.
+void assertEnterprise(String versionJson) {
+    Map v = flywayResult(readJSON(file: versionJson, returnPojo: true), 'edition')
+    String edition = (v.edition ?: 'COMMUNITY').toString()
+    String version = (v.version ?: '').toString()
+    echo("Flyway ${version}, edition ${edition}, permit expiry ${v.permitExpiry ?: 'n/a'}")
+    if (!edition.equalsIgnoreCase(env.KIT_EDITION)) {
+        error("Flyway reports edition ${edition}, runways.toml requires ${env.KIT_EDITION}: the licence permit is "
+              + 'missing, expired or unreachable (docs/RUNBOOKS.md R7; behind a proxy set EDW_JAVA_PROXY_ARGS)')
+    }
+    if (version != env.KIT_FLYWAY_VERSION) {
+        error("Image ${env.KIT_FLYWAY_IMAGE} runs Flyway ${version}, runways.toml pins ${env.KIT_FLYWAY_VERSION}")
+    }
+}
+
+String required(Map s, String key) {
+    String v = (s[key] ?: '').toString().trim()
+    if (!v) {
+        error("fw.py env did not report ${key}: check runways.toml")
+    }
+    return v
+}
+
+// ---- pure functions (@NonCPS: no steps inside) ----------------------------------------------------------------------
+
+// Reads key = "value" from the [kit] table of runways.toml (bootstrap only: fw.py env reports everything else).
+@NonCPS
+String kitValue(String toml, String key) {
+    String section = ''
+    for (String raw : toml.split('\n')) {
+        String line = raw.trim()
+        if (line.startsWith('[')) {
+            section = line
+            continue
+        }
+        if (section != '[kit]' || line.startsWith('#') || !line.contains('=')) {
+            continue
+        }
+        String[] kv = line.split('=', 2)
+        if (kv[0].trim() == key) {
+            String v = kv[1].trim()
+            int hash = v.indexOf(' #')
+            if (hash >= 0) {
+                v = v.substring(0, hash).trim()
+            }
+            if (v.length() >= 2 && v.startsWith('"') && v.endsWith('"')) {
+                v = v.substring(1, v.length() - 1)
+            }
+            return v
+        }
+    }
+    return ''
+}
+
+@NonCPS
+boolean isImageRef(String s) {
+    return s != null && s ==~ /[A-Za-z0-9][A-Za-z0-9._\/:@-]*/
+}
+
+@NonCPS
+String safeUrl(String u) {
+    String s = (u ?: '').trim()
+    return (s && s ==~ /[A-Za-z0-9._~:\/?#\[\]@!$&()*+,;=%-]+/ && !s.contains("'")) ? s : 'unknown'
+}
+
+@NonCPS
+String head(String s, int n) {
+    String t = s ?: ''
+    return t.length() <= n ? t : t.substring(0, n)
+}
+
+@NonCPS
+String clip(String s, int max) {
+    String t = s ?: ''
+    return t.length() <= max ? t : t.substring(0, max - 3) + '...'
+}
+
+// Flyway's validate patterns per tier, as FG018 pins them in flyway.toml, optionally plus *:pending.
+@NonCPS
+String validateIgnore(String tier, boolean withPending) {
+    String base = tier == 'prod' ? '*:future' : '*:missing,*:future'
+    return withPending ? '*:pending,' + base : base
+}
+
+// -outputType=json prints either the command's result or {"individualResults": [...]}.
+@NonCPS
+Map flywayResult(Map json, String key) {
+    if (json == null) {
+        return [:]
+    }
+    if (json.containsKey(key)) {
+        return json
+    }
+    if (json.individualResults instanceof List) {
+        for (Object item : (List) json.individualResults) {
+            if (item instanceof Map && ((Map) item).containsKey(key)) {
+                return (Map) item
+            }
+        }
+    }
+    return json
+}
+
+// Summary of `flyway info -outputType=json`: current version, what would run, what failed.
+@NonCPS
+Map summarizeInfo(Map json) {
+    Map info = flywayResult(json, 'migrations')
+    String current = info.schemaVersion ? info.schemaVersion.toString() : ''
+    List<String> pending = []
+    List<String> outOfOrder = []
+    List<String> failed = []
+    for (Object o : (List) (info.migrations ?: [])) {
+        Map m = (Map) o
+        String state = m.state ? m.state.toString() : ''
+        String version = m.version ? m.version.toString() : ''
+        String label = (version ? 'V' + version : 'R') + ' ' + (m.description ?: '').toString()
+        if (state == 'Pending' || state == 'Outdated') {
+            pending.add(label)
+            if (version && current && compareVersions(version, current) < 0) {
+                outOfOrder.add(label)
+            }
+        } else if (state.startsWith('Failed')) {
+            failed.add(label + ' [' + state + ']')
+        }
+    }
+    return [schemaVersion: current, pending: pending, outOfOrder: outOfOrder, failed: failed]
+}
+
+// Flyway compares version parts numerically (2026.10.13.0900 == 2026.10.13.900).
+@NonCPS
+int compareVersions(String a, String b) {
+    String[] x = a.split('\\.')
+    String[] y = b.split('\\.')
+    int n = Math.max(x.length, y.length)
+    try {
+        for (int i = 0; i < n; i++) {
+            long p = i < x.length ? Long.parseLong(x[i]) : 0L
+            long q = i < y.length ? Long.parseLong(y[i]) : 0L
+            if (p != q) {
+                return p < q ? -1 : 1
+            }
+        }
+    } catch (NumberFormatException ignored) {
+        return 0
+    }
+    return 0
+}

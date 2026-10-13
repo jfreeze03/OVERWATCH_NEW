@@ -1,0 +1,1232 @@
+// =====================================================================================================================
+// EDW Flyway kit - deploy / promote pipeline.
+// Jobs: EDW/deploy/<ID>/deploy for ID in DEV SAN SEA PHX MGM PRD (jenkins/jobs.groovy), Script Path
+// jenkins/Jenkinsfile.deploy, loaded from main. One job per runway folder; the folder holds that runway's key only.
+//
+//   Resolve policy   fw.py env --runway <ID> --format json (main's runways.toml): nothing about a runway is in Groovy
+//   Fetch bundle     copyArtifacts SOURCE_JOB #SOURCE_BUILD, lane check, fw.py verify-bundle, fw.py guard on it
+//   Licence check    flyway version -outputType=json must say Enterprise (a lapsed permit silently means Community)
+//   Promotion check  flyway info + validate on each predecessor (read-only auditor login), fw.py promote-check
+//   Deploy           lock(ALFA_EDW_<ID> [+ ALFA_EDW_RH_<ID>]) {
+//                      Pre-flight   flyway info/validate on the target, baseline check, drift (snow + fw.py
+//                                   drift-eval), check -drift (preview, advisory), check -dryrun (prod tier/DRY_RUN)
+//                      Rehearsal    clone -> migrate the clone (tasks off) -> verify -> drop the clone, always
+//                      Approval     input inside the lock (24 h), submitter = approval_group, four-eyes check
+//                      Time Travel point, Migrate, Post-deploy (info JSON archived, deploy-<ID> Bitbucket status)
+//                    }
+//
+// Why it looks the way it does (FACTS I-section, SPEC section 7):
+// * Flyway takes no lock on Snowflake (FACTS F1): the Lockable Resources lock is the only thing serializing deploys
+//   (and manual runs, if people reserve it). It is held from pre-flight to the end of migrate, so the approver
+//   approves exactly the state that gets deployed. Its name comes from runways.toml at run time, which a declarative
+//   stage-level options { lock() } cannot express (stage options are evaluated when the run starts), hence one
+//   declarative stage whose script holds the lock and runs the locked stages, each on a freshly allocated node.
+// * The approval is a scripted `input` INSIDE that locked block - never the declarative input directive - and
+//   disableRestartFromStage() means no one can restart past it (FACTS [MISSED] restart-from-stage). The input waits
+//   with no executor held. Only Jenkins admins may Replay or Configure these jobs (casc-snippet.yaml role strategy).
+// * Each stage that needs a workspace allocates a node, wipes it and unstashes two stashes made once in this run:
+//   'kit' (main's scripts/fw.py + runways.toml + flyway.toml at the revision this run started from) and 'bundle'
+//   (the verified bundle). So the policy cannot change mid-run, a 24-hour approval wait does not pin a node, and no
+//   file from an earlier run can leak into Flyway's locations. Inside a node, docker.image(..).inside() gives the
+//   python image (fw.py, Snowflake CLI) and the flyway image (Flyway, curl) the same workspace.
+// * The deploy runs from the BUNDLE (flyway.toml, migrations, callbacks); policy and checks run with MAIN's fw.py.
+//   Provenance comes from SOURCE_JOB (copyArtifacts from the absolute job path), not from what a manifest claims.
+// * Every sh step is single-quoted; values flow through environment variables only. Flyway reads FLYWAY_* variables
+//   as configuration (FLYWAY_TARGET is the migrate target version!), so fw() runs Flyway with every FLYWAY_*
+//   variable removed except those flyway.toml and licensing need. Our variables use the KIT_/RW_/FW_ prefixes.
+// * Placeholders and ignoreMigrationPatterns go on the command line as -environments.<ENV>.flyway.* overrides: in
+//   Flyway 13.10 an environment's own [environments.<ENV>.flyway] table replaces the root value instead of merging
+//   (ClassicConfiguration.getPlaceholders / getIgnoreMigrationPatterns), so root-level -placeholders.x would be
+//   ignored for every runway that defines placeholders.
+//
+// Required plugins: workflow-aggregator (Pipeline), pipeline-model-definition, pipeline-input-step, lockable-resources,
+// copyartifact, pipeline-utility-steps (readJSON/writeJSON/findFiles), docker-workflow, credentials-binding,
+// workflow-basic-steps (unstable), timestamper, git. Script security: currentBuild.getBuildCauses(String) is
+// whitelisted in current workflow-support; if your sandbox still asks, approve it once (In-process Script Approval).
+// Credentials (docs/GUIDE.md B4): this folder holds sf-flyway-<ID>, sf-flyway-AUDIT, flyway-license,
+// bitbucket-status-token; sf-account sits in /EDW. Controller env vars (casc-snippet.yaml): BITBUCKET_WORKSPACE,
+// BITBUCKET_REPO, EDW_AGENT_LABEL, optional EDW_JAVA_PROXY_ARGS and PIP_INDEX_URL.
+// =====================================================================================================================
+
+pipeline {
+    agent none
+
+    parameters {
+        // The choice list collapses to this job's own runway (its folder EDW/deploy/<ID>, or FLYWAY_TARGET when the
+        // folder or controller defines it), so the job page cannot even offer another runway.
+        choice(name: 'TARGET', choices: "${targetChoices(env.FLYWAY_TARGET, env.JOB_NAME)}",
+               description: 'Runway to deploy. Fixed by the folder of this job; any other value is refused.')
+        string(name: 'SOURCE_JOB', defaultValue: '/EDW/ci/edw-flyway/main', trim: true,
+               description: 'CI job whose bundle to deploy: /EDW/ci/edw-flyway/main (main lane), or a branch job '
+                   + '/EDW/ci/edw-flyway/<branch> (branch lane: DEV, SAN, SEA, PHX only).')
+        string(name: 'SOURCE_BUILD', defaultValue: '', trim: true,
+               description: 'Build number of SOURCE_JOB whose archived bundle is deployed (its bundle-manifest.json '
+                   + 'lists exactly what ships).')
+        string(name: 'CHANGE_TICKET', defaultValue: '', trim: true,
+               description: 'Change ticket number. Required where runways.toml sets ticket_required (PRD).')
+        booleanParam(name: 'DRY_RUN', defaultValue: false,
+                     description: 'Run every check, the dry-run report and the rehearsal, then stop: the target is '
+                         + 'not changed and no approval is asked.')
+        booleanParam(name: 'ACK_DRIFT', defaultValue: false,
+                     description: 'Proceed although drift was found on a runway whose drift_gate is "fail" (record '
+                         + 'the acceptance in the ticket).')
+        booleanParam(name: 'ALLOW_UNBASELINED', defaultValue: false,
+                     description: 'Only for a brand-new, EMPTY database: allow a target whose flyway info shows no '
+                         + 'schema version. Never for an adopted database (baseline it first, docs/GUIDE.md D5).')
+    }
+
+    options {
+        disableRestartFromStage()
+        disableConcurrentBuilds()
+        timestamps()
+        // Work stages are capped at 6 hours each (pre-flight, rehearsal, migrate); the approval may wait 24 hours.
+        // A pipeline-wide 6-hour cap would cut the approval window, so the whole run is capped at 36 hours instead.
+        timeout(time: 36, unit: 'HOURS')
+        // Deploy history is audit evidence: keep plenty (Flyway history and FLYWAY.DEPLOY_LOG keep the rest).
+        buildDiscarder(logRotator(numToKeepStr: '300', artifactNumToKeepStr: '100'))
+        // Workspaces are prepared explicitly (deleteDir + unstash) in every stage; see the header.
+        skipDefaultCheckout()
+    }
+
+    stages {
+        stage('Resolve policy') {
+            steps {
+                script { resolvePolicy() }
+            }
+        }
+
+        stage('Fetch bundle') {
+            steps {
+                script { fetchBundle() }
+            }
+        }
+
+        stage('Licence check') {
+            steps {
+                script { licenceCheck() }
+            }
+        }
+
+        stage('Promotion check') {
+            when {
+                expression { return (env.RW_PROMOTE_FROM ?: '') != '' }
+            }
+            steps {
+                script { promotionCheck() }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script { lockedDeploy() }
+            }
+        }
+    }
+
+    post {
+        failure {
+            script { echo(runbookHint()) }
+        }
+        aborted {
+            script {
+                echo('Aborted. If it stopped during "Migrate", Snowflake kept every statement that had completed: '
+                     + 'follow docs/RUNBOOKS.md R1/R6 before re-running. A rehearsal clone left behind: R12.')
+            }
+        }
+    }
+}
+
+// =====================================================================================================================
+// Settings that are not runway policy
+// =====================================================================================================================
+
+String kitDir() {
+    // Where the kit lives in the repository ('.' = the repository root; docs/GUIDE.md C1).
+    return '.'
+}
+
+String ciProject() {
+    // The multibranch CI project created by jenkins/jobs.groovy; bundles may come from its branch jobs only.
+    return '/EDW/ci/edw-flyway'
+}
+
+String agentLabel() {
+    return env.EDW_AGENT_LABEL ?: 'docker'
+}
+
+// =====================================================================================================================
+// Stages
+// =====================================================================================================================
+
+void resolvePolicy() {
+    String target = (params.TARGET ?: '').trim()
+    if (!runwayIds().contains(target)) {
+        error("TARGET '${target}' is not a runway id (${runwayIds().join(', ')})")
+    }
+    String fixed = expectedTarget(env.FLYWAY_TARGET, env.JOB_NAME)
+    if (fixed && fixed != target) {
+        error("This job deploys ${fixed} only (its folder / FLYWAY_TARGET); TARGET=${target} refused")
+    }
+    node(agentLabel()) {
+        deleteDir()
+        checkout scm
+        dir(kitDir()) {
+            String toml = readFile(file: 'runways.toml', encoding: 'UTF-8')
+            env.KIT_PYTHON_IMAGE = kitValue(toml, 'python_image')
+            env.KIT_EDITION = kitValue(toml, 'edition')
+            if (!isImageRef(env.KIT_PYTHON_IMAGE) || !env.KIT_EDITION) {
+                error('runways.toml [kit] must set python_image (an image reference) and edition')
+            }
+            withEnv(["FW_RUNWAY=${target}"]) {
+                inPython {
+                    sh(shCommon() + '''
+mkdir -p reports
+python3 scripts/fw.py env --runway "$FW_RUNWAY" --format json > reports/runway-env.json
+''')
+                }
+            }
+            applyPolicy(readJSON(file: 'reports/runway-env.json', returnPojo: true), target)
+            stash(name: 'kit', includes: 'scripts/**,runways.toml,flyway.toml', excludes: '**/__pycache__/**,**/*.pyc')
+        }
+        // Who started this run: the four-eyes rule compares the approver with this person.
+        List causes = readJSON(text: currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause').toString(),
+                               returnPojo: true)
+        env.REQUESTER = causes ? ((causes[0].userId ?: '').toString()) : ''
+    }
+
+    if (!(env.JOB_NAME ?: '').startsWith(env.RW_JENKINS_FOLDER + '/')) {
+        error("runways.toml puts ${env.RW_ID}'s deploy job in ${env.RW_JENKINS_FOLDER}, but this job is "
+              + "${env.JOB_NAME}: its folder holds another runway's credentials")
+    }
+    if (env.RW_FOUR_EYES == 'true') {
+        if (!env.RW_APPROVAL_GROUP) {
+            error("runways.toml: ${env.RW_ID} has four_eyes = true but no approval_group")
+        }
+        if (!env.REQUESTER) {
+            error("${env.RW_ID} requires four-eyes approval: start it as a person (Build with Parameters), not from "
+                  + 'a trigger, so the approver can be checked against the requester')
+        }
+    }
+    String ticket = (params.CHANGE_TICKET ?: '').trim()
+    if (ticket && !isTicket(ticket)) {
+        error("CHANGE_TICKET '${ticket}' is not a ticket number (letters, digits, . _ / -; at most 64 characters)")
+    }
+    if (env.RW_TICKET_REQUIRED == 'true' && !ticket) {
+        error("runways.toml requires a CHANGE_TICKET for ${env.RW_ID}")
+    }
+
+    // Pipeline placeholders (flyway.toml [flyway.placeholders]); the bundle's git sha and the approver come later.
+    env.FW_DEPLOY_ID = "${env.RW_ID}-${env.BUILD_NUMBER}"
+    env.FW_BUILD_URL = safeUrl(env.BUILD_URL)
+    env.FW_GIT_SHA = 'unknown'
+    env.FW_APPROVER = 'pending-approval'
+    currentBuild.description = "${env.RW_ID} <- ${params.SOURCE_JOB}#${params.SOURCE_BUILD}" +
+        (ticket ? " | ${ticket}" : '')
+    echo("Runway ${env.RW_ID}: ${env.RW_DATABASE} (${env.RW_TIER}), lock ${env.RW_LOCK}, lanes ${env.RW_LANES}, "
+         + "after [${env.RW_PROMOTE_FROM}], approval '${env.RW_APPROVAL_GROUP}', four-eyes ${env.RW_FOUR_EYES}, "
+         + "rehearsal ${env.RW_REHEARSAL}, drift gate ${env.RW_DRIFT_GATE}; requested by "
+         + "${env.REQUESTER ?: 'a trigger'}")
+}
+
+void applyPolicy(Map s, String target) {
+    env.RW_ID = required(s, 'EDW_TARGET')
+    env.RW_DATABASE = required(s, 'EDW_DATABASE')
+    env.RW_TIER = required(s, 'EDW_TIER')
+    env.RW_LOCK = required(s, 'EDW_LOCK')
+    env.RW_LANES = required(s, 'EDW_LANES')
+    env.RW_PROMOTE_FROM = optional(s, 'EDW_PROMOTE_FROM')
+    env.RW_APPROVAL_GROUP = optional(s, 'EDW_APPROVAL_GROUP')
+    env.RW_FOUR_EYES = required(s, 'EDW_FOUR_EYES')
+    env.RW_TICKET_REQUIRED = required(s, 'EDW_TICKET_REQUIRED')
+    env.RW_REHEARSAL = required(s, 'EDW_REHEARSAL')
+    env.RW_RH_ENV = optional(s, 'EDW_RH_ENVIRONMENT')
+    env.RW_RH_DB = optional(s, 'FLYWAY_RH_DB')
+    env.RW_DRIFT_GATE = required(s, 'EDW_DRIFT_GATE')
+    env.RW_SAVE_SNAPSHOT = required(s, 'EDW_SAVE_SNAPSHOT')
+    env.RW_PREVIEW_CHECKS = required(s, 'EDW_PREVIEW_CHECKS')
+    env.RW_CREDENTIALS_ID = required(s, 'EDW_CREDENTIALS_ID')
+    env.RW_SF_USER = required(s, 'FLYWAY_SF_USER').toUpperCase()
+    env.RW_SF_ROLE = required(s, 'FLYWAY_SF_ROLE')
+    env.RW_SF_WAREHOUSE = required(s, 'FLYWAY_SF_WAREHOUSE')
+    env.RW_JENKINS_FOLDER = required(s, 'EDW_JENKINS_FOLDER')
+    env.RW_MAIN_BRANCH = required(s, 'EDW_MAIN_BRANCH')
+    env.KIT_AUDIT_CREDENTIALS_ID = required(s, 'EDW_AUDITOR_CREDENTIALS_ID')
+    env.KIT_AUDIT_SF_USER = required(s, 'EDW_AUDITOR_USER').toUpperCase()
+    env.KIT_AUDIT_SF_ROLE = required(s, 'EDW_AUDITOR_ROLE')
+    env.KIT_AUDIT_SF_WAREHOUSE = required(s, 'EDW_AUDITOR_WAREHOUSE')
+    env.KIT_FLYWAY_IMAGE = required(s, 'EDW_FLYWAY_IMAGE')
+    env.KIT_FLYWAY_VERSION = required(s, 'EDW_FLYWAY_VERSION')
+    env.KIT_SNOWFLAKE_CLI = required(s, 'EDW_SNOWFLAKE_CLI')
+
+    if (env.RW_ID != target) {
+        error("fw.py env answered for ${env.RW_ID}, expected ${target}")
+    }
+    if (required(s, 'EDW_PYTHON_IMAGE') != env.KIT_PYTHON_IMAGE) {
+        error('python_image read from runways.toml differs from fw.py env: check the [kit] table syntax')
+    }
+    if (!isImageRef(env.KIT_FLYWAY_IMAGE) || !isVersion(env.KIT_SNOWFLAKE_CLI)) {
+        error('runways.toml [kit]: flyway_image must be an image reference and snowflake_cli an x.y.z version')
+    }
+    String bad = firstNonIdent([env.RW_DATABASE, env.RW_LOCK, env.RW_SF_ROLE, env.RW_SF_WAREHOUSE,
+                                env.KIT_AUDIT_SF_ROLE, env.KIT_AUDIT_SF_WAREHOUSE])
+    if (bad != null) {
+        error("runways.toml value '${bad}' is not an unquoted upper-case Snowflake identifier")
+    }
+    if (env.RW_REHEARSAL == 'true' && (!isIdent(env.RW_RH_DB) || !env.RW_RH_ENV)) {
+        error("runways.toml: ${env.RW_ID} rehearses but fw.py env reports no rehearsal environment/database")
+    }
+}
+
+void fetchBundle() {
+    String sourceJob = (params.SOURCE_JOB ?: '').trim()
+    String sourceBuild = (params.SOURCE_BUILD ?: '').trim()
+    if (!isDigits(sourceBuild)) {
+        error('SOURCE_BUILD must be the number of a CI build that produced a bundle (see its archived artifacts)')
+    }
+    String prefix = ciProject() + '/'
+    String leaf = sourceJob.startsWith(prefix) ? sourceJob.substring(prefix.length()) : ''
+    if (!leaf || leaf.contains('/') || leaf.contains('..')) {
+        error("SOURCE_JOB must be ${prefix}<branch job> (absolute path), got '${sourceJob}'")
+    }
+    if (leaf.startsWith('PR-')) {
+        error('Pull-request builds never produce bundles: deploy main, or a branch job without an open PR')
+    }
+    // The lane is decided by WHERE the bundle comes from; the manifest's own branch field is only cross-checked.
+    String lane = leaf == env.RW_MAIN_BRANCH ? 'main' : 'branch'
+    if (!csv(env.RW_LANES).contains(lane)) {
+        error("${env.RW_ID} accepts lanes [${env.RW_LANES}]; ${sourceJob} is a ${lane}-lane job")
+    }
+    env.BUNDLE_LANE = lane
+    env.BUNDLE_SOURCE = "${sourceJob}#${sourceBuild}"
+
+    onAgent(false) {
+        copyArtifacts(projectName: sourceJob, selector: specific(sourceBuild),
+                      filter: 'dist/edw-flyway-bundle-*.tar.gz', target: 'incoming', fingerprintArtifacts: true)
+        def found = findFiles(glob: 'incoming/dist/edw-flyway-bundle-*.tar.gz')
+        if (found.size() != 1) {
+            error("${env.BUNDLE_SOURCE} archived ${found.size()} bundle files; expected exactly one")
+        }
+        withEnv(["BUNDLE_TGZ=${found[0].path}", "REQUIRE_BRANCH=${lane == 'main' ? env.RW_MAIN_BRANCH : ''}"]) {
+            inPython {
+                // MAIN's fw.py verifies the bundle and runs the guard rules on the bundle's own files (--root):
+                // a branch bundle cannot bring a weaker fw.py, and FG018 re-checks its flyway.toml URLs.
+                sh(shCommon() + '''
+set -- --bundle "$BUNDLE_TGZ" --extract work --manifest-out "$RPT/bundle-manifest.json"
+if [ -n "$REQUIRE_BRANCH" ]; then set -- "$@" --require-branch "$REQUIRE_BRANCH"; fi
+python3 scripts/fw.py verify-bundle "$@"
+python3 scripts/fw.py --root work/bundle guard --junit "$RPT/bundle-guard.xml" --json "$RPT/bundle-guard.json"
+''')
+            }
+        }
+        Map m = readJSON(file: "reports/${env.RW_ID}/bundle-manifest.json", returnPojo: true)
+        String sha = (m.git_sha ?: '').toString()
+        String branch = (m.branch ?: '').toString()
+        if (!isSha(sha)) {
+            error("bundle manifest git_sha '${sha}' is not a full commit hash")
+        }
+        if ((m.build_id ?: '').toString() != sourceBuild) {
+            error("bundle was built as #${m.build_id}, but SOURCE_BUILD is ${sourceBuild}")
+        }
+        if (lane == 'branch' && branch == env.RW_MAIN_BRANCH) {
+            error("a branch job's bundle claims branch '${branch}': refused (provenance comes from SOURCE_JOB)")
+        }
+        if ((m.flyway_version ?: '').toString() != env.KIT_FLYWAY_VERSION) {
+            echo("NOTE: bundle was built with Flyway ${m.flyway_version}; this deploy runs ${env.KIT_FLYWAY_VERSION} "
+                 + '(runways.toml on main)')
+        }
+        env.FW_GIT_SHA = sha
+        env.BUNDLE_BRANCH = branch
+        env.BUNDLE_DIGEST = (m.digest ?: '').toString()
+        stash(name: 'bundle', includes: "work/bundle/**,reports/${env.RW_ID}/bundle-manifest.json")
+        currentBuild.description += " | ${lane} ${head(sha, 10)}"
+        echo("Bundle ${env.BUNDLE_SOURCE}: branch ${branch}, commit ${sha}, digest ${env.BUNDLE_DIGEST}, "
+             + "${m.versioned?.size() ?: 0} versioned + ${m.repeatable?.size() ?: 0} repeatable")
+    }
+}
+
+void licenceCheck() {
+    onAgent(true) {
+        inFlyway {
+            withLicence {
+                dir('work/bundle') {
+                    sh(shCommon() + '''
+fw version -outputType=json > "$RPT/flyway-version.json"
+''')
+                }
+            }
+        }
+        assertEnterprise("reports/${env.RW_ID}/flyway-version.json")
+    }
+}
+
+void promotionCheck() {
+    List<String> preds = csv(env.RW_PROMOTE_FROM)
+    onAgent(true) {
+        List<String> validated = []
+        inFlyway {
+            withLicence {
+                withAuditorLogin {
+                    dir('work/bundle') {
+                        for (int i = 0; i < preds.size(); i++) {
+                            String pred = preds[i]
+                            int rc = 0
+                            // validate proves the VERSIONED checksums match what ran there (FACTS F5); nothing may be
+                            // pending there (*:pending is not ignored). Env-scoped override: see the header.
+                            withEnv(["FW_PRED=${pred}"]) {
+                                rc = sh(returnStatus: true, script: shCommon() + '''
+check_login
+echo "== ${FW_PRED}: flyway info + validate with the read-only auditor login"
+fw_env "$FW_PRED" info -outputType=json > "$RPT/pred-${FW_PRED}-info.json"
+fw_env "$FW_PRED" validate "-environments.${FW_PRED}.flyway.ignoreMigrationPatterns=*:missing,*:future" 2>&1 \
+  | tee "$RPT/pred-${FW_PRED}-validate.log"
+''')
+                            }
+                            if (rc == 0) {
+                                validated.add(pred)
+                            } else {
+                                echo("${pred}: info/validate failed (reports/${env.RW_ID}/pred-${pred}-validate.log); "
+                                     + 'it cannot count as the predecessor for this bundle')
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Any-of: the bundle must be completely and cleanly applied on at least one validated predecessor.
+        withEnv(["FW_PREDS_OK=${validated.join(' ')}"]) {
+            inPython {
+                sh(shCommon() + '''
+set -- --runway "$RW_ID" --bundle-manifest "$RPT/bundle-manifest.json"
+for p in $FW_PREDS_OK; do set -- "$@" --info "${p}=$RPT/pred-${p}-info.json"; done
+python3 scripts/fw.py promote-check "$@" 2>&1 | tee "$RPT/promote-check.txt"
+''')
+            }
+        }
+    }
+}
+
+void lockedDeploy() {
+    Map lockArgs = [resource: env.RW_LOCK]
+    if (env.RW_REHEARSAL == 'true') {
+        // The rehearsal clone is a resource of its own (casc-snippet.yaml), so a manual job reserving it also waits.
+        lockArgs.extra = [[resource: env.RW_RH_DB]]
+    }
+    echo("Waiting for lock ${env.RW_LOCK}${env.RW_REHEARSAL == 'true' ? ' + ' + env.RW_RH_DB : ''} "
+         + '(one deploy per database: Flyway itself takes no lock on Snowflake)')
+    lock(lockArgs) {
+        stage('Pre-flight') {
+            timeout(time: 6, unit: 'HOURS') {
+                preflight()
+            }
+        }
+        if (env.PENDING_COUNT == '0') {
+            currentBuild.description += ' | nothing pending'
+            echo("Nothing is pending on ${env.RW_DATABASE}: no rehearsal, approval or migrate needed.")
+            return
+        }
+        stage('Rehearsal') {
+            if (env.RW_REHEARSAL == 'true') {
+                timeout(time: 6, unit: 'HOURS') {
+                    rehearse()
+                }
+            } else {
+                env.REHEARSAL_RESULT = 'not required (runways.toml rehearsal = false)'
+                echo("runways.toml: ${env.RW_ID} does not rehearse on a clone")
+            }
+        }
+        if (params.DRY_RUN) {
+            currentBuild.description += " | DRY RUN: ${env.PENDING_COUNT} pending, nothing applied"
+            echo('DRY_RUN: stopping before approval and migrate; the target was not changed.')
+            return
+        }
+        stage('Approval') {
+            approve()
+        }
+        onAgent(true) {
+            timeout(time: 6, unit: 'HOURS') {
+                stage('Time Travel point') {
+                    recordTimeTravelPoint()
+                }
+                stage('Migrate') {
+                    migrateTarget()
+                }
+                stage('Post-deploy') {
+                    postDeploy()
+                }
+            }
+        }
+    }
+}
+
+void preflight() {
+    onAgent(true) {
+        // 1. Target state. Pending is expected on a target; patterns otherwise as flyway.toml has them per tier.
+        withEnv(["FW_PREFLIGHT_IGNORE=${validateIgnore(env.RW_TIER, true)}"]) {
+            inFlyway {
+                withLicence {
+                    withTargetLogin {
+                        dir('work/bundle') {
+                            sh(shCommon() + '''
+check_login
+echo "== ${RW_DATABASE}: flyway info + validate (deploy login ${EXPECT_SF_USER})"
+fw_env "$RW_ID" info -outputType=json > "$RPT/info-before.json"
+fw_env "$RW_ID" validate "-environments.${RW_ID}.flyway.ignoreMigrationPatterns=${FW_PREFLIGHT_IGNORE}"
+''')
+                        }
+                    }
+                }
+            }
+        }
+        Map s = summarizeInfo(readJSON(file: "reports/${env.RW_ID}/info-before.json", returnPojo: true))
+        if (s.failed) {
+            error("${env.RW_DATABASE} has failed migrations: ${s.failed.join('; ')}. A failed Snowflake migration "
+                  + 'is partly applied: clean up and repair first (docs/RUNBOOKS.md R1).')
+        }
+        if (!s.schemaVersion && !params.ALLOW_UNBASELINED) {
+            error("${env.RW_DATABASE} has no Flyway schema version: it was never baselined. Baseline it "
+                  + '(docs/GUIDE.md D5), or set ALLOW_UNBASELINED only for a brand-new empty database.')
+        }
+        env.SCHEMA_VERSION = s.schemaVersion ?: 'none'
+        env.PENDING_COUNT = "${s.pending.size()}"
+        env.PENDING_LIST = clip(s.pending.join('\n'), 2500)
+        env.OUT_OF_ORDER_LIST = clip(s.outOfOrder.join('\n'), 1500)
+        echo("${env.RW_DATABASE} is at ${env.SCHEMA_VERSION}; ${env.PENDING_COUNT} pending:\n${env.PENDING_LIST}")
+        if (s.outOfOrder) {
+            echo("OUT OF ORDER (older than ${env.SCHEMA_VERSION}, applied anyway because outOfOrder = true):\n"
+                 + env.OUT_OF_ORDER_LIST)
+        }
+
+        // 2. Out-of-band DDL since the last successful migration (INFORMATION_SCHEMA; not a preview feature).
+        if (s.schemaVersion) {
+            inPython {
+                withTargetLogin {
+                    sh(shCommon() + '''
+check_login
+snow_setup
+python3 scripts/fw.py drift-sql --runway "$RW_ID" > "$RPT/drift.sql"
+snow_sql --format json -f "$RPT/drift.sql" > "$RPT/drift-rows.json"
+set -- --runway "$RW_ID" --rows "$RPT/drift-rows.json"
+if [ "${ACK_DRIFT:-false}" = "true" ]; then set -- "$@" --ack; fi
+python3 scripts/fw.py drift-eval "$@" 2>&1 | tee "$RPT/drift.txt"
+''')
+                }
+            }
+            env.DRIFT_SUMMARY = firstLine(readFile(file: "reports/${env.RW_ID}/drift.txt", encoding: 'UTF-8'))
+        } else {
+            env.DRIFT_SUMMARY = 'not checked (no Flyway history yet)'
+            echo('Drift check skipped: the database has no Flyway history table yet.')
+        }
+
+        // 3. Enterprise reports. check -drift compares with the last saved snapshot: PREVIEW on Snowflake, so it
+        //    never blocks (FACTS F11). check -dryrun writes the exact SQL migrate would run, callbacks included.
+        boolean wantDrift = env.RW_PREVIEW_CHECKS == 'true'
+        boolean wantDryRun = env.RW_TIER == 'prod' || params.DRY_RUN
+        if (wantDrift || wantDryRun) {
+            withEnv(["FW_WANT_DRIFT=${wantDrift}", "FW_WANT_DRYRUN=${wantDryRun}"]) {
+                inFlyway {
+                    withLicence {
+                        withTargetLogin {
+                            dir('work/bundle') {
+                                sh(shCommon() + '''
+check_login
+if [ "$FW_WANT_DRIFT" = "true" ]; then
+  fw_env "$RW_ID" check -drift "-reportFilename=$RPT/drift-check.html" \
+    || echo "WARNING: flyway check -drift failed or found drift (advisory, preview on Snowflake): see the report"
+fi
+if [ "$FW_WANT_DRYRUN" = "true" ]; then
+  fw_env "$RW_ID" check -dryrun "-dryRunOutput=$RPT/dryrun.sql" "-reportFilename=$RPT/dryrun.html"
+fi
+''')
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        currentBuild.description += " | ${env.PENDING_COUNT} pending"
+    }
+}
+
+void rehearse() {
+    onAgent(true) {
+        try {
+            inPython {
+                withTargetLogin {
+                    sh(shCommon() + '''
+check_login
+snow_setup
+python3 scripts/fw.py rehearsal-sql --runway "$RW_ID" --action create > "$RPT/rehearsal-create.sql"
+echo "== zero-copy clone ${RW_RH_DB} of ${RW_DATABASE}"
+snow_sql -f "$RPT/rehearsal-create.sql"
+''')
+                }
+            }
+            // RH_<ID> environment: target placeholders except edw_db (the clone) and tasks_enabled = false.
+            withEnv(["FLYWAY_RH_DB=${env.RW_RH_DB}", "FW_DEPLOY_ID=${env.RW_RH_ENV}-${env.BUILD_NUMBER}"]) {
+                inFlyway {
+                    withLicence {
+                        withTargetLogin {
+                            dir('work/bundle') {
+                                sh(shCommon() + '''
+check_login
+echo "== rehearsal: flyway migrate on ${FLYWAY_RH_DB} (environment ${RW_RH_ENV}; task graphs stay suspended)"
+fw_env "$RW_RH_ENV" migrate
+fw_env "$RW_RH_ENV" info -outputType=json > "$RPT/rehearsal-info.json"
+fw_env "$RW_RH_ENV" validate
+''')
+                            }
+                        }
+                    }
+                }
+            }
+            Map r = summarizeInfo(readJSON(file: "reports/${env.RW_ID}/rehearsal-info.json", returnPojo: true))
+            if (r.pending || r.failed) {
+                error("Rehearsal left work undone on ${env.RW_RH_DB}: pending ${r.pending}, failed ${r.failed}")
+            }
+            env.REHEARSAL_RESULT = "passed on ${env.RW_RH_DB} (${env.PENDING_COUNT} item(s) applied to the clone)"
+            echo("Rehearsal ${env.REHEARSAL_RESULT}")
+        } finally {
+            // Always drop the clone (it holds a copy of production data and accrues storage as the source changes).
+            int rc = 1
+            inPython {
+                withTargetLogin {
+                    rc = sh(returnStatus: true, script: shCommon() + '''
+check_login
+snow_setup
+python3 scripts/fw.py rehearsal-sql --runway "$RW_ID" --action drop > "$RPT/rehearsal-drop.sql"
+echo "== dropping rehearsal clone ${RW_RH_DB}"
+snow_sql -f "$RPT/rehearsal-drop.sql"
+''')
+                }
+            }
+            if (rc != 0) {
+                unstable("Rehearsal clone ${env.RW_RH_DB} was NOT dropped: drop it by hand (docs/RUNBOOKS.md R12)")
+            }
+        }
+    }
+}
+
+void approve() {
+    if (!env.RW_APPROVAL_GROUP) {
+        env.FW_APPROVER = 'not-required:' + (env.REQUESTER ? sanitizeId(env.REQUESTER) : 'trigger')
+        echo("runways.toml: no approval_group for ${env.RW_ID}; no approval step (recorded as ${env.FW_APPROVER}).")
+        return
+    }
+    def answer = null
+    timeout(time: 24, unit: 'HOURS') {
+        answer = input(id: 'DeployApproval', message: approvalMessage(), ok: "Deploy to ${env.RW_DATABASE}",
+                       submitter: env.RW_APPROVAL_GROUP, submitterParameter: 'APPROVER')
+    }
+    // With no input parameters the step returns the submitter's user id (a map if parameters are ever added).
+    String approver = ((answer instanceof Map ? answer.APPROVER : answer) ?: '').toString().trim()
+    if (!approver) {
+        error('The approval did not record who approved it')
+    }
+    if (env.RW_FOUR_EYES == 'true' && approver.equalsIgnoreCase(env.REQUESTER ?: '')) {
+        error("Four-eyes: ${approver} started this deploy and cannot also approve it. Start a new run and have "
+              + "another member of ${env.RW_APPROVAL_GROUP} approve.")
+    }
+    env.FW_APPROVER = sanitizeId(approver)
+    currentBuild.description += " | approved by ${approver}"
+    echo("Approved by ${approver} (requested by ${env.REQUESTER ?: 'a trigger'})")
+}
+
+void recordTimeTravelPoint() {
+    // Statements already committed by a deploy can be undone only with Time Travel (docs/RUNBOOKS.md R3): record the
+    // exact instant before migrate starts, from Snowflake's clock, plus the agent's UTC clock as a cross-check.
+    writeFile(file: "reports/${env.RW_ID}/time-travel-point.sql", text: timeTravelSql(env.RW_DATABASE),
+              encoding: 'UTF-8')
+    inPython {
+        withTargetLogin {
+            sh(shCommon() + '''
+check_login
+snow_setup
+date -u +%Y-%m-%dT%H:%M:%SZ > "$RPT/time-travel-agent-utc.txt"
+snow_sql --format json -f "$RPT/time-travel-point.sql" > "$RPT/time-travel-point.json"
+''')
+        }
+    }
+    List rows = jsonRows(readJSON(file: "reports/${env.RW_ID}/time-travel-point.json", returnPojo: true))
+    Map row = rows ? (Map) rows[0] : [:]
+    env.TT_POINT = (row.TT_POINT ?: '').toString()
+    String agentUtc = readFile(file: "reports/${env.RW_ID}/time-travel-agent-utc.txt", encoding: 'UTF-8').trim()
+    if (!env.TT_POINT) {
+        error('Could not read CURRENT_TIMESTAMP() from Snowflake: refusing to migrate without a Time Travel point')
+    }
+    echo("TIME TRAVEL POINT for ${env.RW_DATABASE}: ${env.TT_POINT} (agent UTC ${agentUtc}; database retention "
+         + "${row.RETENTION_DAYS ?: '?'} day(s)). Example: CREATE DATABASE <restore_db> CLONE ${env.RW_DATABASE} "
+         + "AT (TIMESTAMP => '${env.TT_POINT}'::TIMESTAMP_TZ); - see docs/RUNBOOKS.md R3 before using it.")
+}
+
+void migrateTarget() {
+    boolean ok = false
+    inFlyway {
+        withLicence {
+            withTargetLogin {
+                postStatus('INPROGRESS', "Deploying ${env.PENDING_COUNT} change(s) to ${env.RW_DATABASE}")
+                try {
+                    dir('work/bundle') {
+                        sh(shCommon() + '''
+check_login
+set --
+if [ "$RW_SAVE_SNAPSHOT" = "true" ]; then set -- -migrate.saveSnapshot=true; fi
+echo "== flyway migrate ${RW_DATABASE}: deploy_id ${FW_DEPLOY_ID}, commit ${FW_GIT_SHA}, approver ${FW_APPROVER}"
+fw_env "$RW_ID" migrate "$@"
+''')
+                    }
+                    ok = true
+                } finally {
+                    dir('work/bundle') {
+                        sh(returnStatus: true, script: shCommon() + '''
+fw_env "$RW_ID" info -outputType=json > "$RPT/info-after.json"
+''')
+                    }
+                    postStatus(ok ? 'SUCCESSFUL' : 'FAILED',
+                               ok ? "Deployed to ${env.RW_DATABASE} (approver ${env.FW_APPROVER})"
+                                  : "Migrate FAILED on ${env.RW_DATABASE}: partly applied, see docs/RUNBOOKS.md R1")
+                    writeDeploySummary(ok ? 'SUCCEEDED' : 'FAILED')
+                }
+            }
+        }
+    }
+}
+
+void postDeploy() {
+    String path = "reports/${env.RW_ID}/info-after.json"
+    if (!fileExists(path)) {
+        error("flyway info after migrate did not produce ${path}")
+    }
+    Map s = summarizeInfo(readJSON(file: path, returnPojo: true))
+    if (s.failed || s.pending) {
+        error("After migrate ${env.RW_DATABASE} still shows failed ${s.failed} / pending ${s.pending}")
+    }
+    currentBuild.description += " | deployed, now ${s.schemaVersion}"
+    echo("${env.RW_DATABASE} is at ${s.schemaVersion}. Next: smoke tests, task roots, DEPLOY_LOG "
+         + "(DEPLOY_ID = '${env.FW_DEPLOY_ID}'); Time Travel point ${env.TT_POINT}.")
+}
+
+// =====================================================================================================================
+// Bitbucket status, approval text, summary
+// =====================================================================================================================
+
+// deploy-<ID> commit status on the bundle's commit (Bitbucket has no deployment API for external CI, FACTS I4-06).
+// Posted for main-lane bundles only: a FAILED deploy-SAN on a feature branch's head would count in that branch's PR
+// merge checks (FACTS I5-01/I5-05). Best effort: it never changes the build result.
+void postStatus(String state, String description) {
+    if (env.BUNDLE_LANE != 'main') {
+        echo("Bitbucket status not posted for a ${env.BUNDLE_LANE}-lane bundle (it would affect that branch's PR)")
+        return
+    }
+    if (!isSlug(env.BITBUCKET_WORKSPACE) || !isSlug(env.BITBUCKET_REPO)) {
+        echo('WARNING: BITBUCKET_WORKSPACE / BITBUCKET_REPO are not set (casc-snippet.yaml): no Bitbucket status')
+        return
+    }
+    String file = "${env.RPT}/bb-status-${state}.json"
+    writeJSON(file: file, json: [
+        key        : "deploy-${env.RW_ID}".toString(),
+        state      : state,
+        name       : "Flyway deploy ${env.RW_ID} (${env.RW_DATABASE})".toString(),
+        url        : env.BUILD_URL ?: '',
+        description: clip(description, 250)
+    ])
+    withCredentials([string(credentialsId: 'bitbucket-status-token', variable: 'BB_TOKEN')]) {
+        withEnv(["BB_STATUS_FILE=${file}"]) {
+            int rc = sh(returnStatus: true, script: shCommon() + '''
+if ! command -v curl > /dev/null 2>&1; then
+  echo "WARNING: kit.flyway_image has no curl: Bitbucket status not posted"
+  exit 3
+fi
+hdr="$(mktemp "${WORKSPACE}@tmp/bb-header.XXXXXX")"
+trap 'rm -f "$hdr"' EXIT
+# The token goes through a 0600 header file, never onto curl's command line (visible in ps).
+printf 'Authorization: Bearer %s\n' "$BB_TOKEN" > "$hdr"
+url="https://api.bitbucket.org/2.0/repositories/${BITBUCKET_WORKSPACE}/${BITBUCKET_REPO}"
+url="${url}/commit/${FW_GIT_SHA}/statuses/build"
+code="$(curl -sS --retry 3 -o /dev/null -w '%{http_code}' -X POST -H @"$hdr" \
+  -H 'Content-Type: application/json' --data-binary @"$BB_STATUS_FILE" "$url")" || code="000"
+case "$code" in
+  2??) echo "Bitbucket status deploy-${RW_ID} posted on ${FW_GIT_SHA}" ;;
+  *) echo "WARNING: Bitbucket status not posted (HTTP ${code})"; exit 3 ;;
+esac
+''')
+            if (rc != 0) {
+                echo('WARNING: the deploy-<ID> status is missing in Bitbucket; the Jenkins build and '
+                     + 'FLYWAY.DEPLOY_LOG remain the record.')
+            }
+        }
+    }
+}
+
+String approvalMessage() {
+    List<String> lines = []
+    lines.add("Deploy ${env.BUNDLE_SOURCE} to ${env.RW_DATABASE} (${env.RW_TIER}).")
+    lines.add("Commit ${env.FW_GIT_SHA} on ${env.BUNDLE_BRANCH}; bundle digest ${head(env.BUNDLE_DIGEST, 16)}.")
+    lines.add("Change ticket: ${params.CHANGE_TICKET ?: 'none'}. Requested by: ${env.REQUESTER ?: 'a trigger'}.")
+    lines.add("Current version ${env.SCHEMA_VERSION}; ${env.PENDING_COUNT} pending:")
+    lines.add(env.PENDING_LIST ?: '(none)')
+    if (env.OUT_OF_ORDER_LIST) {
+        lines.add('OUT OF ORDER (older than the current version, will be applied anyway):')
+        lines.add(env.OUT_OF_ORDER_LIST)
+    }
+    lines.add("Drift: ${env.DRIFT_SUMMARY ?: 'n/a'}" + (params.ACK_DRIFT ? ' (ACK_DRIFT set by the requester)' : ''))
+    lines.add("Rehearsal: ${env.REHEARSAL_RESULT ?: 'n/a'}")
+    lines.add("Evidence (build artifacts): reports/${env.RW_ID}/ dryrun.sql/html, drift.txt, rehearsal-info.json, "
+              + 'promote-check.txt.')
+    if (env.RW_FOUR_EYES == 'true') {
+        lines.add("Four-eyes: the approver must not be ${env.REQUESTER}.")
+    }
+    return lines.join('\n')
+}
+
+void writeDeploySummary(String result) {
+    writeJSON(file: "${env.RPT}/deploy-summary.json", pretty: 2, json: [
+        result        : result,
+        runway        : env.RW_ID,
+        database      : env.RW_DATABASE,
+        deploy_id     : env.FW_DEPLOY_ID,
+        source        : env.BUNDLE_SOURCE,
+        lane          : env.BUNDLE_LANE,
+        git_sha       : env.FW_GIT_SHA,
+        bundle_digest : env.BUNDLE_DIGEST,
+        change_ticket : params.CHANGE_TICKET ?: '',
+        requester     : env.REQUESTER ?: '',
+        approver      : env.FW_APPROVER,
+        version_before: env.SCHEMA_VERSION,
+        pending       : env.PENDING_LIST ?: '',
+        time_travel   : env.TT_POINT ?: '',
+        build_url     : env.BUILD_URL ?: ''
+    ])
+}
+
+String runbookHint() {
+    return 'Deploy failed. docs/RUNBOOKS.md: R1 failed migration (Snowflake DDL is not transactional: inspect '
+        + 'FLYWAY."flyway_schema_history" before anything else), R2 checksum mismatch, R5 drift gate, R6 stuck lock / '
+        + 'aborted migrate, R7 licence (exit 35), R10 cross-environment guard, R12 rehearsal clone left behind. '
+        + "Evidence: build artifacts reports/${env.RW_ID ?: '<ID>'}/."
+}
+
+// =====================================================================================================================
+// Execution helpers
+// =====================================================================================================================
+
+// A fresh node: wiped workspace + this run's stashes, RPT = reports/<ID>, reports archived whatever happens.
+void onAgent(boolean withBundle, Closure body) {
+    node(agentLabel()) {
+        deleteDir()
+        unstash 'kit'
+        if (withBundle) {
+            unstash 'bundle'
+        }
+        withEnv(["RPT=${env.WORKSPACE}/reports/${env.RW_ID}"]) {
+            try {
+                sh 'mkdir -p "$RPT"'
+                body()
+            } finally {
+                archiveArtifacts(artifacts: 'reports/**', allowEmptyArchive: true)
+            }
+        }
+    }
+}
+
+// The kit's python image (fw.py, Snowflake CLI), as the Jenkins uid.
+void inPython(Closure body) {
+    docker.image(env.KIT_PYTHON_IMAGE).inside {
+        withEnv(['PYTHONDONTWRITEBYTECODE=1']) {
+            body()
+        }
+    }
+}
+
+// The pinned Flyway image. Its ENTRYPOINT is flyway; Jenkins must start the container with `cat` (FACTS I3-01/02).
+void inFlyway(Closure body) {
+    docker.image(env.KIT_FLYWAY_IMAGE).inside('--entrypoint=""') {
+        withEnv(flywayEnv()) {
+            body()
+        }
+    }
+}
+
+// JAVA_ARGS: user.home in <ws>@tmp keeps the licence permit/refresh token writable for the arbitrary Jenkins uid and
+// out of archived paths (FACTS I3-04); BouncyCastle decrypts the encrypted PKCS#8 key; EDW_JAVA_PROXY_ARGS for a
+// proxy (Flyway 13.9+ ignores OS proxy settings).
+List flywayEnv() {
+    String home = "${env.WORKSPACE}@tmp/flyway-home"
+    String javaArgs = "-Duser.home=${home} -Dnet.snowflake.jdbc.useBundledBouncyCastleForPrivateKeyDecryption=true"
+    if (env.EDW_JAVA_PROXY_ARGS?.trim()) {
+        javaArgs += ' ' + env.EDW_JAVA_PROXY_ARGS.trim()
+    }
+    return ["JAVA_ARGS=${javaArgs}".toString(), "HOME=${home}".toString()]
+}
+
+void withLicence(Closure body) {
+    withCredentials([usernamePassword(credentialsId: 'flyway-license', usernameVariable: 'FLYWAY_EMAIL',
+                                      passwordVariable: 'FLYWAY_TOKEN')]) {
+        body()
+    }
+}
+
+// Key-pair login for flyway.toml (${env.FLYWAY_SF_*}) and the Snowflake CLI, from an "SSH Username with private key"
+// credential in this job's folder.
+void withLogin(String credentialsId, String expectUser, String role, String warehouse, Closure body) {
+    withCredentials([
+        sshUserPrivateKey(credentialsId: credentialsId, keyFileVariable: 'FLYWAY_SF_KEY_FILE',
+                          passphraseVariable: 'FLYWAY_SF_KEY_PWD', usernameVariable: 'FLYWAY_SF_USER'),
+        string(credentialsId: 'sf-account', variable: 'SNOWFLAKE_ACCOUNT')
+    ]) {
+        withEnv(["EXPECT_SF_USER=${expectUser}", "FLYWAY_SF_ROLE=${role}", "FLYWAY_SF_WAREHOUSE=${warehouse}"]) {
+            body()
+        }
+    }
+}
+
+void withTargetLogin(Closure body) {
+    withLogin(env.RW_CREDENTIALS_ID, env.RW_SF_USER, env.RW_SF_ROLE, env.RW_SF_WAREHOUSE, body)
+}
+
+void withAuditorLogin(Closure body) {
+    withLogin(env.KIT_AUDIT_CREDENTIALS_ID, env.KIT_AUDIT_SF_USER, env.KIT_AUDIT_SF_ROLE, env.KIT_AUDIT_SF_WAREHOUSE,
+              body)
+}
+
+// A lapsed or unreachable permit silently downgrades Flyway to Community (FACTS F12): stop unless the edition and
+// the version are exactly what runways.toml pins.
+void assertEnterprise(String versionJson) {
+    Map v = flywayResult(readJSON(file: versionJson, returnPojo: true), 'edition')
+    String edition = (v.edition ?: 'COMMUNITY').toString()
+    String version = (v.version ?: '').toString()
+    echo("Flyway ${version}, edition ${edition}, permit expiry ${v.permitExpiry ?: 'n/a'}")
+    if (!edition.equalsIgnoreCase(env.KIT_EDITION)) {
+        error("Flyway reports edition ${edition}, runways.toml requires ${env.KIT_EDITION}: the licence permit is "
+              + 'missing, expired or unreachable (docs/RUNBOOKS.md R7; behind a proxy set EDW_JAVA_PROXY_ARGS)')
+    }
+    if (version != env.KIT_FLYWAY_VERSION) {
+        error("Image ${env.KIT_FLYWAY_IMAGE} runs Flyway ${version}, runways.toml pins ${env.KIT_FLYWAY_VERSION}")
+    }
+}
+
+String required(Map s, String key) {
+    String v = (s[key] ?: '').toString().trim()
+    if (!v) {
+        error("fw.py env did not report ${key}: check runways.toml")
+    }
+    return v
+}
+
+String optional(Map s, String key) {
+    return (s[key] ?: '').toString().trim()
+}
+
+// Shell prelude for every sh step. bash (both kit images have it) for pipefail; no -x, so we echo what matters.
+String shCommon() {
+    return '''#!/bin/bash
+set -euo pipefail
+
+# Flyway with a controlled environment: drop every FLYWAY_*/flyway_* variable except the ones flyway.toml and
+# licensing read, then always load ./flyway.toml explicitly (no user-home or execution-dir config files).
+fw() {
+  (
+    for v in $(compgen -e); do
+      case "$v" in
+        FLYWAY_EMAIL|FLYWAY_TOKEN|FLYWAY_OFFLINE_PERMIT_PATH) ;;
+        FLYWAY_SF_USER|FLYWAY_SF_ROLE|FLYWAY_SF_WAREHOUSE|FLYWAY_SF_KEY_FILE|FLYWAY_SF_KEY_PWD|FLYWAY_RH_DB) ;;
+        FLYWAY_*|flyway_*) unset "$v" ;;
+      esac
+    done
+    mkdir -p "${WORKSPACE}@tmp/flyway-home"
+    exec flyway -configFiles=flyway.toml "$@"
+  )
+}
+
+# fw_env <ENV> <args...>: an environment-bound Flyway command with the pipeline placeholders scoped to <ENV>.
+fw_env() {
+  local e="$1"
+  shift
+  fw -environment="$e" \
+    "-environments.${e}.flyway.placeholders.deploy_id=${FW_DEPLOY_ID}" \
+    "-environments.${e}.flyway.placeholders.git_sha=${FW_GIT_SHA}" \
+    "-environments.${e}.flyway.placeholders.build_url=${FW_BUILD_URL}" \
+    "-environments.${e}.flyway.placeholders.approver=${FW_APPROVER}" \
+    "$@"
+}
+
+# The bound Jenkins credential must be the login runways.toml names (catches a key filed in the wrong folder).
+check_login() {
+  local got
+  got="$(printf '%s' "${FLYWAY_SF_USER:-}" | tr '[:lower:]' '[:upper:]')"
+  if [ -z "${EXPECT_SF_USER:-}" ] || [ "$got" != "$EXPECT_SF_USER" ]; then
+    echo "Jenkins credential user is not ${EXPECT_SF_USER:-<unset>} (runways.toml): wrong key in this folder?" >&2
+    return 1
+  fi
+}
+
+# Snowflake CLI (pinned by runways.toml snowflake_cli) in a venv under <ws>@tmp, reused while the version matches.
+# HOME/SNOWFLAKE_HOME point at <ws>@tmp because the Jenkins uid has no home directory in the image. pip honours
+# PIP_INDEX_URL / HTTPS_PROXY from the controller environment.
+snow_setup() {
+  local venv="${WORKSPACE}@tmp/snowflake-cli-${KIT_SNOWFLAKE_CLI}"
+  export HOME="${WORKSPACE}@tmp/snow-home"
+  export SNOWFLAKE_HOME="${HOME}/.snowflake"
+  export PIP_CACHE_DIR="${WORKSPACE}@tmp/pip-cache"
+  mkdir -p "$SNOWFLAKE_HOME"
+  chmod 700 "$HOME" "$SNOWFLAKE_HOME"
+  if [ ! -f "${venv}/.installed" ]; then
+    rm -rf "$venv"
+    python3 -m venv "$venv"
+    "${venv}/bin/pip" install --quiet --disable-pip-version-check "snowflake-cli==${KIT_SNOWFLAKE_CLI}"
+    touch "${venv}/.installed"
+  fi
+  SNOW="${venv}/bin/snow"
+}
+
+# snow_sql <snow sql args...>: a temporary key-pair connection (no config file, no password). The key's passphrase
+# reaches the CLI only through PRIVATE_KEY_PASSPHRASE. Flags per Snowflake CLI 3.x - verify on the first run.
+snow_sql() {
+  PRIVATE_KEY_PASSPHRASE="$FLYWAY_SF_KEY_PWD" "$SNOW" sql --temporary-connection \
+    --account "$SNOWFLAKE_ACCOUNT" --user "$FLYWAY_SF_USER" --role "$FLYWAY_SF_ROLE" \
+    --warehouse "$FLYWAY_SF_WAREHOUSE" --authenticator SNOWFLAKE_JWT \
+    --private-key-file "$FLYWAY_SF_KEY_FILE" "$@"
+}
+'''
+}
+
+// =====================================================================================================================
+// Pure functions (@NonCPS: no steps inside)
+// =====================================================================================================================
+
+@NonCPS
+List<String> runwayIds() {
+    return ['DEV', 'SAN', 'SEA', 'PHX', 'MGM', 'PRD']
+}
+
+// The runway this job may deploy: FLYWAY_TARGET when the folder/controller sets it, else the job's folder name
+// (EDW/deploy/<ID>/deploy). Empty when neither says (e.g. a copy of the job outside the deploy folders).
+@NonCPS
+String expectedTarget(String folderTarget, String jobName) {
+    String t = (folderTarget ?: '').trim().toUpperCase()
+    if (t) {
+        return t
+    }
+    String[] parts = (jobName ?: '').split('/')
+    if (parts.length >= 2 && runwayIds().contains(parts[parts.length - 2])) {
+        return parts[parts.length - 2]
+    }
+    return ''
+}
+
+@NonCPS
+String targetChoices(String folderTarget, String jobName) {
+    String t = expectedTarget(folderTarget, jobName)
+    return t ?: runwayIds().join('\n')
+}
+
+// Reads key = "value" from the [kit] table of runways.toml (bootstrap only: fw.py env reports everything else).
+@NonCPS
+String kitValue(String toml, String key) {
+    String section = ''
+    for (String raw : toml.split('\n')) {
+        String line = raw.trim()
+        if (line.startsWith('[')) {
+            section = line
+            continue
+        }
+        if (section != '[kit]' || line.startsWith('#') || !line.contains('=')) {
+            continue
+        }
+        String[] kv = line.split('=', 2)
+        if (kv[0].trim() == key) {
+            String v = kv[1].trim()
+            int hash = v.indexOf(' #')
+            if (hash >= 0) {
+                v = v.substring(0, hash).trim()
+            }
+            if (v.length() >= 2 && v.startsWith('"') && v.endsWith('"')) {
+                v = v.substring(1, v.length() - 1)
+            }
+            return v
+        }
+    }
+    return ''
+}
+
+@NonCPS
+List<String> csv(String s) {
+    List<String> out = []
+    for (String part : (s ?: '').split(',')) {
+        if (part.trim()) {
+            out.add(part.trim())
+        }
+    }
+    return out
+}
+
+@NonCPS
+boolean isIdent(String s) {
+    return s != null && s ==~ /[A-Z][A-Z0-9_]*/
+}
+
+@NonCPS
+String firstNonIdent(List<String> values) {
+    for (String v : values) {
+        if (!isIdent(v)) {
+            return v == null ? '' : v
+        }
+    }
+    return null
+}
+
+@NonCPS
+boolean isImageRef(String s) {
+    return s != null && s ==~ /[A-Za-z0-9][A-Za-z0-9._\/:@-]*/
+}
+
+@NonCPS
+boolean isVersion(String s) {
+    return s != null && s ==~ /\d+\.\d+\.\d+/
+}
+
+@NonCPS
+boolean isDigits(String s) {
+    return s != null && s ==~ /\d{1,9}/
+}
+
+@NonCPS
+boolean isSha(String s) {
+    return s != null && s ==~ /[0-9a-f]{40}/
+}
+
+@NonCPS
+boolean isSlug(String s) {
+    return s != null && s ==~ /[A-Za-z0-9][A-Za-z0-9._-]*/
+}
+
+@NonCPS
+boolean isTicket(String s) {
+    return s != null && s ==~ /[A-Za-z0-9][A-Za-z0-9._\/-]{0,63}/
+}
+
+// Placeholder values are substituted into SQL text as string literals: keep them to a safe character set.
+@NonCPS
+String sanitizeId(String s) {
+    return (s ?: 'unknown').replaceAll(/[^A-Za-z0-9@._:+-]/, '_')
+}
+
+@NonCPS
+String safeUrl(String u) {
+    String s = (u ?: '').trim()
+    return (s && s ==~ /[A-Za-z0-9._~:\/?#\[\]@!$&()*+,;=%-]+/ && !s.contains("'")) ? s : 'unknown'
+}
+
+@NonCPS
+String head(String s, int n) {
+    String t = s ?: ''
+    return t.length() <= n ? t : t.substring(0, n)
+}
+
+@NonCPS
+String clip(String s, int max) {
+    String t = s ?: ''
+    return t.length() <= max ? t : t.substring(0, max - 3) + '...'
+}
+
+@NonCPS
+String firstLine(String s) {
+    String t = (s ?: '').trim()
+    int nl = t.indexOf('\n')
+    return nl >= 0 ? t.substring(0, nl) : t
+}
+
+// Flyway's validate patterns per tier, as FG018 pins them in flyway.toml, optionally plus *:pending.
+@NonCPS
+String validateIgnore(String tier, boolean withPending) {
+    String base = tier == 'prod' ? '*:future' : '*:missing,*:future'
+    return withPending ? '*:pending,' + base : base
+}
+
+// Snowflake's clock is the one Time Travel uses; RETENTION_TIME is the database default (tables may differ).
+@NonCPS
+String timeTravelSql(String db) {
+    // db was validated as an identifier by applyPolicy()
+    return """-- Time Travel point recorded by the deploy job immediately before flyway migrate (docs/RUNBOOKS.md R3).
+SELECT TO_VARCHAR(CURRENT_TIMESTAMP(), 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZH:TZM') AS TT_POINT,
+       (SELECT MAX(d.RETENTION_TIME)
+          FROM ${db}.INFORMATION_SCHEMA.DATABASES d
+         WHERE d.DATABASE_NAME = '${db}') AS RETENTION_DAYS;
+"""
+}
+
+// `snow sql --format json` prints a list of row objects, or one such list per statement.
+@NonCPS
+List jsonRows(Object data) {
+    if (!(data instanceof List)) {
+        return []
+    }
+    List rows = (List) data
+    if (!rows.isEmpty() && rows[rows.size() - 1] instanceof List) {
+        return (List) rows[rows.size() - 1]
+    }
+    return rows
+}
+
+// -outputType=json prints either the command's result or {"individualResults": [...]}.
+@NonCPS
+Map flywayResult(Map json, String key) {
+    if (json == null) {
+        return [:]
+    }
+    if (json.containsKey(key)) {
+        return json
+    }
+    if (json.individualResults instanceof List) {
+        for (Object item : (List) json.individualResults) {
+            if (item instanceof Map && ((Map) item).containsKey(key)) {
+                return (Map) item
+            }
+        }
+    }
+    return json
+}
+
+// Summary of `flyway info -outputType=json`: current version, what would run, what failed.
+@NonCPS
+Map summarizeInfo(Map json) {
+    Map info = flywayResult(json, 'migrations')
+    String current = info.schemaVersion ? info.schemaVersion.toString() : ''
+    List<String> pending = []
+    List<String> outOfOrder = []
+    List<String> failed = []
+    for (Object o : (List) (info.migrations ?: [])) {
+        Map m = (Map) o
+        String state = m.state ? m.state.toString() : ''
+        String version = m.version ? m.version.toString() : ''
+        String label = (version ? 'V' + version : 'R') + ' ' + (m.description ?: '').toString()
+        if (state == 'Pending' || state == 'Outdated') {
+            pending.add(label)
+            if (version && current && compareVersions(version, current) < 0) {
+                outOfOrder.add(label)
+            }
+        } else if (state.startsWith('Failed')) {
+            failed.add(label + ' [' + state + ']')
+        }
+    }
+    return [schemaVersion: current, pending: pending, outOfOrder: outOfOrder, failed: failed]
+}
+
+// Flyway compares version parts numerically (2026.10.13.0900 == 2026.10.13.900).
+@NonCPS
+int compareVersions(String a, String b) {
+    String[] x = a.split('\\.')
+    String[] y = b.split('\\.')
+    int n = Math.max(x.length, y.length)
+    try {
+        for (int i = 0; i < n; i++) {
+            long p = i < x.length ? Long.parseLong(x[i]) : 0L
+            long q = i < y.length ? Long.parseLong(y[i]) : 0L
+            if (p != q) {
+                return p < q ? -1 : 1
+            }
+        }
+    } catch (NumberFormatException ignored) {
+        return 0
+    }
+    return 0
+}
