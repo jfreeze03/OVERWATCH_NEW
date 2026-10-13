@@ -23,6 +23,7 @@ LANES = ("main", "branch")
 DRIFT_GATES = ("warn", "fail")
 NONPROD_PATTERNS = ["*:missing", "*:future"]
 PROD_PATTERNS = ["*:future"]
+PER_DEPLOY_PLACEHOLDERS = ("deploy_id", "git_sha", "build_url", "approver")
 SECRET_KEYS = ("password", "token", "email", "licensekey", "offlinepermitpath")
 
 
@@ -88,22 +89,23 @@ class Kit:
         return self.runways[key]
 
     def env_placeholders(self, env_id: str) -> dict[str, str]:
-        """Effective placeholders for a Flyway environment: [flyway.placeholders] merged with the environment's
-        own (environment wins), names lower-cased (Flyway matches placeholder names case-insensitively)."""
-        merged = {k.lower(): str(v) for k, v in self.flyway.get("flyway", {}).get("placeholders", {}).items()}
+        """Effective placeholders for a Flyway environment. An environment's own placeholders table REPLACES the root
+        [flyway.placeholders] table, it is not merged (ClassicConfiguration.getPlaceholders in Flyway 13.10); the
+        root table applies only to an environment without one. Names are lower-cased (Flyway matches them
+        case-insensitively)."""
         env = self.flyway.get("environments", {}).get(env_id, {})
-        merged.update({k.lower(): str(v) for k, v in env.get("flyway", {}).get("placeholders", {}).items()})
-        return merged
+        table = env.get("flyway", {}).get("placeholders")
+        if table is None:
+            table = self.flyway.get("flyway", {}).get("placeholders", {})
+        return {str(k).lower(): str(v) for k, v in table.items()}
 
     def declared_placeholders(self) -> set[str]:
-        """Placeholders every environment resolves: global ones plus those every environment defines."""
-        glob = {k.lower() for k in self.flyway.get("flyway", {}).get("placeholders", {})}
-        envs = self.flyway.get("environments", {})
-        per_env = [
-            {k.lower() for k in e.get("flyway", {}).get("placeholders", {})} for e in envs.values()
-        ]
-        common = set.intersection(*per_env) if per_env else set()
-        return glob | common
+        """Placeholders every environment resolves (the intersection of their effective tables)."""
+        envs = list(self.flyway.get("environments", {}))
+        if not envs:
+            return set(self.env_placeholders(""))
+        sets = [set(self.env_placeholders(e)) for e in envs]
+        return set.intersection(*sets)
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -329,5 +331,9 @@ def _check_env(env: dict[str, Any], name: str, rw: Runway, *, rehearsal: bool, e
             err("FG018", p, f"placeholder {key} must be {val!r} (found {ph.get(key)!r})")
     if ph.get("tasks_enabled") not in ("true", "false"):
         err("FG018", p, "placeholder tasks_enabled must be 'true' or 'false'")
+    for key in PER_DEPLOY_PLACEHOLDERS:
+        if key not in ph:
+            err("FG018", p, f"placeholder {key} needs a default here: an environment's placeholders table replaces the "
+                            "root one, and the callbacks use it")
     if rehearsal and ph.get("tasks_enabled") != "false":
         err("FG018", p, "a rehearsal environment must set tasks_enabled = 'false'")

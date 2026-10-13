@@ -298,8 +298,8 @@ Outdated and re-runs (`[core]internal/info/MigrationInfoServiceImpl.java:286-297
 - pipeline: `fw.py promote-check` judges repeatables by their state on the predecessor (Success, not Outdated, Pending
   or Failed). It judges versioned migrations by state too, and `flyway validate` against the predecessor, run with the
   auditor login, proves their checksums (`scripts/fwkit/promote.py`).
-- guard: FG005 requires every `${name}` to be declared in `[flyway.placeholders]` or in every environment, including
-  RH_MGM and RH_PRD.
+- guard: FG005 requires every `${name}` to be defined for every environment, including RH_MGM and RH_PRD (each
+  environment's placeholders table replaces the root one, so "declared" means present in every environment's table).
 - process: docs/CONVENTIONS.md, Placeholders:
   - the four pipeline-supplied values and `${flyway:timestamp}` belong in callbacks only;
   - a placeholder value change in flyway.toml is a release item that names which repeatables will re-run.
@@ -483,8 +483,8 @@ matches names case-insensitively (`:58-68`). JavaScript template literals (`${x}
 - A JavaScript variable named like a kit placeholder, such as `${env}`, would be silently replaced with "DEV" or "PRD".
 
 **Mitigation.**
-- guard: FG005 requires every `${name}` in a migration or callback to be declared in `[flyway.placeholders]` or in
-  every environment, including the rehearsal environments. It skips a file whose `.sql.conf` sets
+- guard: FG005 requires every `${name}` in a migration or callback to be defined for every environment, including
+  the rehearsal environments (an environment's table replaces the root one; FG018 checks the per-deploy defaults). It skips a file whose `.sql.conf` sets
   `placeholderReplacement=false`.
 - process: docs/CONVENTIONS.md requires JavaScript bodies to get a `<file>.sql.conf` with
   `placeholderReplacement=false` (FG020 checks the value) and to avoid kit placeholder names.

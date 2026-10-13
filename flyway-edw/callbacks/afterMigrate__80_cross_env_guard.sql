@@ -75,29 +75,26 @@ BEGIN
              WHERE s.SCHEMA_NAME <> 'INFORMATION_SCHEMA';
             FOR i IN 0 TO ARRAY_SIZE(schema_names) - 1 DO
                 sname := GET(schema_names, i)::VARCHAR;
-                SELECT COALESCE(ARRAY_AGG(x.HIT) WITHIN GROUP (ORDER BY x.HIT), ARRAY_CONSTRUCT())
-                  INTO :one_schema
-                  FROM (
-                SELECT o.KIND || ' ' || o.SCHEMA_NAME || '.' || o.OBJECT_NAME || ' -> '
-                       || LISTAGG(DISTINCT m.VALUE::VARCHAR, ',') AS HIT
-                  FROM (SELECT 'VIEW' AS KIND, v.TABLE_SCHEMA AS SCHEMA_NAME, v.TABLE_NAME AS OBJECT_NAME,
-                               v.VIEW_DEFINITION AS DEF
-                          FROM INFORMATION_SCHEMA.VIEWS AS v
-                         WHERE v.TABLE_SCHEMA = :sname
-                        UNION ALL
-                        SELECT 'FUNCTION', f.FUNCTION_SCHEMA, f.FUNCTION_NAME || f.ARGUMENT_SIGNATURE,
-                               f.FUNCTION_DEFINITION
-                          FROM INFORMATION_SCHEMA.FUNCTIONS AS f
-                         WHERE f.FUNCTION_SCHEMA = :sname
-                        UNION ALL
-                        SELECT 'PROCEDURE', p.PROCEDURE_SCHEMA, p.PROCEDURE_NAME || p.ARGUMENT_SIGNATURE,
-                               p.PROCEDURE_DEFINITION
-                          FROM INFORMATION_SCHEMA.PROCEDURES AS p
-                         WHERE p.PROCEDURE_SCHEMA = :sname) AS o,
-                       LATERAL FLATTEN(INPUT => REGEXP_SUBSTR_ALL(UPPER(o.DEF), 'ALFA_EDW_[A-Z0-9_]+')) AS m
-                 WHERE m.VALUE::VARCHAR NOT IN (UPPER('${edw_db}'), UPPER('${home_db}'))
-                 GROUP BY o.KIND, o.SCHEMA_NAME, o.OBJECT_NAME
-                       ) AS x;
+                SELECT COALESCE(ARRAY_AGG(x.HIT) WITHIN GROUP (ORDER BY x.HIT), ARRAY_CONSTRUCT()) INTO :one_schema
+                  FROM (SELECT o.KIND || ' ' || o.SCHEMA_NAME || '.' || o.OBJECT_NAME || ' -> '
+                               || LISTAGG(DISTINCT m.VALUE::VARCHAR, ',') AS HIT
+                          FROM (SELECT 'VIEW' AS KIND, v.TABLE_SCHEMA AS SCHEMA_NAME, v.TABLE_NAME AS OBJECT_NAME,
+                                       v.VIEW_DEFINITION AS DEF
+                                  FROM INFORMATION_SCHEMA.VIEWS AS v
+                                 WHERE v.TABLE_SCHEMA = :sname
+                                UNION ALL
+                                SELECT 'FUNCTION', f.FUNCTION_SCHEMA, f.FUNCTION_NAME || f.ARGUMENT_SIGNATURE,
+                                       f.FUNCTION_DEFINITION
+                                  FROM INFORMATION_SCHEMA.FUNCTIONS AS f
+                                 WHERE f.FUNCTION_SCHEMA = :sname
+                                UNION ALL
+                                SELECT 'PROCEDURE', p.PROCEDURE_SCHEMA, p.PROCEDURE_NAME || p.ARGUMENT_SIGNATURE,
+                                       p.PROCEDURE_DEFINITION
+                                  FROM INFORMATION_SCHEMA.PROCEDURES AS p
+                                 WHERE p.PROCEDURE_SCHEMA = :sname) AS o,
+                               LATERAL FLATTEN(INPUT => REGEXP_SUBSTR_ALL(UPPER(o.DEF), 'ALFA_EDW_[A-Z0-9_]+')) AS m
+                         WHERE m.VALUE::VARCHAR NOT IN (UPPER('${edw_db}'), UPPER('${home_db}'))
+                         GROUP BY o.KIND, o.SCHEMA_NAME, o.OBJECT_NAME) AS x;
                 part := ARRAY_CAT(part, one_schema);
             END FOR;
     END;

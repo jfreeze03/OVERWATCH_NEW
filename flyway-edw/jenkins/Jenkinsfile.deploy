@@ -31,9 +31,11 @@
 //   python image (fw.py, Snowflake CLI) and the flyway image (Flyway, curl) the same workspace.
 // * The deploy runs from the BUNDLE (flyway.toml, migrations, callbacks); policy and checks run with MAIN's fw.py.
 //   Provenance comes from SOURCE_JOB (copyArtifacts from the absolute job path), not from what a manifest claims.
-// * Every sh step is single-quoted; values flow through environment variables only. Flyway reads FLYWAY_* variables
-//   as configuration (FLYWAY_TARGET is the migrate target version!), so fw() runs Flyway with every FLYWAY_*
-//   variable removed except those flyway.toml and licensing need. Our variables use the KIT_/RW_/FW_ prefixes.
+// * Every sh step is single-quoted; values flow through environment variables only. Flyway reads FLYWAY_<SETTING>
+//   variables as its own configuration (FLYWAY_TARGET = migrate target version, FLYWAY_ENVIRONMENT,
+//   FLYWAY_BASELINE_VERSION; ConfigUtils.convertKey), so fw.py env reports EDW_* keys, this file keeps its own values
+//   in KIT_/RW_/FW_ variables, and fw() still runs Flyway with every FLYWAY_*/flyway_* variable removed except the
+//   connection and licence variables flyway.toml and licensing read (FLYWAY_SF_*, FLYWAY_RH_DB, FLYWAY_EMAIL/TOKEN).
 // * Placeholders and ignoreMigrationPatterns go on the command line as -environments.<ENV>.flyway.* overrides: in
 //   Flyway 13.10 an environment's own [environments.<ENV>.flyway] table replaces the root value instead of merging
 //   (ClassicConfiguration.getPlaceholders / getIgnoreMigrationPatterns), so root-level -placeholders.x would be
@@ -52,9 +54,10 @@ pipeline {
     agent none
 
     parameters {
-        // The choice list collapses to this job's own runway (its folder EDW/deploy/<ID>, or FLYWAY_TARGET when the
-        // folder or controller defines it), so the job page cannot even offer another runway.
-        choice(name: 'TARGET', choices: "${targetChoices(env.FLYWAY_TARGET, env.JOB_NAME)}",
+        // The choice list collapses to this job's own runway (its folder EDW/deploy/<ID>, or EDW_TARGET when the
+        // folder or controller defines it), so the job page cannot even offer another runway. EDW_TARGET, never
+        // FLYWAY_TARGET: Flyway would read that as its own migrate target version.
+        choice(name: 'TARGET', choices: "${targetChoices(env.EDW_TARGET, env.JOB_NAME)}",
                description: 'Runway to deploy. Fixed by the folder of this job; any other value is refused.')
         string(name: 'SOURCE_JOB', defaultValue: '/EDW/ci/edw-flyway/main', trim: true,
                description: 'CI job whose bundle to deploy: /EDW/ci/edw-flyway/main (main lane), or a branch job '
@@ -163,9 +166,9 @@ void resolvePolicy() {
     if (!runwayIds().contains(target)) {
         error("TARGET '${target}' is not a runway id (${runwayIds().join(', ')})")
     }
-    String fixed = expectedTarget(env.FLYWAY_TARGET, env.JOB_NAME)
+    String fixed = expectedTarget(env.EDW_TARGET, env.JOB_NAME)
     if (fixed && fixed != target) {
-        error("This job deploys ${fixed} only (its folder / FLYWAY_TARGET); TARGET=${target} refused")
+        error("This job deploys ${fixed} only (its folder / EDW_TARGET); TARGET=${target} refused")
     }
     node(agentLabel()) {
         deleteDir()
@@ -215,7 +218,8 @@ python3 scripts/fw.py env --runway "$FW_RUNWAY" --format json > reports/runway-e
         error("runways.toml requires a CHANGE_TICKET for ${env.RW_ID}")
     }
 
-    // Pipeline placeholders (flyway.toml [flyway.placeholders]); the bundle's git sha and the approver come later.
+    // Per-deploy placeholders (defaults in every [environments.<ID>.flyway.placeholders] table of flyway.toml);
+    // the bundle's git sha and the approver come later.
     env.FW_DEPLOY_ID = "${env.RW_ID}-${env.BUILD_NUMBER}"
     env.FW_BUILD_URL = safeUrl(env.BUILD_URL)
     env.FW_GIT_SHA = 'unknown'
@@ -998,7 +1002,7 @@ List<String> runwayIds() {
     return ['DEV', 'SAN', 'SEA', 'PHX', 'MGM', 'PRD']
 }
 
-// The runway this job may deploy: FLYWAY_TARGET when the folder/controller sets it, else the job's folder name
+// The runway this job may deploy: EDW_TARGET when the folder/controller sets it, else the job's folder name
 // (EDW/deploy/<ID>/deploy). Empty when neither says (e.g. a copy of the job outside the deploy folders).
 @NonCPS
 String expectedTarget(String folderTarget, String jobName) {

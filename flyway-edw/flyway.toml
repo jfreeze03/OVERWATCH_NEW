@@ -25,7 +25,7 @@
 #   MGM rehearses exactly what PRD will receive, and the deploy job prints any out-of-order item for the approver.
 # * ignoreMigrationPatterns: test runways carry other projects' unmerged migrations (*:missing) and newer main
 #   builds (*:future); MGM/PRD only tolerate *:future (a newer build already deployed).
-# * Placeholders differ per environment: VERSIONED checksums ignore them (raw file), REPEATABLE checksums include
+# * Placeholders are per environment (each environment's table replaces the root one; see [flyway] below): VERSIONED checksums ignore them (raw file), REPEATABLE checksums include
 #   them (changing a value re-runs that repeatable in that environment only).
 
 [flyway]
@@ -52,12 +52,10 @@ rulesLocation = "rules"
 rulesConfig = "sqlfluff.cfg"
 rulesDialect = "snowflake"
 
-[flyway.placeholders]
-# Pipeline-supplied on every deploy (-placeholders.deploy_id=... etc.); these defaults keep manual runs resolvable.
-deploy_id = "manual"
-git_sha = "unknown"
-build_url = "manual"
-approver = "manual"
+# No [flyway.placeholders] table: an environment's own placeholders table REPLACES the root one, it is not merged
+# (ClassicConfiguration.getPlaceholders, Flyway 13.10), so every environment below carries the full set. For the same
+# reason a root-level `-placeholders.x=...` on the command line is ignored on every runway: the pipeline passes the
+# per-deploy values as `-environments.<ID>.flyway.placeholders.deploy_id=...` (and git_sha, build_url, approver).
 
 # ---------------------------------------------------------------- DEV  (ALFA_EDW_DEV, nonprod)
 [environments.DEV]
@@ -77,6 +75,11 @@ home_db = "ALFA_EDW_DEV"
 etl_wh = "WH_EDW_ETL_DEV"
 role_prefix = "EDW_DEV"
 tasks_enabled = "false"
+# per-deploy values: the pipeline overrides them; these defaults keep a manual run resolvable
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"
 
 # ---------------------------------------------------------------- SAN  (ALFA_EDW_SAN, nonprod)
 [environments.SAN]
@@ -96,6 +99,11 @@ home_db = "ALFA_EDW_SAN"
 etl_wh = "WH_EDW_ETL_SAN"
 role_prefix = "EDW_SAN"
 tasks_enabled = "false"
+# per-deploy values: the pipeline overrides them; these defaults keep a manual run resolvable
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"
 
 # ---------------------------------------------------------------- SEA  (ALFA_EDW_SEA, nonprod)
 [environments.SEA]
@@ -115,6 +123,11 @@ home_db = "ALFA_EDW_SEA"
 etl_wh = "WH_EDW_ETL_SEA"
 role_prefix = "EDW_SEA"
 tasks_enabled = "false"
+# per-deploy values: the pipeline overrides them; these defaults keep a manual run resolvable
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"
 
 # ---------------------------------------------------------------- PHX  (ALFA_EDW_PHX, nonprod)
 [environments.PHX]
@@ -134,6 +147,11 @@ home_db = "ALFA_EDW_PHX"
 etl_wh = "WH_EDW_ETL_PHX"
 role_prefix = "EDW_PHX"
 tasks_enabled = "false"
+# per-deploy values: the pipeline overrides them; these defaults keep a manual run resolvable
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"
 
 # ---------------------------------------------------------------- MGM  (ALFA_EDW_MGM, prod)
 [environments.MGM]
@@ -153,6 +171,11 @@ home_db = "ALFA_EDW_MGM"
 etl_wh = "WH_EDW_ETL_MGM"
 role_prefix = "EDW_MGM"
 tasks_enabled = "true"
+# per-deploy values: the pipeline overrides them; these defaults keep a manual run resolvable
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"
 
 # ---------------------------------------------------------------- PRD  (ALFA_EDW_PRD, prod)
 [environments.PRD]
@@ -172,6 +195,11 @@ home_db = "ALFA_EDW_PRD"
 etl_wh = "WH_EDW_ETL_PRD"
 role_prefix = "EDW_PRD"
 tasks_enabled = "true"
+# per-deploy values: the pipeline overrides them; these defaults keep a manual run resolvable
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"
 
 # ---------------------------------------------------------------- RH_MGM  (rehearsal: zero-copy clone of ALFA_EDW_MGM)
 # Same placeholders as MGM (env = "MGM") except: the clone's name, and tasks never resume in a rehearsal.
@@ -193,6 +221,11 @@ home_db = "ALFA_EDW_MGM"
 etl_wh = "WH_EDW_ETL_MGM"
 role_prefix = "EDW_MGM"
 tasks_enabled = "false"
+# per-deploy values: the pipeline overrides them; these defaults keep a manual run resolvable
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"
 
 # ---------------------------------------------------------------- RH_PRD  (rehearsal: zero-copy clone of ALFA_EDW_PRD)
 # Same placeholders as PRD (env = "PRD") except: the clone's name, and tasks never resume in a rehearsal.
@@ -214,3 +247,8 @@ home_db = "ALFA_EDW_PRD"
 etl_wh = "WH_EDW_ETL_PRD"
 role_prefix = "EDW_PRD"
 tasks_enabled = "false"
+# per-deploy values: the pipeline overrides them; these defaults keep a manual run resolvable
+deploy_id = "manual"
+git_sha = "unknown"
+build_url = "manual"
+approver = "manual"

@@ -18,9 +18,11 @@
 //   -Dorg.jenkinsci.plugins.workflow.cps.DSL.UNSAFE_GROOVY_INTERPOLATION=fail (casc-snippet.yaml header).
 // * A PR runs its OWN copy of this file (FACTS I1-04): whatever /EDW/ci can see, a PR author can use. That is why
 //   this pipeline only ever holds the read-only auditor key, the licence and the status token - never a deploy key.
-// * Flyway reads FLYWAY_* environment variables as configuration (FLYWAY_TARGET = migrate target version, ...).
-//   The shell function fw() below drops every FLYWAY_* variable except the ones flyway.toml expects, so a stray
-//   controller/folder variable can never change what Flyway does. Our own variables use the KIT_/FW_ prefixes.
+// * Flyway reads FLYWAY_<SETTING> environment variables as its own configuration (FLYWAY_TARGET = migrate target
+//   version, FLYWAY_ENVIRONMENT, FLYWAY_BASELINE_VERSION; ConfigUtils.convertKey), which is why fw.py env reports
+//   EDW_* keys. The shell function fw() below also drops every FLYWAY_*/flyway_* variable except the connection and
+//   licence ones flyway.toml expects, so a stray controller/folder variable can never change what Flyway does. Our
+//   own variables use the KIT_/FW_ prefixes.
 // * Placeholders and ignoreMigrationPatterns are passed as -environments.<ENV>.flyway.* overrides: in Flyway 13.10
 //   an environment's own [environments.<ENV>.flyway] table replaces the root value instead of merging
 //   (ClassicConfiguration.getPlaceholders / getIgnoreMigrationPatterns), so a root-level -placeholders.x or

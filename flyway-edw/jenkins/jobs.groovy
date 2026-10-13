@@ -18,9 +18,10 @@
 //
 // Why one folder per runway: folder credentials are visible to that folder's children only, so the PRD key in
 // EDW/deploy/PRD can never be resolved by a PR build in EDW/ci or by another runway's job (FACTS I6-02, I6-08).
-// The deploy job takes its runway from its folder name (Jenkinsfile.deploy expectedTarget(); a FLYWAY_TARGET
-// environment variable, if your folders define one, wins) and its TARGET choice is restricted to that one id here
-// and again by the Jenkinsfile's own parameters block.
+// The deploy job takes its runway from its folder name (Jenkinsfile.deploy expectedTarget(); an EDW_TARGET
+// environment variable, if your folders define one, wins - never name it FLYWAY_TARGET, which Flyway reads as its
+// migrate target version) and its TARGET choice is restricted to that one id here and again by the Jenkinsfile's
+// own parameters block.
 //
 // Not done here, on purpose:
 // * Credentials: Job DSL would need the secret values in code or in the seed job's environment. Create them per
@@ -198,9 +199,10 @@ multibranchPipelineJob(ciProjectPath) {
 runways.each { String id, Map<String, String> rw ->
     String folderPath = rw.jenkins_folder
     String approval = rw.approval_group ? "approval by ${rw.approval_group}" : 'no approval step'
+    String deployUser = rw.service_user ?: 'the deploy user'
     ensureFolder(folderPath, "Runway ${id}: ${rw.database} (${rw.tier ?: 'tier ?'}), ${approval}. Credentials in "
-        + "this folder only: ${rw.credentials_id} (SSH Username with private key: ${rw.service_user ?: 'the deploy user'}"
-        + ", encrypted PKCS#8 key + passphrase), ${auditCredentialsId}, flyway-license, ${scanCredentialsId}. "
+        + "this folder only: ${rw.credentials_id} (SSH Username with private key: ${deployUser}, encrypted PKCS#8 "
+        + "key + passphrase), ${auditCredentialsId}, flyway-license, ${scanCredentialsId}. "
         + "Lock: ${rw.lock ?: rw.database}.")
 
     pipelineJob("${folderPath}/deploy") {
@@ -211,7 +213,7 @@ runways.each { String id, Map<String, String> rw ->
         // Same parameters as the Jenkinsfile's parameters block (which replaces these after the first run), so the
         // very first run already offers "Build with Parameters" with TARGET restricted to this runway.
         parameters {
-            choiceParam('TARGET', [id], 'Runway to deploy. Fixed by the folder of this job; any other value is refused.')
+            choiceParam('TARGET', [id], 'Runway to deploy. Fixed by the folder of this job; other values are refused.')
             stringParam('SOURCE_JOB', "/${ciProjectPath}/${mainBranch}",
                 'CI job whose bundle to deploy: the main job (main lane) or a branch job (branch lane).')
             stringParam('SOURCE_BUILD', '', 'Build number of SOURCE_JOB whose archived bundle is deployed.')

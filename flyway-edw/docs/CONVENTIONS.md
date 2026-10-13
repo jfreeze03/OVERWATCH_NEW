@@ -117,12 +117,12 @@ case-insensitively. Every `${name}` must be declared for every environment in fl
 | `${git_sha}`, `${build_url}`, `${approver}` | `unknown`, `manual` | Set by the pipeline. **Callbacks only** |
 | `${flyway:environment}` | `DEV` | `RH_MGM`/`RH_PRD` during rehearsal: use `${env}` instead |
 | `${flyway:timestamp}` | per run | **Callbacks only** |
-| `${flyway:database}` | `ALFA_EDW_DEV` | Never inside an object body (**review**; FG009 misses it) |
+| `${flyway:database}` | `ALFA_EDW_DEV` | Never inside an object body (FG009) |
 
 Rules:
 - **Repeatables re-run whenever a placeholder value changes.** Flyway checksums a repeatable after replacing its
   placeholders. A repeatable that used `${deploy_id}` or `${flyway:timestamp}` would therefore re-run on every deploy
-  (**review**). Changing a value in flyway.toml, such as `etl_wh` for SAN, re-runs every repeatable that uses it on
+  (FG005 rejects the per-deploy placeholders in `repeatable/`). Changing a value in flyway.toml, such as `etl_wh` for SAN, re-runs every repeatable that uses it on
   that runway. Say so in the PR.
 - **`${edw_db}` may only qualify a DDL target, and you almost never need it.** Flyway's session database is already
   the runway. FG009 fails `${edw_db}` or `${home_db}` inside a VIEW, FUNCTION, PROCEDURE, TASK, PIPE, DYNAMIC TABLE or

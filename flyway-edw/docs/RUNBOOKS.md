@@ -157,8 +157,12 @@ Snowflake DDL autocommits, so every statement before the failing one has been ap
 
         ```bash
         flyway -environment=PRD migrate -cherryPick=2026.10.20.1015 -skipExecutingMigrations=true \
-            -placeholders.deploy_id=PRD-SKIP-EDW1234 -placeholders.approver="$USER"
+            -environments.PRD.flyway.placeholders.deploy_id=PRD-SKIP-EDW1234 \
+            -environments.PRD.flyway.placeholders.approver="$USER"
         ```
+
+        Pass placeholders in the environment-scoped form shown: an environment's placeholders table replaces the
+        root one, so a plain `-placeholders.deploy_id=...` is silently ignored on every runway.
 
      3. Deploy the fixed build through the pipeline as usual.
 
@@ -348,8 +352,9 @@ records the tool, the time, who did it, and the follow-up migration.
 
       ```bash
       flyway -environment=MGM migrate -cherryPick=2026.10.20.1015 \
-          -placeholders.deploy_id=MGM-HOTFIX-EDW1234 -placeholders.git_sha="$GIT_SHA" \
-          -placeholders.approver="$APPROVER"
+          -environments.MGM.flyway.placeholders.deploy_id=MGM-HOTFIX-EDW1234 \
+          -environments.MGM.flyway.placeholders.git_sha="$GIT_SHA" \
+          -environments.MGM.flyway.placeholders.approver="$APPROVER"
       ```
 
       Set `GIT_SHA` to the bundle's sha (`bundle-manifest.json`) and `APPROVER` to the approver's id.

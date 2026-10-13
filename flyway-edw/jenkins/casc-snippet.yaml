@@ -1,0 +1,236 @@
+# =====================================================================================================================
+# EDW Flyway kit - Jenkins Configuration as Code snippet (jenkins/casc-snippet.yaml).
+#
+# Merge these keys into your controller's JCasC YAML; this is NOT a complete configuration (security realm, agents,
+# clouds and other plugins stay yours). JCasC replaces lists such as globalNodeProperties and the role lists rather
+# than appending to them: merge the entries into your existing lists instead of loading a second copy.
+#
+# Controller settings JCasC cannot carry (docs/GUIDE.md C2):
+#   * JVM option -Dorg.jenkinsci.plugins.workflow.cps.DSL.UNSAFE_GROOVY_INTERPOLATION=fail
+#     A pipeline that interpolates a credential into a Groovy string passed to sh/bat/powershell then FAILS instead
+#     of only warning (default "warn", FACTS I2-14). Both kit Jenkinsfiles keep every sh step single-quoted and pass
+#     values through environment variables, so they run unchanged with it.
+#   * Jenkins Location URL (Manage Jenkins > System) = the public HTTPS FQDN: the Bitbucket plugin skips commit
+#     statuses for an unset, localhost or dot-less URL (FACTS I1-15).
+#   * Resource Root URL (Manage Jenkins > Security; a second DNS name for the controller): Flyway's HTML reports
+#     (check -code / -dryrun / -drift) use inline script and style, which Jenkins' default Content-Security-Policy
+#     blocks. Serving user content from a separate origin is Jenkins' recommended fix (FACTS I2-15, [MISSED]); do not
+#     relax the global CSP. Without it, download the archived reports and open them locally.
+#
+# Placeholders resolved by JCasC when it loads this file (define them in the controller's environment or a JCasC
+# secret source; ":-" leaves the value empty when undefined, and then jobs.groovy stops with a clear message and the
+# deploy jobs skip their Bitbucket status with a warning):
+#   EDW_BITBUCKET_WORKSPACE   Bitbucket workspace slug (https://bitbucket.org/<workspace>/<repository>)
+#   EDW_BITBUCKET_REPO        repository slug of the EDW repository
+#
+# Plugins: configuration-as-code, role-strategy, lockable-resources (and everything listed in jenkins/jobs.groovy).
+# =====================================================================================================================
+
+jenkins:
+  # Controller-wide environment variables, visible to the seed job and every pipeline.
+  globalNodeProperties:
+    - envVars:
+        env:
+          # jobs.groovy (branch source + deploy-job checkout) and Jenkinsfile.deploy (deploy-<ID> commit statuses).
+          - key: "BITBUCKET_WORKSPACE"
+            value: "${EDW_BITBUCKET_WORKSPACE:-}"
+          - key: "BITBUCKET_REPO"
+            value: "${EDW_BITBUCKET_REPO:-}"
+          # Label of the Docker-capable agents both Jenkinsfiles request.
+          - key: "EDW_AGENT_LABEL"
+            value: "docker"
+          # Behind an HTTP proxy, add these (Flyway 13.9+ ignores OS proxy settings; pip and the Snowflake CLI read
+          # the standard variables):
+          #   - key: "EDW_JAVA_PROXY_ARGS"
+          #     value: "-Dhttps.proxyHost=proxy.example.internal -Dhttps.proxyPort=3128"
+          #   - key: "HTTPS_PROXY"
+          #     value: "http://proxy.example.internal:3128"
+          #   - key: "PIP_INDEX_URL"
+          #     value: "https://pypi-mirror.example.internal/simple"
+
+  # Role-based Authorization Strategy (FACTS I6-05): item patterns are case-sensitive regexes on the FULL item name;
+  # a folder must itself be readable before anything inside it is; global grants cannot be narrowed by item roles, so
+  # nothing beyond Overall/Read and View/Read is granted globally. Nobody but edw-jenkins-admins gets Job/Configure,
+  # Run/Replay, Run/Update, Run/Delete, Job/Workspace or any Credentials permission on EDW items: either Configure or
+  # Replay would let a user edit the approval out of a deploy (FACTS [MISSED] restart/replay, I6-06, I6-08).
+  # The approval itself is the input step's submitter = runways.toml approval_group (Jenkins admins with
+  # Overall/Administer can always answer it; the four-eyes check in Jenkinsfile.deploy still applies to them).
+  # Group names are security-realm (AD/LDAP) authorities and must match docs/GUIDE.md B7 and runways.toml.
+  authorizationStrategy:
+    roleBased:
+      roles:
+        global:
+          - name: "edw-jenkins-admin"
+            description: "Jenkins administrators: the only ones who configure, replay or delete EDW jobs"
+            permissions:
+              - "Overall/Administer"
+            entries:
+              - group: "edw-jenkins-admins"
+          - name: "edw-read"
+            description: "Log in and see views; everything else comes from the item roles below"
+            permissions:
+              - "Overall/Read"
+              - "View/Read"
+            entries:
+              - group: "edw-developers"
+              - group: "edw-dba"
+              - group: "edw-runway-leads-SAN"
+              - group: "edw-runway-leads-SEA"
+              - group: "edw-runway-leads-PHX"
+              - group: "edw-release-approvers"
+              - group: "edw-prod-approvers"
+              - group: "edw-breakglass"
+          - name: "edw-dba-locks"
+            description: "Reserve a database lock for a manual Flyway run; release a stuck lock (docs/RUNBOOKS.md R6)"
+            permissions:
+              - "Lockable Resources/Reserve"
+              - "Lockable Resources/Unlock"
+            entries:
+              - group: "edw-dba"
+        items:
+          - name: "edw-folders"
+            description: "The EDW and EDW/deploy folders themselves (needed to reach anything inside them)"
+            pattern: "^EDW(/deploy)?$"
+            permissions:
+              - "Job/Read"
+            entries:
+              - group: "edw-developers"
+              - group: "edw-dba"
+              - group: "edw-runway-leads-SAN"
+              - group: "edw-runway-leads-SEA"
+              - group: "edw-runway-leads-PHX"
+              - group: "edw-release-approvers"
+              - group: "edw-prod-approvers"
+              - group: "edw-breakglass"
+          - name: "edw-ci-read"
+            description: "See CI builds, guard and code-review reports, and the bundles of main builds"
+            pattern: "^EDW/ci($|/.*)"
+            permissions:
+              - "Job/Read"
+            entries:
+              - group: "edw-runway-leads-SAN"
+              - group: "edw-runway-leads-SEA"
+              - group: "edw-runway-leads-PHX"
+              - group: "edw-release-approvers"
+              - group: "edw-prod-approvers"
+              - group: "edw-breakglass"
+          - name: "edw-ci-build"
+            description: "Re-run PR and branch builds, scan the repository"
+            pattern: "^EDW/ci($|/.*)"
+            permissions:
+              - "Job/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+            entries:
+              - group: "edw-developers"
+              - group: "edw-dba"
+          - name: "edw-deploy-read"
+            description: "See every runway's deploy history and evidence (reports/<ID>)"
+            pattern: "^EDW/deploy/[A-Z]{3}($|/.*)"
+            permissions:
+              - "Job/Read"
+            entries:
+              - group: "edw-developers"
+              - group: "edw-dba"
+              - group: "edw-runway-leads-SAN"
+              - group: "edw-runway-leads-SEA"
+              - group: "edw-runway-leads-PHX"
+              - group: "edw-release-approvers"
+              - group: "edw-prod-approvers"
+              - group: "edw-breakglass"
+          - name: "edw-deploy-DEV"
+            description: "Start DEV deploys (main is automatic; branch-lane deploys by a DBA or a runway lead)"
+            pattern: "^EDW/deploy/DEV($|/.*)"
+            permissions:
+              - "Job/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+            entries:
+              - group: "edw-dba"
+              - group: "edw-runway-leads-SAN"
+              - group: "edw-runway-leads-SEA"
+              - group: "edw-runway-leads-PHX"
+          - name: "edw-deploy-SAN"
+            description: "Start SAN deploys: the current lease's lead and the DBAs"
+            pattern: "^EDW/deploy/SAN($|/.*)"
+            permissions:
+              - "Job/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+            entries:
+              - group: "edw-dba"
+              - group: "edw-runway-leads-SAN"
+          - name: "edw-deploy-SEA"
+            description: "Start SEA deploys: the current lease's lead and the DBAs"
+            pattern: "^EDW/deploy/SEA($|/.*)"
+            permissions:
+              - "Job/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+            entries:
+              - group: "edw-dba"
+              - group: "edw-runway-leads-SEA"
+          - name: "edw-deploy-PHX"
+            description: "Start PHX deploys: the current lease's lead and the DBAs"
+            pattern: "^EDW/deploy/PHX($|/.*)"
+            permissions:
+              - "Job/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+            entries:
+              - group: "edw-dba"
+              - group: "edw-runway-leads-PHX"
+          - name: "edw-deploy-MGM"
+            description: "Start MGM deploys; the approval prompt is answered by edw-release-approvers (runways.toml)"
+            pattern: "^EDW/deploy/MGM($|/.*)"
+            permissions:
+              - "Job/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+            entries:
+              - group: "edw-release-approvers"
+          - name: "edw-deploy-PRD"
+            description: "Start PRD deploys (release managers) and approve them (edw-prod-approvers, four-eyes)"
+            pattern: "^EDW/deploy/PRD($|/.*)"
+            permissions:
+              - "Job/Read"
+              - "Job/Build"
+              - "Job/Cancel"
+            entries:
+              - group: "edw-release-approvers"
+              - group: "edw-prod-approvers"
+
+unclassified:
+  # One lock per database (runways.toml lock = the database name): Flyway takes no lock on Snowflake (FACTS F1), so
+  # this is what serializes the deploy jobs - and manual Flyway runs, when people reserve the lock first. The deploy
+  # job of a rehearsing runway also locks its clone. Declared here so a typo cannot create a new lock silently.
+  lockableResourcesManager:
+    # Refuse lock names that are not declared below (a misspelt lock must fail, not create a fresh, uncontended
+    # lock). The setting exists in current lockable-resources releases; if your release rejects the key, remove
+    # this line and keep the declared list (FACTS [MISSED] ephemeral resources).
+    allowEphemeralResources: false
+    declaredResources:
+      - name: "ALFA_EDW_DEV"
+        description: "Flyway deploys to ALFA_EDW_DEV (EDW/deploy/DEV/deploy); reserve it before a manual Flyway run"
+        labels: "edw-flyway edw-runway"
+      - name: "ALFA_EDW_SAN"
+        description: "Flyway deploys to ALFA_EDW_SAN (EDW/deploy/SAN/deploy); reserve it before a manual Flyway run"
+        labels: "edw-flyway edw-runway"
+      - name: "ALFA_EDW_SEA"
+        description: "Flyway deploys to ALFA_EDW_SEA (EDW/deploy/SEA/deploy); reserve it before a manual Flyway run"
+        labels: "edw-flyway edw-runway"
+      - name: "ALFA_EDW_PHX"
+        description: "Flyway deploys to ALFA_EDW_PHX (EDW/deploy/PHX/deploy); reserve it before a manual Flyway run"
+        labels: "edw-flyway edw-runway"
+      - name: "ALFA_EDW_MGM"
+        description: "Flyway deploys to ALFA_EDW_MGM (EDW/deploy/MGM/deploy); reserve it before a manual Flyway run"
+        labels: "edw-flyway edw-runway"
+      - name: "ALFA_EDW_PRD"
+        description: "Flyway deploys to ALFA_EDW_PRD (EDW/deploy/PRD/deploy); break-glass runs reserve it first"
+        labels: "edw-flyway edw-runway"
+      - name: "ALFA_EDW_RH_MGM"
+        description: "Rehearsal clone of ALFA_EDW_MGM; the MGM deploy job holds it together with ALFA_EDW_MGM"
+        labels: "edw-flyway edw-rehearsal"
+      - name: "ALFA_EDW_RH_PRD"
+        description: "Rehearsal clone of ALFA_EDW_PRD; the PRD deploy job holds it together with ALFA_EDW_PRD"
+        labels: "edw-flyway edw-rehearsal"

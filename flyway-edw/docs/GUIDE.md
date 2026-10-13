@@ -22,8 +22,8 @@ How to read it:
 * Companion documents: [CONVENTIONS.md](CONVENTIONS.md) (how to write migrations),
   [SHORTCOMINGS.md](SHORTCOMINGS.md) (Flyway limits and the kit's mitigations), [RUNBOOKS.md](RUNBOOKS.md) (incident
   procedures R1-R12).
-* Pointers from other kit files: the `flyway.toml` header's "GUIDE section 9" (running Flyway by hand) is step
-  **B7**; the `runways.toml` header's "spike in GUIDE step 11" (Enterprise preview checks) is step **G1**.
+* Running Flyway by hand with `fw.py env` is step **B7**; enabling the Enterprise preview checks is **Part G**
+  (spike G1, switch-on G2, drift gate G3).
 
 ---
 
@@ -119,11 +119,11 @@ Every runway has one job, `EDW/deploy/<ID>/deploy`, built from `jenkins/Jenkinsf
 4. **Promotion check**: `flyway info` and `flyway validate` on each predecessor with the read-only auditor login,
    then `fw.py promote-check` (passes if ANY one predecessor ran the whole bundle cleanly).
 5. Inside the lock `ALFA_EDW_<ID>` (plus `ALFA_EDW_RH_<ID>` for MGM/PRD): pre-flight `info`/`validate` on the
-   target and the baseline check; drift check; Enterprise `check -drift` (advisory, only when
-   `preview_checks = true`); `check -dryrun` report (MGM/PRD, and any `DRY_RUN`); **rehearsal** (MGM/PRD: clone,
-   migrate the clone, drop it whatever happens); **approval**; record the **Time Travel point**; **migrate**;
-   archive `flyway info` JSON; post the `deploy-<ID>` status on the bundle's commit in Bitbucket (main lane only: a
-   status on a feature branch's head would count in that branch's pull request).
+   target and the baseline check; drift check (with the target's deploy login); Enterprise `check -drift`
+   (advisory, only when `preview_checks = true`); `check -dryrun` report (MGM/PRD, and any `DRY_RUN`);
+   **rehearsal** (MGM/PRD: clone, migrate the clone, drop it whatever happens); **approval**; record the **Time
+   Travel point**; **migrate**; archive `flyway info` JSON; post the `deploy-<ID>` status on the bundle's commit in
+   Bitbucket (main lane only: a status on a feature branch's head would count in that branch's pull request).
 
 Parameters: `TARGET` (must match the folder's runway), `SOURCE_JOB` (default `/EDW/ci/edw-flyway/main`),
 `SOURCE_BUILD`, `CHANGE_TICKET` (required for PRD), `DRY_RUN` (every check, the dry-run report and the rehearsal,
@@ -329,17 +329,19 @@ Global): anything visible to `/EDW/ci` can be used by any pull request, because 
 | `sf-flyway-AUDIT`        | SSH Username with private key | `/EDW/ci` + every deploy | SVC_EDW_FLYWAY_AUDIT key     |
 | `flyway-license`         | Username with password        | `/EDW/ci` + every deploy | Redgate email + PAT (B6)     |
 | `bitbucket-status-token` | Secret text                   | `/EDW/ci` + every deploy | repository access token (B5) |
+| `bitbucket-checkout`     | Username with password        | `/EDW/deploy`            | x-token-auth + same token    |
 | `sf-flyway-<ID>`         | SSH Username with private key | `/EDW/deploy/<ID>` only  | SVC_EDW_FLYWAY_<ID> key      |
 
-"Every deploy" means a separate copy in each of the six `/EDW/deploy/<ID>` folders.
+"Every deploy" means a separate copy in each of the six `/EDW/deploy/<ID>` folders. `bitbucket-status-token` is
+also the multibranch project's scan credential. `bitbucket-checkout` (username `x-token-auth`, password = the same
+repository access token) lets the deploy jobs check out `jenkins/Jenkinsfile.deploy` from `main`: an SCM checkout
+cannot use a Secret text credential.
 
 * "SSH Username with private key" is used only as a container: username = the Snowflake service user, private key =
   the contents of the `.p8` file (`-----BEGIN ENCRYPTED PRIVATE KEY-----` ...), passphrase = its passphrase. The
   pipeline binds them to `FLYWAY_SF_USER`, `FLYWAY_SF_KEY_FILE` and `FLYWAY_SF_KEY_PWD`, which `flyway.toml` reads.
 * `sf-account` is the account identifier as it appears in your Snowflake URL, preferably `<orgname>-<account_name>`
   (`SELECT CURRENT_ORGANIZATION_NAME() || '-' || CURRENT_ACCOUNT_NAME();`); a legacy locator needs its region suffix.
-* The multibranch project scans Bitbucket with the credential that `jenkins/jobs.groovy` names in its branch source;
-  if that is not `bitbucket-status-token`, create it in `/EDW/ci` as well.
 
 **Verify:** each folder's Credentials page lists the IDs above and nothing for other runways; `/EDW/deploy/PRD` is the
 only place `sf-flyway-PRD` exists. The first PR build (C4) and each first deploy (H1) prove the bindings.
@@ -421,18 +423,18 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups.
 1. **Create the AD groups** (suggested names; whatever you choose must match `runways.toml` `approval_group` and the
    role assignments in `casc-snippet.yaml`, because Jenkins matches the security realm's group names):
 
-   | Group                          | Members                     | Grants                                          |
-   |--------------------------------|-----------------------------|-------------------------------------------------|
-   | edw-developers                 | data engineers              | Bitbucket write (branches, PRs); Jenkins read   |
-   | edw-dba                        | DBAs                        | platform CODEOWNERS; DEV deploy role; runbooks  |
-   | edw-runway-leads-SAN/-SEA/-PHX | lead of the leasing project | Build on `EDW/deploy/<ID>`; optional approval   |
-   | edw-release-approvers          | release managers            | Build + approve `EDW/deploy/MGM`                |
-   | edw-prod-approvers             | two or more named approvers | Build + approve `EDW/deploy/PRD` (four-eyes)    |
-   | edw-jenkins-admins             | Jenkins admins              | Job/Configure on the deploy folders (only them) |
-   | edw-breakglass                 | two or three senior DBAs    | push to `main`; temporary MGM/PRD deploy role   |
+   | Group                          | Members                     | Grants                                            |
+   |--------------------------------|-----------------------------|---------------------------------------------------|
+   | edw-developers                 | data engineers              | Bitbucket write (branches, PRs); Jenkins CI build |
+   | edw-dba                        | DBAs                        | CODEOWNERS; Build DEV/SAN/SEA/PHX; reserve locks  |
+   | edw-runway-leads-SAN/-SEA/-PHX | lead of the leasing project | Build DEV + `EDW/deploy/<ID>`; opt. approval      |
+   | edw-release-approvers          | release managers            | Build + approve MGM; start PRD                    |
+   | edw-prod-approvers             | two or more named approvers | Build + approve PRD (four-eyes)                   |
+   | edw-jenkins-admins             | Jenkins admins              | Job/Configure on the deploy folders (only them)   |
+   | edw-breakglass                 | two or three senior DBAs    | push to `main`; temporary MGM/PRD deploy role     |
 
-   Nobody outside edw-jenkins-admins gets Job/Configure or Run/Replay on `EDW/deploy/*`: either would let them
-   edit the approval out of a deploy.
+   `casc-snippet.yaml` assigns exactly these group names. Nobody outside edw-jenkins-admins gets Job/Configure or
+   Run/Replay on `EDW/deploy/*`: either would let them edit the approval out of a deploy.
 
 2. **Human Snowflake access.** Only the service users deploy. People hold functional (read/write) roles, plus:
 
@@ -447,8 +449,8 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups.
 
 3. **Break-glass for MGM/PRD** (incident, emergency hotfix F5, adoption D5; PRD shown, MGM likewise):
    1. An emergency change ticket approved by a member of edw-prod-approvers other than the operator.
-   2. In Jenkins, **reserve** the lockable resource `ALFA_EDW_PRD` (Lockable Resources page, Reserve) so no deploy
-      job can start; Flyway itself takes no lock on Snowflake.
+   2. In Jenkins, a DBA **reserves** the lockable resource `ALFA_EDW_PRD` (Lockable Resources page, Reserve) so no
+      deploy job can start; Flyway itself takes no lock on Snowflake.
    3. SECURITYADMIN grants the deploy role for a fixed time box:
 
       ```sql
@@ -467,11 +469,13 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups.
 4. **Running Flyway by hand.** Needs Python 3.11+, the same Flyway version as `runways.toml` (Redgate CLI download or
    the `redgate/flyway` image, never the open-source `flyway/flyway` image), your own Snowflake user with a
    registered key pair (B2 commands with your user name; an admin runs `ALTER USER ... SET RSA_PUBLIC_KEY`), a role
-   that may use the runway's deploy role (DEV, a leased runway, or break-glass) or the auditor role, and your PAT:
+   that may use the runway's deploy role (DEV, a leased runway, or break-glass) or the auditor role, and your PAT.
+   **Network:** run manual and break-glass sessions from a host inside the range the service users' network policy
+   allows (the Jenkins agents' egress CIDRs from B1: an admin host in that range, or an agent). A session that uses
+   a service login is refused from anywhere else, and security may put break-glass operators under the same policy.
 
    ```bash
-   eval "$(python3 scripts/fw.py env --runway DEV --format shell)"   # role, warehouse, policy for the runway
-   unset FLYWAY_TARGET          # Flyway reads FLYWAY_TARGET as its target version: never leave it set
+   eval "$(python3 scripts/fw.py env --runway DEV --format shell)"   # FLYWAY_SF_ROLE/WAREHOUSE + EDW_* policy
    export SNOWFLAKE_ACCOUNT='<orgname>-<account_name>'
    export FLYWAY_SF_USER='<YOUR_SNOWFLAKE_USER>'        # fw.py printed the service user; people use their own
    export FLYWAY_SF_KEY_FILE="$HOME/.snowflake/keys/<you>.p8"
@@ -482,8 +486,13 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups.
    flyway -environment=DEV info
    ```
 
-   For read-only work use `fw.py env --runway <ID> --auditor` (it selects `EDW_FLYWAY_AUDITOR` and
-   `WH_EDW_FLYWAY_AUDIT`) with your own user. The same thing in the container image (its entrypoint is `flyway`):
+   `fw.py env` prints the Snowflake role and warehouse that `flyway.toml` resolves (`FLYWAY_SF_ROLE`,
+   `FLYWAY_SF_WAREHOUSE`, the service user as `FLYWAY_SF_USER`, and `FLYWAY_RH_DB` for MGM/PRD) plus the runway
+   policy under `EDW_*` names. Policy never uses `FLYWAY_*` names because Flyway reads `FLYWAY_TARGET`,
+   `FLYWAY_ENVIRONMENT`, `FLYWAY_BASELINE_VERSION` and similar variables as its own settings; do not export such
+   names yourself. The account, key file and passphrase are always yours to export. For read-only work use
+   `fw.py env --runway <ID> --auditor` (it selects `EDW_FLYWAY_AUDITOR` and `WH_EDW_FLYWAY_AUDIT`) with your own
+   user. The same thing in the container image (its entrypoint is `flyway`):
 
    ```bash
    docker run --rm -v "$PWD:/work" -w /work -v "$FLYWAY_SF_KEY_FILE:/keys/sf.p8:ro" \
@@ -492,10 +501,12 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups.
      redgate/flyway:13.8.1 -environment=DEV info
    ```
 
-   A **manual migrate** (DEV repairs, break-glass) must pass the deploy metadata the callbacks write to
-   `FLYWAY.DEPLOY_LOG`, scoped to the environment. Flyway uses an environment's own `[environments.<ID>.flyway.
-   placeholders]` table instead of the global `[flyway.placeholders]` when the environment defines one, so plain
-   `-placeholders.x=` does not reach the runways; `-environments.<ID>.flyway.placeholders.x=` does:
+   A **manual migrate** (DEV repairs, break-glass) should pass the deploy metadata the callbacks write to
+   `FLYWAY.DEPLOY_LOG`, in the environment-scoped form. Every environment in `flyway.toml` has its own placeholders
+   table, and that table **replaces** any root-level value (it is not merged), so a root-level
+   `-placeholders.deploy_id=...` is silently ignored on every runway; `-environments.<ID>.flyway.placeholders.x=`
+   reaches it. Without the flags the defaults from `flyway.toml` apply (`deploy_id = "manual"`, `git_sha =
+   "unknown"`, ...), which leaves an anonymous row in the log:
 
    ```bash
    flyway -environment=DEV migrate \
@@ -508,9 +519,11 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups.
 **Verify:** `SHOW GRANTS OF ROLE EDW_MGM_DEPLOYER;` and `... EDW_PRD_DEPLOYER;` list only SYSADMIN and the service
 user; the Jenkins approval prompt of a test MGM run (H1) is offered to edw-release-approvers members only.
 
-**What can go wrong:** `FLYWAY_TARGET` left in the shell makes Flyway fail with an invalid-version error; a manual run
-without a reserved lock can collide with a Jenkins deploy (nothing in Flyway prevents two concurrent migrates); a
-manual migrate without the placeholders above fails in the first callback ("No value provided for placeholder").
+**What can go wrong:** a stray `FLYWAY_*` variable in the shell (for example `FLYWAY_TARGET`) silently changes what
+Flyway does; a manual run without a reserved lock can collide with a Jenkins deploy (nothing in Flyway prevents two
+concurrent migrates); a manual migrate with `-placeholders.x=` instead of the environment-scoped form records
+`manual` / `unknown` in `FLYWAY.DEPLOY_LOG` without any error; a session from outside the allowed network range is
+refused at login (see the network note above).
 
 ---
 
@@ -561,9 +574,11 @@ from the verified bundle, which never contains it).
    `ALFA_EDW_DEV` ... `ALFA_EDW_PRD` plus `ALFA_EDW_RH_MGM` and `ALFA_EDW_RH_PRD`, and the Role Strategy roles and
    group assignments from B7. If your Lockable Resources version has "Allow ephemeral resources", switch it off so a
    misspelt lock name fails instead of silently creating a new lock.
-6. Set the controller environment variables the Jenkinsfiles read (via `casc-snippet.yaml`): `EDW_AGENT_LABEL`
-   (label of the Docker-capable agents, default `docker`), `BITBUCKET_WORKSPACE` and `BITBUCKET_REPO` (for the
-   `deploy-<ID>` statuses), and optionally `EDW_JAVA_PROXY_ARGS` and `PIP_INDEX_URL` (A2). The agents must be able
+6. Set the controller environment variables the jobs read (`casc-snippet.yaml` `globalNodeProperties`):
+   `BITBUCKET_WORKSPACE` and `BITBUCKET_REPO` (filled from the JCasC placeholders `EDW_BITBUCKET_WORKSPACE` and
+   `EDW_BITBUCKET_REPO`; used by the seed job and the `deploy-<ID>` statuses), `EDW_AGENT_LABEL` (label of the
+   Docker-capable agents, default `docker`), and behind a proxy `EDW_JAVA_PROXY_ARGS`, `HTTPS_PROXY` and
+   `PIP_INDEX_URL` (A2). The agents must be able
    to pull `redgate/flyway:13.8.1` and `python:3.11-slim` (if you mirror images, point `runways.toml` `flyway_image`
    and `python_image` at the mirror, keeping the exact version tag).
 
@@ -579,13 +594,16 @@ see nothing; a global role with Job/Build overrides every item restriction.
 
 **Do:**
 
-1. Fill in the variables at the top of `jenkins/jobs.groovy` (Bitbucket workspace, repository, scan credential) and
-   merge that change to `main`.
+1. Check the settings at the top of `jenkins/jobs.groovy`: leave the workspace and repository empty to use the
+   controller variables from C2, keep the credential IDs of B4, and set `kitDir` only if the kit is not the
+   repository root. Merge any change to `main`.
 2. Create an admin-only seed job (Freestyle: Source Code Management = the EDW repository, branch `main`; build step
    "Process Job DSLs", "Look on Filesystem" = `jenkins/jobs.groovy`). Run it; approve the script under In-process
    Script Approval if Jenkins asks.
 3. It creates the folders `EDW`, `EDW/ci`, `EDW/deploy`, `EDW/deploy/<ID>`, the multibranch project
-   `EDW/ci/edw-flyway` and the six `EDW/deploy/<ID>/deploy` jobs. Now create the credentials (B4).
+   `EDW/ci/edw-flyway` and the six `EDW/deploy/<ID>/deploy` jobs (it reads `runways.toml`, updates what it created
+   and deletes nothing, so re-running it is safe). Now create the credentials (B4). Each deploy job takes its runway
+   from its folder name; if you define a folder variable for it, call it `EDW_TARGET`, never `FLYWAY_TARGET`.
 4. Webhook: either let Jenkins manage hooks (Bitbucket endpoint with "Manage hooks" and a credential allowed to
    manage webhooks), or add it by hand: URL `https://<jenkins>/bitbucket-scmsource-hook/notify`, events
    `repo:push`, `pullrequest:created`, `pullrequest:updated`, `pullrequest:fulfilled`, `pullrequest:rejected`.
@@ -708,7 +726,7 @@ adopted database; everything at or below it counts as already delivered. Choose 
 * identical for all six databases;
 * fixed for good once the first database is baselined.
 
-**Verify:** `python3 scripts/fw.py env --runway PRD --format json` shows `FLYWAY_BASELINE_VERSION`; guard is clean.
+**Verify:** `python3 scripts/fw.py env --runway PRD --format json` shows `EDW_BASELINE_VERSION`; guard is clean.
 
 **What can go wrong:** a `V` file at or below the baseline shows as "Below Baseline" and never runs anywhere.
 
@@ -756,10 +774,10 @@ the DEV deploy role for DEV. **Where:** workstation (B7 setup), Snowsight.
 **Do:**
 
 ```bash
-eval "$(python3 scripts/fw.py env --runway PRD --format shell)"; unset FLYWAY_TARGET
+eval "$(python3 scripts/fw.py env --runway PRD --format shell)"
 # + the account/user/key/licence exports from B7
 flyway -environment=PRD info                      # expect: no schema history yet, nothing applied
-flyway -environment=PRD baseline -baselineVersion="$FLYWAY_BASELINE_VERSION" \
+flyway -environment=PRD baseline -baselineVersion="$EDW_BASELINE_VERSION" \
   -baselineDescription="ALFA EDW adoption baseline"
 flyway -environment=PRD info                      # expect: one Baseline row at the baseline version
 ```
@@ -1109,7 +1127,7 @@ PRD yet. Details and recovery: RUNBOOKS R4.
    python3 scripts/fw.py verify-bundle --bundle edw-flyway-bundle-N.tar.gz --extract hotfix-N --require-branch main
    cd hotfix-N/bundle
    SHA=$(python3 -c 'import json; print(json.load(open("bundle-manifest.json"))["git_sha"])')
-   eval "$(python3 scripts/fw.py env --runway MGM --format shell)"; unset FLYWAY_TARGET   # + B7 exports
+   eval "$(python3 scripts/fw.py env --runway MGM --format shell)"   # + the B7 exports
    flyway -environment=MGM info                     # the hotfix version is Pending
    flyway -environment=MGM migrate -cherryPick="2026.10.20.1405" \
      -environments.MGM.flyway.placeholders.deploy_id="MGM-hotfix-CHG-nnnn" \
@@ -1120,10 +1138,10 @@ PRD yet. Details and recovery: RUNBOOKS R4.
 
    Then the same for PRD with `PRD` in place of `MGM`. Add a changed repeatable to `-cherryPick` by its description,
    exactly as `bundle-manifest.json` lists it (`repeatable[].description`). Before each target, rehearse the way the
-   job does: run the SQL printed by `fw.py rehearsal-sql --runway PRD --action create` as the deploy role,
-   `export FLYWAY_RH_DB=ALFA_EDW_RH_PRD`, run the same `migrate` with `-environment=RH_PRD` (and `RH_PRD` in the
-   placeholder flags), then run the SQL from `--action drop`. The skipped migrations stay pending and the next normal
-   release applies them out of order (`outOfOrder = true` on every runway).
+   job does: run the SQL printed by `fw.py rehearsal-sql --runway PRD --action create` as the deploy role, run the
+   same `migrate` with `-environment=RH_PRD` (and `RH_PRD` in the placeholder flags; `fw.py env --runway PRD` already
+   exported `FLYWAY_RH_DB=ALFA_EDW_RH_PRD`), then run the SQL from `--action drop`. The skipped migrations stay
+   pending and the next normal release applies them out of order (`outOfOrder = true` on every runway).
 5. **Back-merge:** the fix is already on `main` because it went through step 2. If the incident was first fixed by
    hand in PRD, the back-merge is writing that same change as a migration on `main` the same day and reconciling the
    drift (RUNBOOKS R5).
@@ -1225,7 +1243,15 @@ by PR. From then on, drift stops the deploy until it is reconciled (RUNBOOKS R5)
 `ACK_DRIFT = true`, noted in the ticket.
 
 Limit: the kit's drift query sees tables and views (`LAST_DDL`) and functions and procedures (`LAST_ALTERED`); tasks,
-streams, pipes and alerts are covered only by the Enterprise check of G2.
+streams, pipes and alerts are covered only by the Enterprise check of G2. INFORMATION_SCHEMA shows only what the
+querying role can see, so the job runs the drift query with the target's deploy login, never the auditor. To look at
+drift by hand (a DBA with the runway's deploy role, B7):
+
+```bash
+python3 scripts/fw.py drift-sql --runway MGM > drift.sql
+snow sql --connection <your-mgm-deployer-connection> --format json --filename drift.sql > rows.json
+python3 scripts/fw.py drift-eval --runway MGM --rows rows.json      # exit 1 = the runway's gate would stop
+```
 
 **Verify:** a test change by hand in MGM (then reverted) stops a `DRY_RUN = true` deploy at the drift stage.
 
