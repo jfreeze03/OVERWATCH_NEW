@@ -186,6 +186,7 @@ deploy into a drift alarm.
 3. **Jenkins controller plugins:** Pipeline (workflow-aggregator, pipeline-model-definition), bitbucket-branch-source,
    cloudbees-folder, credentials-binding, docker-workflow, lockable-resources, copyartifact, pipeline-utility-steps,
    pipeline-input-step, pipeline-build-step, junit, timestamper, role-strategy, job-dsl, configuration-as-code;
+   job-restrictions, unless the deploy agents come from a separate cloud the CI folder cannot use (C2 step 7);
    htmlpublisher only if you want the Flyway HTML reports rendered inside Jenkins (C2).
 4. **Agents:** Linux agents that can run Docker containers, in **two separate pools**:
    * **CI agents** (label `EDW_AGENT_LABEL`) run the `EDW/ci` builds, including every pull request's own Jenkinsfile.
@@ -218,8 +219,10 @@ deploy into a drift alarm.
    `-Dhttps.proxyHost=<host> -Dhttps.proxyPort=<port>` (the Jenkinsfiles append it to `JAVA_ARGS`; see
    `casc-snippet.yaml`), and put the same properties in `JAVA_ARGS` for manual runs. Set it now so a later upgrade
    past 13.9 does not break licensing. A PyPI mirror goes into the controller variable `PIP_INDEX_URL`. apt (the
-   git fallback of point 4) reads neither of those: it needs the lower-case controller variables `http_proxy` and
-   `https_proxy`, or an internal apt mirror.
+   git fallback of point 4) reads only the lower-case `http_proxy` / `https_proxy`; the CI Guard stage derives them
+   from the controller's `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` (`http_proxy` falls back to `HTTPS_PROXY`). Set
+   the upper-case names only: Jenkins treats variable names case-insensitively, so a lower-case duplicate would
+   replace the upper-case entry. An internal apt mirror works too.
 
 **Verify** on one agent (the image's entrypoint is `flyway`):
 
@@ -483,8 +486,9 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups, a host inside the Jenk
    PR Jenkinsfile could otherwise start `EDW/deploy/SAN/deploy` with its own branch bundle. The deploy job therefore
    accepts a run only when a **user started it** (Jenkins has checked that user's Build permission on the job), or
    when it is the **CI main job's own DEV trigger** (one upstream cause from `EDW/ci/edw-flyway/main`, the same
-   build as `SOURCE_BUILD`, `TARGET = DEV`). Every other cause, such as an upstream branch or PR job, a remote API
-   call or a timer, is refused with an error.
+   build as `SOURCE_BUILD`, `TARGET = DEV`). Every other cause, such as an upstream branch or PR job, a remote
+   trigger token or a timer, is refused with an error. (A REST call made with a person's own API token counts as that
+   person starting the run.)
 
 2. **Human Snowflake access.** People never hold an `EDW_<ID>_DEPLOYER` role: on every runway
    `SHOW GRANTS OF ROLE` lists only SYSADMIN and the runway's service user. People work with functional roles,
@@ -633,9 +637,10 @@ from the verified bundle, which never contains it).
 6. Set the controller environment variables the jobs read (`casc-snippet.yaml` `globalNodeProperties`):
    `BITBUCKET_WORKSPACE` and `BITBUCKET_REPO` (filled from the JCasC placeholders `EDW_BITBUCKET_WORKSPACE` and
    `EDW_BITBUCKET_REPO`; used by the seed job and the `deploy-<ID>` statuses), `EDW_AGENT_LABEL` (label of the CI
-   agents, default `docker`), `EDW_DEPLOY_AGENT_LABEL` (label of the deploy agents, A2 point 4), and behind a proxy
-   `EDW_JAVA_PROXY_ARGS`, `HTTPS_PROXY`, `PIP_INDEX_URL` and, while the python image has no git, the lower-case
-   `http_proxy` / `https_proxy` that apt reads (A2). The agents must be able to pull the two `runways.toml` images:
+   agents, default `docker`), `EDW_DEPLOY_AGENT_LABEL` (label of the deploy agents, A2 point 4; it must differ from
+   `EDW_AGENT_LABEL`), and behind a proxy `EDW_JAVA_PROXY_ARGS`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and
+   `PIP_INDEX_URL` (upper case only; the Guard stage derives the lower-case names apt needs, A2 point 6). The agents
+   must be able to pull the two `runways.toml` images:
    `flyway_image` (`redgate/flyway:13.8.1`, the exact version tag) and `python_image`, preferably the internal
    python + git + snowflake-cli image of A2 point 4. If you mirror images, point both keys at the mirror; either
    way, pin them by digest (`<image>:<tag>@sha256:<digest>`, A2 point 4).

@@ -294,10 +294,17 @@ def config_findings(kit: Kit) -> list[ConfigFinding]:
         if not str(kit.kit.get(key, "")).strip():
             err("FG019", "runways.toml [kit]", f"{key} is required")
     image = str(kit.kit.get("flyway_image", ""))
-    if image and not image.endswith(":" + str(kit.kit.get("flyway_version", ""))):
-        err("FG019", "runways.toml [kit]", "flyway_image tag must equal flyway_version (pin one exact version)")
-    if image.endswith(":latest") or re.search(r":\d+(\.\d+)?$", image):
-        err("FG019", "runways.toml [kit]", "flyway_image must pin an exact x.y.z tag, never latest or x / x.y")
+    # `repo:x.y.z` or `repo:x.y.z@sha256:<digest>` (the digest makes the reference immutable; the tag ties it to the
+    # version). A tag-less `repo@sha256:...` cannot be checked against flyway_version, so it is refused.
+    m = re.fullmatch(r"(?P<repo>[^:@\s]+(?::\d+/[^:@\s]+)?):(?P<tag>[^@\s]+)(?:@sha256:(?P<digest>[0-9a-f]{64}))?", image)
+    if image and not m:
+        err("FG019", "runways.toml [kit]", "flyway_image must be <repo>:<x.y.z> or <repo>:<x.y.z>@sha256:<digest>")
+    elif m:
+        tag = m.group("tag")
+        if tag != str(kit.kit.get("flyway_version", "")):
+            err("FG019", "runways.toml [kit]", "flyway_image tag must equal flyway_version (pin one exact version)")
+        if tag == "latest" or not re.fullmatch(r"\d+\.\d+\.\d+", tag):
+            err("FG019", "runways.toml [kit]", "flyway_image must pin an exact x.y.z tag, never latest or x / x.y")
     if str(kit.kit.get("history_schema", "FLYWAY")) != str(fw.get("defaultSchema", "")):
         err("FG019", "runways.toml [kit]", "history_schema must equal flyway.toml [flyway] defaultSchema")
     return out

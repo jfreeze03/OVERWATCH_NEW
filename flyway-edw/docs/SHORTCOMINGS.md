@@ -839,7 +839,7 @@ Jenkinsfile and deploy that branch with the runway's key, past the role-strategy
   - Resolve policy: reads every build cause and accepts the run only if a user started it (Jenkins has then checked
     that user's Build permission on the job), or if its single upstream cause is the CI main job's own trigger of DEV
     (the main branch job, the same build number as `SOURCE_BUILD`, `TARGET = DEV`). Any other cause, such as an
-    upstream branch or PR job, a remote API call or a timer, is refused.
+    upstream branch or PR job, a remote trigger token or a timer, is refused.
   - Fetch bundle: copies the bundle by build number, runs `fw.py verify-bundle --require-branch main` for prod tier,
     and checks the lane.
   - Promotion check: runs `flyway info -outputType=json` and `flyway validate` on each predecessor with the auditor
@@ -968,9 +968,9 @@ licence cache. Behind a locked-down egress, every PR and main build fails at Gua
     forbids `latest` and x or x.y tags.
 - process (GUIDE A2, C2): build an internal image from `python:3.11-slim` plus git and `snowflake-cli==<[kit]
   snowflake_cli>`, and point `runways.toml` `python_image` at it, so no build installs anything. Without one, allow
-  the agents to reach `deb.debian.org` and `security.debian.org` (or an internal apt mirror), and set lower-case
-  `http_proxy` / `https_proxy` as controller variables behind a proxy: apt reads the lower-case names, not
-  `HTTPS_PROXY` or `EDW_JAVA_PROXY_ARGS`.
+  the agents to reach `deb.debian.org` and `security.debian.org` (or an internal apt mirror). apt reads only the
+  lower-case `http_proxy` / `https_proxy`, which the Guard stage derives from the controller's `HTTP_PROXY` /
+  `HTTPS_PROXY` / `NO_PROXY`; Jenkins treats variable names case-insensitively, so set the upper-case names only.
 - process (GUIDE A2): pin both images by digest in `runways.toml` (`<image>:<tag>@sha256:<digest>`) and keep them in
   an internal registry; the deploy agents are dedicated to the deploy jobs (S31), so a CI build cannot seed their
   image cache.

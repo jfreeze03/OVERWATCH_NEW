@@ -552,7 +552,8 @@ out-of-band incident: `SHOW TASKS IN SCHEMA ...`, `SHOW GRANTS ON ...`.
    or `casc-snippet.yaml` `globalNodeProperties`), set:
    - `EDW_JAVA_PROXY_ARGS` = `-Dhttps.proxyHost=proxy.alfa.example -Dhttps.proxyPort=8080` (your real host and port);
    - `HTTPS_PROXY` and `PIP_INDEX_URL` for the Snowflake CLI install, if those are blocked too;
-   - lower-case `http_proxy` / `https_proxy` if the CI Guard stage fails installing git with apt (GUIDE A2).
+   - `HTTP_PROXY` (and `NO_PROXY`) if the CI Guard stage fails installing git with apt: it derives the lower-case
+     names apt reads from these. Set upper-case names only (GUIDE A2 point 6).
 
    Then re-run the job. Only in a manual R0 session, append the same flags to `JAVA_ARGS` after the existing
    `-Duser.home=...` flag:

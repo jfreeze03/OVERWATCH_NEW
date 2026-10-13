@@ -891,7 +891,7 @@ and RG11 (CREATE ROLE). The code-review **errors** stay errors:
 
 - ALFA01 (an `ALFA_EDW_` name), ALFA02 (USE), ALFA04 (DROP DATABASE, CREATE OR REPLACE SCHEMA/DATABASE) and RG03 (DROP
   DATABASE) repeat guard checks that you never waive anyway (so never waive FG009 for an `ALFA_EDW_` literal). Regex
-  rules have no per-file or per-line waiver.
+  rules have no per-file waiver.
 - SQLFluff errors with no guard rule behind them: RG09 (UPDATE without WHERE), RG12 (grants to PUBLIC), AL04, AL08 and
   CV05. When one is intended, end the flagged line with `-- noqa: <code>`, for example `-- noqa: RG09`; Flyway lists
   every noqa in the code-review report as a policy override.

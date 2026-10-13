@@ -30,7 +30,7 @@
 //   file from an earlier run can leak into Flyway's locations. Inside a node, docker.image(..).inside() gives the
 //   python image (fw.py, Snowflake CLI) and the flyway image (Flyway, curl) the same workspace. Both images are
 //   PULLED before every use: a tag already cached on the agent is never trusted. runways.toml may pin them by digest
-//   (redgate/flyway@sha256:..., <registry>/python@sha256:...); isImageRef() accepts '@'.
+//   (redgate/flyway:13.8.1@sha256:..., <registry>/python:<tag>@sha256:...); isImageRef() accepts '@'.
 // * Agents: every node of this job carries EDW_DEPLOY_AGENT_LABEL (default 'edw-deploy'), never the CI label
 //   EDW_AGENT_LABEL. A label alone does not separate them - a PR's Jenkinsfile can ask for node('edw-deploy') - so
 //   the deploy nodes must be restricted ON THE NODE SIDE to jobs matching EDW/deploy/.* (Job Restrictions plugin), or
@@ -933,7 +933,7 @@ void onAgent(boolean withBundle, Closure body) {
 
 // A kit image, PULLED first: `docker pull` re-resolves the reference at the registry, so a same-named image left in
 // the agent's cache (re-tagged by anything that ran there) is replaced before use. Pin by digest in runways.toml
-// (redgate/flyway@sha256:...) to make the reference itself immutable.
+// (redgate/flyway:<x.y.z>@sha256:..., the form FG019 accepts) to make the reference itself immutable.
 def kitImage(String ref) {
     def image = docker.image(ref)
     image.pull()

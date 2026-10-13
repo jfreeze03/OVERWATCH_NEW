@@ -141,6 +141,23 @@ def test_fg018_environment_overrides_and_literal_jdbc_secrets(tmp_path):
     assert any("[flyway] schemas" in m for m in msgs)
 
 
+@pytest.mark.parametrize(("image", "ok"), [
+    ("redgate/flyway:13.8.1", True),
+    ("redgate/flyway:13.8.1@sha256:" + "a" * 64, True),
+    ("registry.alfa.local:5000/redgate/flyway:13.8.1@sha256:" + "b" * 64, True),
+    ("redgate/flyway@sha256:" + "a" * 64, False),
+    ("redgate/flyway:13.8", False),
+    ("redgate/flyway:latest", False),
+    ("redgate/flyway:13.9.0", False),
+])
+def test_fg019_image_pinning_forms(tmp_path, image, ok):
+    root = _mini_kit(tmp_path)
+    t = (root / "runways.toml").read_text().replace('flyway_image = "redgate/flyway:13.8.1"', f'flyway_image = "{image}"')
+    (root / "runways.toml").write_text(t)
+    image_errors = [f for f in _run(root) if f.rule == "FG019" and "flyway_image" in f.message]
+    assert (image_errors == []) is ok, [f.message for f in image_errors]
+
+
 def test_fg019_trips_on_prod_runway_without_approval(tmp_path):
     root = _mini_kit(tmp_path)
     t = (root / "runways.toml").read_text().replace('approval_group = "edw-prod-approvers"', 'approval_group = ""')
