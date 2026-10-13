@@ -1379,7 +1379,7 @@ that deploy's STARTED row) and PART 3 compares row counts. Then run one template
 * a whole schema (never `FLYWAY`): Q0 -> B1 (clone) -> B2 (compare) -> B2b (what a schema clone lacks) -> B3 (swap)
   -> B4 (the schema's own grants) -> Q9.
 
-Q0 records the schema's writers (started root tasks and alerts, running dynamic tables, pipes) in
+Q0 records the schema's writers (started root tasks and alerts, running dynamic tables, loading pipes) in
 `FLYWAY.DEPLOY_TASK_STATE` as `RESTORE-<deploy_id>` and stops them; Q9 restarts exactly those. **A swap discards
 every write made after the recovery point**, legitimate ETL rows included: they leave with the `_RESTORE_` evidence
 copy, and the data owner decides which of them are re-inserted (A2 lists them) or whether the ETL re-runs for that

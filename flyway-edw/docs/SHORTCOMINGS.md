@@ -105,8 +105,9 @@ N-1 committed: no DML-only script rolls back on its own.
   - The prod-tier dry-run report shows exactly what will execute.
 - callback:
   - `beforeMigrate__10_deploy_log` writes a STARTED row to `FLYWAY.DEPLOY_LOG`.
-  - `afterMigrateError__99_deploy_log` writes a FAILED row. Its insert sits in its own exception handler, so it never
-    hides the original error.
+  - `afterMigrateError__99_deploy_log` writes a FAILED row naming the failed migrations and the tasks that were
+    started before the run and are suspended now. Its insert sits in its own exception handler, so it never hides
+    the original error.
 - process: RUNBOOKS R1 covers the recovery: inspect, clean up, `flyway repair`, then re-run or fix forward.
 
 **Residual risk.** A statement that passed rehearsal can still fail on the real target, for example because data
@@ -628,13 +629,19 @@ itself OWNERSHIP or account-level privileges.
   reviewer. `ALFA04__no_drop_schema_database` stays an error for DROP DATABASE and CREATE OR REPLACE
   SCHEMA/DATABASE, which the guard never waives either.
 - bootstrap: `10_account_objects.sql` and `20_runway_database.sql` own every account-level and database-level object. A
-  Snowflake admin runs each section with the role it names. That includes the runway access roles
-  (`EDW_<ID>_<SCHEMA>_READ`, and `_WRITE` where used) that the layer-90 grants files grant to: bootstrap/10's
-  access-role section creates them before the first grants deploy (GUIDE B3).
+  Snowflake admin runs each section with the role it names. That includes:
+  - the account privileges a deploy role needs (bootstrap/10 PART 2c): EXECUTE TASK on every runway; on MGM and
+    PRD also EXECUTE ALERT (their deploys resume alerts) and CREATE DATABASE (rehearsal clones);
+  - the runway access roles (`EDW_<ID>_<SCHEMA>_READ`, and `_WRITE` where used) that the layer-90 grants files grant
+    to: bootstrap/10 PART 2e creates one per entry of PART 0's `access_roles` list (USERADMIN) and grants it to
+    SYSADMIN (SECURITYADMIN), and bootstrap/20 PART 1 grants it USAGE on the runway database (GUIDE B3);
+  - PART 5 of bootstrap/10 and PART 6 of bootstrap/20, which verify both, runway by runway.
 - process: account changes go through the Snowflake admin change process (GUIDE Part B).
 
 **Residual risk.** The roles that migrations grant to, such as `${role_prefix}_SALES_READ`, must exist before the
-deploy. If a new schema's roles were not created first, its grants repeatable fails at deploy time on that runway.
+deploy. If a new schema's entries were not added to `access_roles` and created on every runway first, its grants
+repeatable fails at deploy time on that runway. A test runway that starts resuming alerts needs EXECUTE ALERT granted
+by hand (PART 2c's comment).
 
 ### S20 Cross-database references break clone safety
 
@@ -663,14 +670,23 @@ resumed pipe would write into production.
   - FG016 requires a pipe's COPY INTO target to be a bare table name.
   - FG010 requires `SCHEMA.OBJECT` targets, which never name a database.
 - code review: `ALFA01__no_hardcoded_edw_db`.
-- callback: after each migrate, `afterMigrate__80_cross_env_guard` scans every view, function and procedure definition
-  and every task in the runway database. It raises when a definition names an `ALFA_EDW_` database other than
-  `${edw_db}` or `${home_db}` (RUNBOOKS R10). Rehearsal runs the same scan on the clone first.
+- callback: after each migrate, `afterMigrate__50_cross_env_guard` scans the stored definitions in the runway
+  database: view, function and procedure bodies, task bodies and WHEN conditions, dynamic-table queries, and alert
+  conditions and actions. It counts only database qualifiers (`ALFA_EDW_<X>` followed by a dot, quoted or not), with
+  comments removed and string literals kept (dynamic SQL builds names from them), and raises when one names a
+  database other than `${edw_db}` or `${home_db}` (RUNBOOKS R10). It runs before the task restore, so after a trip a
+  graph the run suspended stays suspended instead of resuming against another runway; its FAILED row lists those
+  tasks. Rehearsal runs the same scan on the clone first.
 - bootstrap: before cloning, `30_refresh_runway.sql` scans PRD's definitions for `ALFA_EDW_PRD` references.
 
 **Residual risk.**
-- The guard cannot see a name built from pieces at run time.
-- The callback raises only after the DDL has committed (S02).
+- The guard cannot see a name built from pieces at run time; the callback sees it only where the stored text holds
+  the whole qualifier (`'ALFA_EDW_PRD.' || ...` yes, `'ALFA_EDW_' || :env || '.'` no).
+- The callback raises only after the DDL has committed (S02). A flagged task in a graph the run did not touch keeps
+  running until someone suspends its root (R10, step 3), and the stranded tasks are resumed by hand after the fix
+  (R9).
+- Pipes and streams are not scanned (FG009 and FG016 cover them in the repository). A dynamic-table or alert scan
+  that fails is named in the callback's result and does not fail the deploy.
 
 ### S21 Flyway knows nothing about task state
 
@@ -680,11 +696,14 @@ resumed pipe would write into production.
   (https://docs.snowflake.com/en/sql-reference/sql/create-task, https://docs.snowflake.com/en/user-guide/tasks-graphs).
 - `SYSTEM$TASK_DEPENDENTS_ENABLE` resumes a task and all of its dependents
   (https://docs.snowflake.com/sql-reference/functions/system_task_dependents_enable).
+- A new or re-created member starts suspended, and `ALTER TASK <root> RESUME` resumes only the root. A started root
+  with a suspended member skips that member and everything after it on every run, without any error.
+- A finalizer task has no predecessors, like a root, but follows its root.
 - Cloned tasks arrive suspended.
 - `afterMigrate` callbacks run only when migrate succeeds ([docs]Callback Events.md).
 
 **Impact for ALFA EDW.**
-- After a deploy, a production task graph can silently stay suspended, and loads stop.
+- After a deploy, a production task graph, or one member of it, can silently stay suspended, and loads stop.
 - On test runways, tasks copied from PRD must not start pulling from shared sources.
 - A failed deploy leaves its graphs suspended, because the restore callback does not run.
 
@@ -694,19 +713,38 @@ resumed pipe would write into production.
 - flyway.toml: `tasks_enabled` is "true" on MGM and PRD and "false" on DEV, SAN, SEA, PHX, RH_MGM and RH_PRD. FG018
   requires "false" for the rehearsal environments.
 - callbacks:
-  - `beforeMigrate__20_task_snapshot` records the started root tasks in `FLYWAY.DEPLOY_TASK_STATE`.
-  - `afterMigrate__60_task_restore` re-enables those roots where `tasks_enabled = 'true'`, and suspends started roots
-    everywhere else.
+  - `beforeMigrate__20_task_snapshot` records, member by member, every graph whose root is started: the root, its
+    dependents (`TASK_DEPENDENTS`, recursive) and its finalizer, each with its own state and its `ROOT_FQN`, in
+    `FLYWAY.DEPLOY_TASK_STATE`. A root is a task without predecessors that is not a finalizer (`task_relations` has
+    no `FinalizedRootTask`). Before anything is applied it also stops the deploy when `tasks_enabled` is not exactly
+    "true" or "false" (-20120) or the table lacks `ROOT_FQN` (-20121: re-run bootstrap/20 PART 2 after a kit upgrade).
+  - `afterMigrate__60_task_restore`, where `tasks_enabled = 'true'`: for every graph recorded as started, it resumes
+    each member that is not started now and was started before or is new (not in the snapshot), one by one with
+    `ALTER TASK ... RESUME`, the root suspended first and resumed last; it never uses
+    `SYSTEM$TASK_DEPENDENTS_ENABLE`. A member an operator had suspended stays suspended, and so does a graph whose
+    root was suspended. A second pass verifies; a graph still wrong gets a FAILED row and the deploy goes red.
+    Where `tasks_enabled = 'false'` it suspends every started root instead (finalizers follow their root).
+  - `afterMigrateError__99_deploy_log` and `afterMigrate__50_cross_env_guard` name, in their FAILED row, the tasks
+    that were started before the run and are suspended now.
+- bootstrap: the scripts that suspend tasks by hand record them in the same table first: bootstrap/20 PART 3
+  (`ADOPT-<timestamp>`, before the ownership transfer that suspends every task of a schema; it resumes them itself),
+  bootstrap/30 PART 2 (`REFRESH-<ID>-<timestamp>`, undone by PART 2R) and bootstrap/40 Q0 (`RESTORE-<deploy_id>`,
+  restarted by Q9).
 - process: docs/CONVENTIONS.md, Tasks:
   - use `CREATE OR ALTER TASK`;
   - suspend the root first;
   - one file per graph, in layer 80;
   - one schema and one owner per graph.
 
-  RUNBOOKS R9 covers the restore after a failed deploy.
+  RUNBOOKS R9 covers the restore after a failed deploy, member by member from the recorded list.
 
 **Residual risk.**
-- After a FAILED migrate the restore is manual (R9).
+- After a FAILED migrate, a cross-environment guard trip or a failed restore, the resume is manual (R9).
+- A migration that only suspends a running graph is undone by the restore: retire a graph with DROP TASK instead.
+- A task file's own `SYSTEM$TASK_DEPENDENTS_ENABLE` (FG014) resumes every dependent when it re-runs, including a
+  member an operator had suspended.
+- `TASK_DEPENDENTS` with a quoted task name and the finalizer's `FinalizedRootTask` value are verified on the first
+  MGM run; a failure there stops the deploy before anything is applied.
 - The account-wide limit of 10,000 started tasks covers all six runways together.
 - Task code first runs on its schedule in MGM.
 
@@ -732,9 +770,12 @@ happened to re-run. The behaviour also flips once the bundle is enabled. In a st
   `CREATE SCHEMA` without `WITH MANAGED ACCESS`.
 - code review: `ALFA05__copy_grants_on_replace`, a heuristic warning that acts as a second opinion.
 - bootstrap: every EDW schema is a managed-access schema owned by the deploy role. New schemas are created
-  `WITH MANAGED ACCESS` by their V migration; `20_runway_database.sql` switches adopted schemas with
-  `ALTER SCHEMA <S> ENABLE MANAGED ACCESS`. The deploy role, as schema owner, can then define the future grants
-  without MANAGE GRANTS, which the kit never grants (it would let a deploy re-grant any object in the account).
+  `WITH MANAGED ACCESS` by their V migration; `20_runway_database.sql` creates `FLYWAY` that way (PART 2) and, during
+  adoption (PART 3), runs `ALTER SCHEMA <S> ENABLE MANAGED ACCESS` on every adopted schema after its ownership
+  transfer, with working grants for the previous owners (`keep_previous_owner_access`, default TRUE). PART 6 fails a
+  schema that is not managed access. The deploy role, as schema owner, can then define the future grants without
+  MANAGE GRANTS, which the kit never grants (it would let a deploy re-grant any object in the account). The grantees
+  are the runway access roles from bootstrap (S19).
 - process: docs/CONVENTIONS.md:
   - write COPY GRANTS explicitly everywhere, which is stable under both behaviours;
   - use `CREATE OR ALTER` where Snowflake supports it (tasks, dynamic tables);
@@ -742,7 +783,10 @@ happened to re-run. The behaviour also flips once the bundle is enabled. In a st
   - put future grants at the schema level only.
 
 **Residual risk.** A replaced alert or file format loses its explicit grants. Schema-level future grants cover it. Check
-the account's bundle state with `SELECT SYSTEM$SHOW_ACTIVE_BEHAVIOR_CHANGE_BUNDLES();`.
+the account's bundle state with `SELECT SYSTEM$SHOW_ACTIVE_BEHAVIOR_CHANGE_BUNDLES();`. In a managed-access schema a
+role that owned objects before adoption can no longer re-grant them, and the previous-owner working grants leave out
+stages, dynamic and external tables and task operation (granted by hand from the dry run). If SYSADMIN may not run
+ENABLE MANAGED ACCESS, SECURITYADMIN runs the FAILED line (verify on DEV).
 
 ### S23 Flyway runs destructive SQL without a second look
 
@@ -775,11 +819,17 @@ the account's bundle state with `SELECT SYSTEM$SHOW_ACTIVE_BEHAVIOR_CHANGE_BUNDL
   - MGM and PRD rehearse on a clone first;
   - prod tier gets a dry-run report;
   - a Time Travel point is recorded before Migrate.
-- bootstrap: `40_point_in_time_recovery.sql` covers clone AT, SWAP WITH and UNDROP.
+- bootstrap: `40_point_in_time_recovery.sql` covers clone AT, SWAP WITH and UNDROP. A top-to-bottom run changes
+  nothing: every destructive line is commented out, and the blocks that stop or restart schedules (Q0, Q9) and
+  re-grant (B4) need `confirm_template = '<A|B>:<deploy_id>'`, with a `deploy_id` of the runway (`<runway>-...` or
+  `manual`). Q0 records the schema's writers (tasks, alerts, dynamic tables, pipes) as `RESTORE-<deploy_id>` and
+  stops them before the clone; Q9 restarts exactly those after the swap.
 
 **Residual risk.** The guard does not block data-changing DML (a MERGE, or an UPDATE whose WHERE matches too much);
 code review catches only an UPDATE with no WHERE at all, and reviewers must judge the rest. A waived drop still
-drops.
+drops. A Time Travel swap discards every write made after the recovery point, legitimate ETL rows included (they stay
+in the evidence copy for the data owner); Q0 only reports writers in other schemas, and Q9 resumes a recorded root
+with `SYSTEM$TASK_DEPENDENTS_ENABLE`, which also resumes a member an operator had suspended.
 
 ---
 
@@ -809,12 +859,21 @@ runway.
   `tasks_enabled = "false"` and clean disabled.
 - bootstrap:
   - `10_account_objects.sql` grants CREATE DATABASE to the MGM and PRD deployers for rehearsal clones;
-  - `30_refresh_runway.sql` refreshes test runways.
+  - `30_refresh_runway.sql` refreshes test runways. PART 1's pre-checks rate a database-level EVENT_TABLE on PRD a
+    BLOCKER until behavior change bundle 2026_07 is enabled (before it, only ACCOUNTADMIN may clone such a
+    database). PART 2 pauses the outgoing runway's schedules (roots recorded as `REFRESH-<ID>-<timestamp>`) and
+    parks it; the commented PART 2R undoes that. PART 3 clones as `EDW_PRD_DEPLOYER` with secondary roles off and
+    refuses unless the runway is parked (absent, or owned by `EDW_PRD_DEPLOYER`). PARTs 5-7 run on the runway's own
+    deploy warehouse; PART 6 moves PRD functional-role grants object by object (a function or procedure by its
+    exact signature); 7a flags objects still naming PRD's warehouse; 7c sweeps every object kind for a wrong owner
+    and compares the Flyway history with PRD's at the clone time.
 - process: RUNBOOKS R8 (refresh) and R12 (clone left behind).
 
 **Residual risk.** Hybrid tables, external tables and internal-stage pipes are not rehearsed. A clone reflects the
 target at the moment it was taken. Every repeatable that uses `${tasks_enabled}` or `${edw_db}` re-runs on the clone
-whether or not it changed (S09, item 4), so the rehearsal does more than the target will.
+whether or not it changed (S09, item 4), so the rehearsal does more than the target will. A refreshed runway's
+objects created by V migrations keep PRD's warehouse until someone sets the runway's (7a lists them), and PART 6's
+signature parsing of function and procedure grants is verified on the first refresh.
 
 ### S25 Flyway has no notion of promotion, lanes or approval
 
@@ -1084,14 +1143,19 @@ markers were never filled in would pass lint and fail on its first DEV deploy.
   (`[core]internal/command/DbMigrate.java:102-124`).
 - Callbacks run in autocommit on Snowflake, like migrations (S02): each statement of a callback commits on its own.
 - Callbacks for one event run in description order (`[core]internal/callback/SqlScriptCallbackFactory.java:107,
-  :159-171`), which is why the kit numbers them 10, 20, 60, 80 and 99.
+  :159-171`), which is why the kit numbers them 10, 20, 50, 60 and 99.
 
 **Impact for ALFA EDW.**
 - A change to a callback takes effect on every runway at its next deploy, without promotion.
 - A failing callback fails the whole deploy after the migrations have already committed.
-- `afterMigrateError` does not fire for an `afterMigrate` failure, so `afterMigrate__60_task_restore` and
-  `afterMigrate__80_cross_env_guard` write their own FAILED row to `FLYWAY.DEPLOY_LOG` before raising (it stays
+- `afterMigrateError` does not fire for an `afterMigrate` failure, so `afterMigrate__50_cross_env_guard` and
+  `afterMigrate__60_task_restore` write their own FAILED row to `FLYWAY.DEPLOY_LOG` before raising (it stays
   committed: autocommit). The SUCCEEDED row of `afterMigrate__99_deploy_log` is then never written (RUNBOOKS R6, R10).
+  The guard is numbered before the restore on purpose: when it raises, the restore does not run, so nothing is
+  resumed against a definition that names another runway (R9 resumes after the fix).
+- A `beforeMigrate` callback that fails stops the deploy before any migration runs (no afterMigrateError either):
+  the session-database check (`beforeMigrate__10`) and the `tasks_enabled` and kit-table checks
+  (`beforeMigrate__20`) fail safe that way.
 
 **Mitigation.**
 - guard: FG005, FG015 and FG017 check callbacks. FG001 checks their event names.
@@ -1145,7 +1209,7 @@ or the CI main job's DEV trigger (S25).
 | S18 | Java 16+ Arrow | JDBC_QUERY_RESULT_FORMAT=JSON | FG018 | none known |
 | S19 | Account objects | no account DDL; bootstrap/10, 20; access roles | FG007, ALFA06 | roles must exist |
 | S20 | Cross-DB refs, clones | no literal or `${home_db}`; bare pipe target | FG009, FG016, callback | run-time names |
-| S21 | Task state | tasks_enabled gate; snapshot/restore | FG014, callbacks | restore after failure |
+| S21 | Task state | tasks_enabled gate; member-level snapshot/restore | FG014, callbacks | restore after failure |
 | S22 | Grants lost on replace | COPY GRANTS; managed-access schemas | FG011, ALFA05, bootstrap | alerts, file formats |
 | S23 | Destructive SQL | waivers only; rehearsal; Time Travel | FG006, ALFA04, RG09 | DML |
 | S24 | No clone provisioner | `rehearsal-sql`; refresh worksheet | pipeline, FG018 | hybrid/external |

@@ -19,7 +19,7 @@ docs/SHORTCOMINGS.md explains why each situation can happen. docs/GUIDE.md cover
 | R7  | Licence lapse, exit code 35, proxy                 | `flyway version -outputType=json`                  |
 | R8  | Refresh a test runway between projects             | `bootstrap/30_refresh_runway.sql`                  |
 | R9  | Task graph left suspended                          | `FLYWAY.DEPLOY_TASK_STATE` for the failed deploy   |
-| R10 | Cross-environment guard tripped                    | list definitions naming `ALFA_EDW_*`               |
+| R10 | Cross-environment guard tripped                    | list definitions qualifying with `ALFA_EDW_*`      |
 | R11 | Key rotation                                       | second public-key slot                             |
 | R12 | Rehearsal clone left behind                        | `fw.py rehearsal-sql --action drop`                |
 
@@ -298,19 +298,34 @@ Do not hand-edit the object in Snowsight: that is drift (R5), and the next chang
    WHERE l.DEPLOY_ID = 'PRD-1234'
    ORDER BY l.EVENT_TS;
    ```
-2. Follow `bootstrap/40_point_in_time_recovery.sql` as `EDW_PRD_DEPLOYER`. Restore side by side, compare, then swap:
+2. Follow `bootstrap/40_point_in_time_recovery.sql` as `EDW_PRD_DEPLOYER`, one statement at a time. Opening or
+   running it top to bottom changes nothing: every destructive statement is commented out (remove the leading `-- `
+   of ONE statement, run it, check, move on), and the blocks that stop or restart schedules (Q0, Q9) and re-grant
+   (B4) refuse to run unless `confirm_template` names the template and the deploy.
+   - PART 0: `SET runway = 'PRD';`, `SET deploy_id = 'PRD-1234';` (the deploy to undo: it must start with
+     `<runway>-`, or be `manual`), and `object_schema` / `object_name`. PART 1 sets the session and shows the
+     retention; PART 2 sets the point (one second before the deploy's STARTED row) and checks the table's retention;
+     PART 3 compares row counts.
+   - One table: `SET confirm_template = 'A:PRD-1234';`, then Q0 -> A1 (clone at the point, side by side, COPY
+     GRANTS) -> A2 (compare) -> A3 (`SWAP WITH`) -> Q9.
+   - A whole schema (never `FLYWAY`): `SET confirm_template = 'B:PRD-1234';`, then Q0 -> B1 (clone) -> B2 (compare)
+     -> B2b (what a schema clone lacks: named internal stages with their files, pipes on them, external and hybrid
+     tables; a STOP line means use template A table by table) -> B3 (`SWAP WITH`) -> B4 (the schema's own grants)
+     -> Q9.
+   - Q0 records the schema's writers (started root tasks and alerts, running dynamic tables, loading pipes) in
+     `FLYWAY.DEPLOY_TASK_STATE` as `RESTORE-PRD-1234` and stops them (it pauses every pipe of the schema), so nothing
+     writes while you compare and swap.
+     Its CHECK lines name tasks and pipes in OTHER schemas whose definition names the object: suspend those by hand
+     if they write it. Q9 restarts exactly what Q0 recorded: roots with `SYSTEM$TASK_DEPENDENTS_ENABLE` (a member an
+     operator had suspended resumes too: suspend it again), alerts and dynamic tables (a full refresh follows), pipes.
 
-   ```sql
-   CREATE TABLE ALFA_EDW_PRD.SALES.ORDERS_RESTORE
-       CLONE ALFA_EDW_PRD.SALES.ORDERS AT (TIMESTAMP => '2026-10-20 09:59:00 +00:00'::TIMESTAMP_TZ)
-       COPY GRANTS;
-   -- compare row counts / key aggregates between the two tables, then:
-   ALTER TABLE ALFA_EDW_PRD.SALES.ORDERS SWAP WITH ALFA_EDW_PRD.SALES.ORDERS_RESTORE;
-   ```
+   **The swap discards every write made after the recovery point**, legitimate ETL rows included. They stay only in
+   the evidence copy (`<table>_RESTORE_<date>`, or the `_RESTORE_` schema); A2's second MINUS lists them. The data
+   owner decides which of them are re-inserted from that copy, or whether the ETL re-runs for that window.
 
-   A dropped object comes back with `UNDROP TABLE ALFA_EDW_PRD.SALES.ORDERS;`, which works only within the retention
-   period and only if no table of that name exists. Streams on a swapped table must be recreated: edit the stream's
-   repeatable (CONVENTIONS 5.9).
+   A dropped or replaced table comes back with template C (`UNDROP TABLE`), which works only within the retention
+   period and only after a current table of that name is moved aside (C2 does both). Streams on a swapped table must
+   be recreated: edit the stream's repeatable (CONVENTIONS 5.9).
 3. Time Travel does not touch Flyway history. The V still shows Success. Converge with a new idempotent V migration.
    `flyway repair` matters only if the incident also left a Failed row (R1).
 4. The next deploy's drift check reports the swapped table. Acknowledge it with `ACK_DRIFT=true`, citing the ticket
@@ -322,7 +337,8 @@ records the tool, the time, who did it, and the follow-up migration.
 **Do not.**
 - Do not undo after a partial failure; that is R1.
 - Do not undo a migration whose tables have taken new data you need.
-- Do not drop the `*_RESTORE` table until the release manager confirms. Then drop it as a separate, recorded step.
+- Do not drop the `*_RESTORE_<date>` copy until the release manager and the data owner confirm. Then drop it as a
+  separate, recorded step (bootstrap/40 PART 9).
 
 ---
 
@@ -582,7 +598,9 @@ expiry date in GUIDE Part H's quarterly check.
 ## R8 Refresh a test runway between projects
 
 **Who.**
-- A Snowflake admin runs `bootstrap/30_refresh_runway.sql`.
+- A Snowflake admin runs `bootstrap/30_refresh_runway.sql`, holding SYSADMIN, SECURITYADMIN and (PART 1a only)
+  ACCOUNTADMIN. PARTs 3-4 run as `EDW_PRD_DEPLOYER`, which SYSADMIN holders inherit: that is break-glass (GUIDE B7),
+  so record the refresh in the change ticket.
 - The runway lead for SAN, SEA or PHX coordinates.
 - Data governance signs off, because PRD data is copied into a test runway.
 
@@ -594,18 +612,48 @@ expiry date in GUIDE Part H's quarterly check.
 **Steps.**
 
 1. Announce the refresh. The outgoing project must merge, or at least push, its work. Anything that exists only in
-   the runway is lost.
+   the runway is gone after PART 3 (the parked copy keeps it until it is dropped).
 2. Reserve the runway's lock, for example `ALFA_EDW_SAN`, in Jenkins (R0, step 1) for the whole refresh. For PART 3
    only (the clone), also reserve `ALFA_EDW_PRD`, so no PRD deploy is half-applied in the clone; unreserve it as soon
    as PART 3 has finished.
-3. In Snowsight, run `bootstrap/30_refresh_runway.sql` section by section, with its SET variables pointing at SAN.
-   The script:
-   - refuses PRD as a target;
-   - runs the pre-checks: dangling policy references, hybrid tables, external tables, internal-stage pipes, and
-     `ALFA_EDW_PRD` references in PRD definitions;
-   - clones `ALFA_EDW_PRD` as `EDW_PRD_DEPLOYER`;
-   - hands every schema to `EDW_SAN_DEPLOYER`, re-applies database grants, and re-grants to runway roles;
-   - lists the suspended tasks, alerts, dynamic tables and pipes.
+3. In Snowsight, run `bootstrap/30_refresh_runway.sql` part by part with PART 0's `target_runway = 'SAN'` (MGM only
+   together with `allow_mgm = TRUE`). Every part that changes something re-checks PART 0's names first.
+   - **PART 0** refuses PRD (the source) and DEV (the shared integration database: reconcile it in place).
+   - **PART 1** (read-only pre-checks): dangling policy references (1a, ACCOUNTADMIN), hybrid and external tables,
+     internal-stage pipes, pipes with a qualified COPY target, `ALFA_EDW_PRD` 3-part names in PRD code, objects the
+     cloning role does not own, a PRD deploy in flight. `EVENT_TABLE_SET` is a **BLOCKER** until behavior change
+     bundle 2026_07 is enabled: before it, cloning a database whose `EVENT_TABLE` parameter is set at database level
+     fails for every role but ACCOUNTADMIN. Clear every BLOCKER, fix or accept (in the ticket) every HIGH line, then
+     `SET prechecks_reviewed = TRUE;`.
+   - **PART 2** (SYSADMIN) suspends the runway's started root tasks (finalizers follow their root) and started
+     alerts, suspends its running dynamic tables, pauses every pipe, records the suspended roots in the runway's own
+     `FLYWAY.DEPLOY_TASK_STATE` as `REFRESH-SAN-<timestamp>` (so the list travels with the parked copy), and renames
+     the runway to `ALFA_EDW_SAN_PRE_REFRESH`. Keep its report: the `-- ok` lines are exactly what it paused.
+   - **PART 2R** (commented out on purpose) undoes PART 2 when PART 3 cannot complete, for example on the
+     EVENT_TABLE blocker: rename the parked database back, then, as `EDW_SAN_DEPLOYER`, resume exactly the `-- ok`
+     lines of PART 2's report (unpause only the pipes that were loading before; lost report: the latest
+     `REFRESH-SAN-<timestamp>` rows hold the roots). Never after a successful PART 3.
+   - **PART 3** (`EDW_PRD_DEPLOYER`, `USE SECONDARY ROLES NONE`, so your SYSADMIN cannot authorise anything) clones
+     `ALFA_EDW_PRD` with CREATE OR REPLACE. It refuses unless the runway is parked: `ALFA_EDW_SAN` must be absent or
+     owned by `EDW_PRD_DEPLOYER` (a half-handled clone of an earlier attempt), so it can never replace the live
+     runway. It writes the clone time into the database comment. Unreserve `ALFA_EDW_PRD` now.
+   - **PART 4** (`EDW_PRD_DEPLOYER`, secondary roles still NONE) hands every schema and object to `EDW_SAN_DEPLOYER`
+     schema-wide with COPY CURRENT GRANTS (pipes paused and moved one by one), then the database to SYSADMIN.
+   - **PARTs 5-7** switch secondary roles back on and run on the runway's own deploy warehouse (`$target_wh`, here
+     `WH_EDW_DEPLOY_SAN`), never PRD's. PART 5 re-applies the database-level grants (the kit's, then the parked
+     runway's; none to `EDW_PRD_*` roles). PART 6 (SECURITYADMIN) moves each grant a PRD functional role
+     (`EDW_PRD_<x>`) holds on the clone's objects to `EDW_SAN_<x>` where that role exists, else only revokes it; a
+     grant on a function or procedure moves for that exact signature only, never `ON ALL ... IN SCHEMA`, and a name
+     it cannot parse is reported FAILED with nothing granted. PART 6 uses the warehouse through your secondary roles:
+     if it says "No active warehouse", `USE WAREHOUSE` one that SECURITYADMIN may use.
+   - **PART 7**: 7a lists every task, alert, dynamic table and pipe with its state, owner and WAREHOUSE; WH_NOTE
+     flags each one that still names PRD's `WH_EDW_ETL_PRD` (`SET WAREHOUSE = WH_EDW_ETL_SAN` before any resume) and
+     each pipe with a qualified COPY target (never resume it: it would load PRD). 7b writes the REFRESHED row to
+     `FLYWAY.DEPLOY_LOG`. 7c verifies: database owner and grants, no `EDW_PRD_*` grant on the database, every schema
+     owned by `EDW_SAN_DEPLOYER`, no task started, an owner sweep over every other object kind (functions and
+     procedures included), object counts against PRD, and the runway's Flyway history against PRD's **at the clone
+     time** (read from the database comment; PRD may have deployed since).
+   - **PART 8** lists the next steps; nothing in it runs by itself.
 4. Check what Flyway now sees, from an R0 session for SAN. The clone brings PRD's history, so SAN is at PRD's state:
 
    ```bash
@@ -617,8 +665,11 @@ expiry date in GUIDE Part H's quarterly check.
    - tasks stay suspended (`tasks_enabled = "false"`) until they flip it for their runway;
    - streams start at the clone point;
    - the data is production data, under the governance rules.
+7. Once the runway works and the previous lease holder confirms nothing in it is needed, drop the parked copy as
+   SYSADMIN (PART 8, last item). It stays recoverable with `UNDROP DATABASE` for its retention period.
 
 **Verify.**
+- PART 7c shows no FAIL line.
 - `flyway -environment=SAN info` shows no Failed rows, and the deploy is green.
 - `SHOW TASKS IN DATABASE ALFA_EDW_SAN;` shows the tasks suspended.
 - The first deploy after the refresh lists the cloned objects as drift: their LAST_DDL is the clone time and
@@ -627,6 +678,8 @@ expiry date in GUIDE Part H's quarterly check.
 
 **Do not.**
 - Do not refresh MGM unless the bootstrap script's explicit MGM switch has been approved.
+- Do not run PART 2R after a successful PART 3, and do not resume anything 7a flags before its warehouse is the
+  runway's own.
 - Do not resume pipes in a refreshed runway that share a stage with PRD.
 - Do not run `ALTER PIPE ... REFRESH` there.
 
@@ -637,21 +690,38 @@ expiry date in GUIDE Part H's quarterly check.
 **Who.** The DBA on call.
 
 **When.**
-- A deploy to MGM or PRD failed or was aborted after it suspended a root task. `afterMigrate__60_task_restore` runs
-  only after a **successful** migrate, so it never restored the root.
+- A deploy to MGM or PRD failed or was aborted after it suspended a task, root or member.
+  `afterMigrate__60_task_restore` runs only after a **successful** migrate and after the cross-environment guard
+  (`afterMigrate__50`) passed, so it did not run. The FAILED row of `afterMigrateError__99` (a failed migration) or
+  of the guard (R10) lists the tasks that were started before the run and are suspended now; `(root)` marks roots.
+- `afterMigrate__60_task_restore` itself wrote a FAILED row: a graph could not be brought back. The row names each
+  root with its state, the members still to resume and the errors.
+- bootstrap/20 PART 3 (adoption) reported a FAILED resume, or "RESUME PHASE FAILED" (DEPLOY_ID `ADOPT-<timestamp>`).
 - Monitoring shows scheduled loads not running.
 
 **Steps.**
 
-1. Find the deploy (R6, step 4, or the latest FAILED row in `FLYWAY.DEPLOY_LOG`). Then list the roots that were
-   running before it. `beforeMigrate__20_task_snapshot` recorded them:
+1. Find the deploy (R6, step 4, or the latest FAILED row in `FLYWAY.DEPLOY_LOG`). Then list what
+   `beforeMigrate__20_task_snapshot` recorded for it:
 
    ```sql
-   SELECT s.TASK_FQN, s.STATE_BEFORE, s.CAPTURED_TS
+   SELECT s.TASK_FQN, s.STATE_BEFORE, s.ROOT_FQN, s.CAPTURED_TS
    FROM ALFA_EDW_PRD.FLYWAY.DEPLOY_TASK_STATE s
    WHERE s.DEPLOY_ID = 'PRD-1234'
-   ORDER BY s.TASK_FQN;
+   ORDER BY s.ROOT_FQN, s.TASK_FQN;
    ```
+
+   The rows hold every member of each graph whose root was started when the deploy began: the root
+   (`TASK_FQN = ROOT_FQN`), its dependents and its finalizer, each with its own state at that moment. A member
+   recorded `suspended` had been stopped by an operator: leave it suspended. Manual runs all share DEPLOY_ID
+   `manual`: take only the rows captured at or after that run's STARTED row. Other DEPLOY_IDs in this table:
+   - `ADOPT-<timestamp>`: bootstrap/20 PART 3, every task that was started before the ownership transfer. Its
+     `ROOT_FQN` is set on every task without predecessors, finalizers included, and empty on the others: the step 4
+     statements work for it, but resume a finalizer before its root (step 2's query tells the two apart).
+   - `REFRESH-<ID>-<timestamp>`: bootstrap/30 PART 2, the roots it suspended before parking the runway; undo with
+     PART 2R (R8), not here.
+   - `RESTORE-<deploy_id>`: bootstrap/40 Q0, the schema writers it stopped (alerts, dynamic tables and pipes too,
+     `STATE_BEFORE = '<kind>:<state>'`); Q9 restarts them (R3), not here.
 2. Compare with the root tasks that are suspended now:
 
    ```sql
@@ -659,27 +729,49 @@ expiry date in GUIDE Part H's quarterly check.
    SELECT t."database_name", t."schema_name", t."name", t."state"
    FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) t
    WHERE t."predecessors" = '[]' AND t."state" = 'suspended'
+     AND PARSE_JSON(t."task_relations"):"FinalizedRootTask" IS NULL    -- finalizers are not roots
    ORDER BY 1, 2, 3;
    ```
+
+   A started root with a suspended member is just as broken: every run skips that member and everything after it.
+   Check the members in the same `SHOW TASKS` output.
 3. Before resuming, make sure the failed migration did not leave that graph half-changed (R1). Keep a half-changed
    graph suspended until the fix-forward is deployed.
-4. As `EDW_PRD_DEPLOYER`, the owner of the graph, resume each root and all its dependents. Generate the statements:
+4. As `EDW_PRD_DEPLOYER`, the owner of the graph, resume member by member: a member can be resumed only while its
+   root is suspended, so the roots are suspended first and resumed last. Generate the statements from the snapshot
+   (only what was recorded `started`):
 
    ```sql
-   SELECT 'SELECT SYSTEM$TASK_DEPENDENTS_ENABLE(''' || s.TASK_FQN || ''');' AS RESTORE_STMT
-   FROM ALFA_EDW_PRD.FLYWAY.DEPLOY_TASK_STATE s
-   WHERE s.DEPLOY_ID = 'PRD-1234';
+   SELECT x.STMT
+   FROM (
+       SELECT 1 AS STEP, s.TASK_FQN, 'ALTER TASK ' || s.TASK_FQN || ' SUSPEND;' AS STMT
+       FROM ALFA_EDW_PRD.FLYWAY.DEPLOY_TASK_STATE s
+       WHERE s.DEPLOY_ID = 'PRD-1234' AND s.TASK_FQN = s.ROOT_FQN AND s.STATE_BEFORE = 'started'
+       UNION ALL
+       SELECT 2, s.TASK_FQN, 'ALTER TASK ' || s.TASK_FQN || ' RESUME;'
+       FROM ALFA_EDW_PRD.FLYWAY.DEPLOY_TASK_STATE s
+       WHERE s.DEPLOY_ID = 'PRD-1234' AND s.TASK_FQN IS DISTINCT FROM s.ROOT_FQN AND s.STATE_BEFORE = 'started'
+       UNION ALL
+       SELECT 3, s.TASK_FQN, 'ALTER TASK ' || s.TASK_FQN || ' RESUME;'
+       FROM ALFA_EDW_PRD.FLYWAY.DEPLOY_TASK_STATE s
+       WHERE s.DEPLOY_ID = 'PRD-1234' AND s.TASK_FQN = s.ROOT_FQN AND s.STATE_BEFORE = 'started'
+   ) x
+   ORDER BY x.STEP, x.TASK_FQN;
    ```
 
-   Run each generated line. `TASK_FQN` is stored fully quoted, so a line looks like:
+   Run the generated lines in that order: roots suspended (harmless for a root that is already suspended), members
+   resumed, roots resumed last. `TASK_FQN` is stored fully quoted, so a line looks like:
 
    ```sql
-   SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('"ALFA_EDW_PRD"."SALES"."TASK_REFRESH_ORDER_SUMMARY"');
+   ALTER TASK "ALFA_EDW_PRD"."SALES"."TASK_PUBLISH_ORDER_SUMMARY" RESUME;
    ```
+
+   A task the failed deploy added to a running graph is not in the snapshot; the restore would have resumed it, so
+   resume it as well (before its root) if the fix-forward keeps it.
 5. On DEV, SAN, SEA, PHX and the rehearsal clones, suspended is the intended state (`tasks_enabled = "false"`). Do
    nothing there unless the project switched tasks on for its runway.
 
-**Verify.** The roots show `started` in `SHOW TASKS`, and the next runs are scheduled:
+**Verify.** Every task recorded `started` shows `started` in `SHOW TASKS` again, and the next runs are scheduled:
 
 ```sql
 SELECT th.NAME, th.STATE, th.SCHEDULED_TIME
@@ -693,6 +785,8 @@ A task that only calls a procedure records a NULL return value, so judge success
 not by RETURN_VALUE.
 
 **Do not.**
+- Do not use `SYSTEM$TASK_DEPENDENTS_ENABLE` here: it resumes every dependent, including a member an operator had
+  suspended on purpose.
 - Do not resume a graph on a test runway that may pull from shared sources.
 - Do not transfer ownership of a single task to "fix" it; that cuts it out of its graph.
 
@@ -702,53 +796,84 @@ not by RETURN_VALUE.
 
 **Who.** The DBA, and the author of the offending object.
 
-**When.** Migrate fails in `afterMigrate__80_cross_env_guard`, with an error that lists up to 20 objects whose
-definitions name another `ALFA_EDW_*` database.
+**When.** Migrate fails in `afterMigrate__50_cross_env_guard` (error -20180), with an error that lists up to 20
+objects whose stored definitions use another `ALFA_EDW_*` database as a qualifier.
 - Every migration of the run has already committed and shows Success.
-- Callbacks of one event run in name order, so `afterMigrate__60_task_restore` had already run, and the SUCCEEDED row
-  (`afterMigrate__99_deploy_log`) was never written.
+- The guard is the first `afterMigrate` callback and runs **before** `afterMigrate__60_task_restore`, on purpose:
+  after its raise the task restore did not run, so a graph this run suspended (or re-created) stays suspended, as
+  after a failed migration, instead of being resumed with a definition that reads or writes another runway. Its
+  FAILED row lists the tasks that were started before the run and are suspended now (`(root)` marks roots): resume
+  them with R9 after the fix (step 5). The SUCCEEDED row (`afterMigrate__99_deploy_log`) was never written either.
 - `afterMigrateError` fires only when a migration fails, not when an `afterMigrate` callback fails, so the guard writes
   its own FAILED row (DETAIL starts "Cross-environment reference in") before it raises. The task restore does the
-  same when a root does not end in the intended state; the events TASKS_RESUMED / TASKS_SUSPENDED record what it did.
+  same when a graph does not end in the intended state; the events TASKS_RESUMED / TASKS_SUSPENDED record what it did.
 
 **Steps.**
 
-1. Get the full list. The callback stops at 20 objects:
+1. Get the full list. The callback stops at 20 objects. It counts a database **qualifier**: `ALFA_EDW_<X>`, quoted
+   or not, followed by a dot (a column such as `ALFA_EDW_LOAD_TS` is not one). It removes comments first; string
+   literals still count, because dynamic SQL builds names from them. It reads view, function and procedure bodies,
+   task bodies and WHEN conditions, dynamic-table queries, and alert conditions and actions. The query below applies
+   the same rules (run the statements in order: each `SET` saves the `SHOW` just before it):
 
    ```sql
-   SELECT 'VIEW' AS KIND, v.TABLE_SCHEMA AS SCHEMA_NAME, v.TABLE_NAME AS OBJECT_NAME,
-          REGEXP_SUBSTR(UPPER(v.VIEW_DEFINITION), 'ALFA_EDW_[A-Z0-9_]+') AS DB_NAMED
-   FROM ALFA_EDW_SAN.INFORMATION_SCHEMA.VIEWS v
-   WHERE REGEXP_INSTR(UPPER(v.VIEW_DEFINITION), 'ALFA_EDW_[A-Z0-9_]+') > 0
-   UNION ALL
-   SELECT 'FUNCTION', f.FUNCTION_SCHEMA, f.FUNCTION_NAME,
-          REGEXP_SUBSTR(UPPER(f.FUNCTION_DEFINITION), 'ALFA_EDW_[A-Z0-9_]+')
-   FROM ALFA_EDW_SAN.INFORMATION_SCHEMA.FUNCTIONS f
-   WHERE REGEXP_INSTR(UPPER(f.FUNCTION_DEFINITION), 'ALFA_EDW_[A-Z0-9_]+') > 0
-   UNION ALL
-   SELECT 'PROCEDURE', p.PROCEDURE_SCHEMA, p.PROCEDURE_NAME,
-          REGEXP_SUBSTR(UPPER(p.PROCEDURE_DEFINITION), 'ALFA_EDW_[A-Z0-9_]+')
-   FROM ALFA_EDW_SAN.INFORMATION_SCHEMA.PROCEDURES p
-   WHERE REGEXP_INSTR(UPPER(p.PROCEDURE_DEFINITION), 'ALFA_EDW_[A-Z0-9_]+') > 0
+   SHOW TASKS IN DATABASE ALFA_EDW_SAN;           SET q_tasks = LAST_QUERY_ID();
+   SHOW DYNAMIC TABLES IN DATABASE ALFA_EDW_SAN;  SET q_dts = LAST_QUERY_ID();
+   SHOW ALERTS IN DATABASE ALFA_EDW_SAN;          SET q_alerts = LAST_QUERY_ID();
+
+   WITH defs AS (
+       SELECT 'VIEW' AS KIND, v.TABLE_SCHEMA AS SCHEMA_NAME, v.TABLE_NAME AS OBJECT_NAME, v.VIEW_DEFINITION AS DEF
+       FROM ALFA_EDW_SAN.INFORMATION_SCHEMA.VIEWS v
+       WHERE v.TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
+       UNION ALL
+       SELECT 'FUNCTION', f.FUNCTION_SCHEMA, f.FUNCTION_NAME || f.ARGUMENT_SIGNATURE, f.FUNCTION_DEFINITION
+       FROM ALFA_EDW_SAN.INFORMATION_SCHEMA.FUNCTIONS f
+       UNION ALL
+       SELECT 'PROCEDURE', p.PROCEDURE_SCHEMA, p.PROCEDURE_NAME || p.ARGUMENT_SIGNATURE, p.PROCEDURE_DEFINITION
+       FROM ALFA_EDW_SAN.INFORMATION_SCHEMA.PROCEDURES p
+       UNION ALL
+       SELECT 'TASK', t."schema_name", t."name", COALESCE(t."definition", '') || CHR(10) || COALESCE(t."condition", '')
+       FROM TABLE(RESULT_SCAN($q_tasks)) t
+       UNION ALL
+       SELECT 'DYNAMIC TABLE', d."schema_name", d."name", d."text"
+       FROM TABLE(RESULT_SCAN($q_dts)) d
+       UNION ALL
+       SELECT 'ALERT', a."schema_name", a."name", COALESCE(a."condition", '') || CHR(10) || COALESCE(a."action", '')
+       FROM TABLE(RESULT_SCAN($q_alerts)) a
+   )
+   SELECT x.KIND, x.SCHEMA_NAME, x.OBJECT_NAME, x.QUALIFIERS
+   FROM (SELECT d.KIND, d.SCHEMA_NAME, d.OBJECT_NAME,
+                ARRAY_DISTINCT(REGEXP_SUBSTR_ALL(
+                    REGEXP_REPLACE(REGEXP_REPLACE(UPPER(COALESCE(d.DEF, '')), '/[*]([^*]|[*]+[^*/])*[*]+/', ' '),
+                                   '--[^\n]*', ' '),                                  -- comments out
+                    '"?ALFA_EDW_[A-Z0-9_]+"?[[:space:]]*[.]')) AS QUALIFIERS
+         FROM defs d) x
+   WHERE ARRAY_SIZE(x.QUALIFIERS) > 0
    ORDER BY 1, 2, 3;
    ```
 
-   The query shows only the first database each definition names. Read the definition for the rest. Check tasks
-   with `SHOW TASKS IN DATABASE ALFA_EDW_SAN;` and their `definition` column.
+   A row whose only qualifier is the runway's own database (`ALFA_EDW_SAN.`) is not what the guard tripped on: the
+   guard allows it, and FG009 reports it as a clone hazard in the repository. Every other qualifier is a
+   cross-environment reference.
 2. Find each object's source with `git grep -n -i "V_OPEN_ORDERS" -- migrations repeatable`.
    - **Not in git**: someone created or changed it outside Flyway. Treat it as drift (R5): the guard rightly blocks
      every deploy until it is resolved.
    - **In git**: FG009 should have rejected a literal. So the name came in some other way, for example dynamic SQL,
      a placeholder whose value names another runway, or `${flyway:database}`.
 3. **Contain.** On a test runway, fix forward normally. On MGM or PRD (rehearsal should have caught it), treat a
-   production object that reads or writes another runway as an incident, and fix it through R4.
+   production object that reads or writes another runway as an incident, and fix it through R4. A flagged TASK
+   whose graph is still started (this run did not touch it, so nothing suspended it) keeps running on its schedule:
+   suspend its root by hand as the deploy role (`ALTER TASK <root> SUSPEND;`), record it in the ticket, and resume
+   it with the others in step 5. Check flagged alerts and dynamic tables the same way.
 4. **Fix.** Replace the 3-part name with `SCHEMA.OBJECT` when it is the same database, or with a declared placeholder
    for a non-EDW database (CONVENTIONS section 4). A repeatable re-runs on its own when edited. An object created by a
    V script needs a new V script that re-creates it.
-5. Deploy the fix. The callback scans again and passes.
+5. Deploy the fix. The callback scans again and passes. The fix deploy's snapshot sees the tasks the tripped run left
+   suspended as suspended, so its restore leaves them so: resume them now with R9, using the tripped deploy's
+   DEPLOY_ID (its FAILED row lists them), plus any root you suspended in step 3.
 
-**Verify.** The query above returns only names of the runway's own database. The deploy is green with a SUCCEEDED row
-in `FLYWAY.DEPLOY_LOG`.
+**Verify.** The query above returns only qualifiers of the runway's own database. The deploy is green with a
+SUCCEEDED row in `FLYWAY.DEPLOY_LOG`, and the tasks the FAILED row listed are started again.
 
 **Do not.**
 - Do not disable or edit the callback to get a deploy through. It protects every runway from cross-environment reads

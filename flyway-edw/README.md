@@ -45,7 +45,7 @@ sqlfluff.cfg          SQLFluff + Redgate RG rules for `flyway check -code`
 rules/                Enterprise regex rules ALFA01-ALFA06 (no ALFA_EDW_ names, no USE, no CREATE OR REPLACE TABLE, ...)
 migrations/<SCHEMA>/  versioned V<yyyy>.<mm>.<dd>.<hhmm>__<schema>_<desc>.sql (+ optional U undo, + .sql.conf)
 repeatable/<SCHEMA>/  repeatable R__<layer>_<SCHEMA>__<object>.sql (views, functions, procedures, tasks, grants, ...)
-callbacks/            deploy log, task-graph snapshot and restore, cross-environment reference guard
+callbacks/            deploy log, cross-environment reference guard, member-level task-graph snapshot and restore
 scripts/fw.py         the kit CLI (Python 3.11+, standard library only): guard, new, bundle, env, promotion, drift
 bootstrap/            Snowsight worksheets a Snowflake admin runs: accounts, runway databases, refresh, recovery
 jenkins/              multibranch CI (Jenkinsfile), deploy job (Jenkinsfile.deploy), Job DSL seed, JCasC snippet
@@ -148,8 +148,13 @@ Premium; verify yours); without that, the deploy jobs' own gates still hold.
       (GUIDE A2). `flyway.toml`: confirm the `etl_wh` and `role_prefix` placeholder values match real warehouse /
       role names.
 - [ ] `python3 scripts/fw.py guard` reports 0 errors.
-- [ ] Snowflake: run `bootstrap/10_account_objects.sql` (shared part, then per runway, including the access roles
-      the grants files use) and `bootstrap/20_runway_database.sql` per runway (GUIDE Part B).
+- [ ] Snowflake: run `bootstrap/10_account_objects.sql` (shared part, then per runway: deploy identity, EXECUTE TASK,
+      on MGM / PRD also EXECUTE ALERT and CREATE DATABASE, and the access roles listed in `access_roles` that the
+      grants files use) and `bootstrap/20_runway_database.sql` per runway (GUIDE Part B).
+- [ ] Upgrading an earlier copy of the kit instead: `callbacks/` holds exactly the new kit's files (a renamed callback
+      must not survive under its old name), and `bootstrap/20_runway_database.sql` PART 0 + 2 + 6 is re-run on every
+      runway before the first deploy of the new kit; without the new `FLYWAY.DEPLOY_TASK_STATE.ROOT_FQN` column every
+      deploy stops in `beforeMigrate__20` with error -20121 (GUIDE C1, B3).
 - [ ] Jenkins, in this order (GUIDE Part C, then B4): set up dedicated deploy agents that only `EDW/deploy/*` jobs
       may use (GUIDE A2, C2); apply `jenkins/casc-snippet.yaml` (C2, it sets `BITBUCKET_WORKSPACE` / `BITBUCKET_REPO`
       that the seed needs); run the `jenkins/jobs.groovy` seed (C3, it creates the folders); then create the folder

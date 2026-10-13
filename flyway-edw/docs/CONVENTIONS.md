@@ -161,8 +161,8 @@ SELECT o.ORDER_STATUS, COUNT(*) AS ORDER_COUNT FROM ${edw_db}.SALES.ORDERS o GRO
   the `afterMigrate__50_cross_env_guard` callback fails the deploy when a stored definition in the runway (a view,
   function or procedure body, a task body or WHEN condition, a dynamic table's query, an alert's condition or action)
   uses another runway's database as a qualifier. Only `ALFA_EDW_<X>.` counts, quoted or not, followed by a dot: a
-  column such as `ALFA_EDW_LOAD_TS` is no qualifier. Comments are ignored; string literals are still scanned, because
-  dynamic SQL builds names from them (`'ALFA_EDW_PRD.SALES.T'` in a procedure fails the deploy).
+  column such as `ALFA_EDW_LOAD_TS` is not a qualifier. Comments are ignored; string literals are still scanned,
+  because dynamic SQL builds names from them (`'ALFA_EDW_PRD.SALES.T'` in a procedure fails the deploy).
 - **A database with the same name everywhere** (for example `SNOWFLAKE`, or a share mounted under one name). Write it
   directly: `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`.
 - **A non-EDW database whose name differs per runway** (for example a reference database `REF_DEV` / `REF_PRD`). Add a
@@ -652,11 +652,12 @@ ALTER TASK SALES.TASK_REFRESH_ORDER_SUMMARY RESUME;         -- FG014: resumes on
   not started now and was started before or is new (not in the snapshot, e.g. a task this release added), with the
   root suspended first and resumed last. A member an operator had suspended stays suspended, and so does a graph
   whose root was suspended (it is not recorded). The callbacks resume members one by one with `ALTER TASK ... RESUME`
-  and never use `SYSTEM$TASK_DEPENDENTS_ENABLE`. The restore runs only after a **successful** migrate and after the
-  cross-environment guard passed. After a failure, follow RUNBOOKS R9.
+  and never use `SYSTEM$TASK_DEPENDENTS_ENABLE`. On DEV, the test runways and the rehearsal clones the restore
+  suspends every started root instead. It runs only after a **successful** migrate and after the cross-environment
+  guard passed. After a failure, follow RUNBOOKS R9.
 - **A migration that only suspends a running graph is undone by the restore.** Retire a graph with `DROP TASK` (and
-  remove its file, section 5.15). Note that this file's own `SYSTEM$TASK_DEPENDENTS_ENABLE` resumes every dependent
-  when the file re-runs, a member an operator suspended included.
+  remove its file, section 5.15). Also note that a task file's own `SYSTEM$TASK_DEPENDENTS_ENABLE` (FG014) resumes
+  every dependent whenever the file re-runs, including a member an operator had suspended.
 - **Started tasks share one account-wide cap** of 10,000 across all six runways, which is one more reason the test
   runways keep tasks off.
 
