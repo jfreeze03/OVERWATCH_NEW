@@ -645,3 +645,11 @@ def test_docs_name_every_runway():
     guide = (KIT / "docs" / "GUIDE.md").read_text()
     for rid in ("DEV", "SAN", "SEA", "PHX", "MGM", "PRD"):
         assert f"ALFA_EDW_{rid}" in guide
+
+
+def test_bootstrap_teardown_keeps_destructive_lines_commented():
+    td = KIT / "bootstrap" / "90_teardown.sql"
+    text = td.read_text()
+    live = [ln for ln in text.splitlines() if re.match(r"^\s*(DROP|REVOKE|ALTER\s+USER\s+\S+\s+UNSET)\b", ln, re.I)]
+    assert live == []
+    assert not re.search(r"^\s*DROP\s+DATABASE\s+(IF\s+EXISTS\s+)?ALFA_EDW_(DEV|SAN|SEA|PHX|MGM|PRD)\b", text, re.M | re.I)

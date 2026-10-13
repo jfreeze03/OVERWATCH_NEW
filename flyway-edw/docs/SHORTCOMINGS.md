@@ -378,15 +378,17 @@ is not fresh.
 
 **Shortcoming.** If there is no history table, `migrate` raises `NON_EMPTY_SCHEMA_WITHOUT_SCHEMA_HISTORY_TABLE` only
 when one of the configured `schemas` is non-empty (`[core]Flyway.java:205-233`). On Snowflake, "empty" counts only
-tables, views and sequences (`[sf]SnowflakeSchema.java:52-60`). flyway.toml configures `schemas = ["FLYWAY"]`, and
-bootstrap creates FLYWAY empty.
+tables, views and sequences (`[sf]SnowflakeSchema.java:52-60`). flyway.toml configures `schemas = ["FLYWAY"]`.
 
-**Impact for ALFA EDW.** Flyway would treat a populated `ALFA_EDW_PRD`, with 50+ schemas, as empty. The first `migrate`
+**Impact for ALFA EDW.** Were FLYWAY empty, Flyway would treat a populated `ALFA_EDW_PRD`, with 50+ schemas, as empty. The first `migrate`
 against a database that was never baselined would create the history table, then run every V and every repeatable
 against live objects.
 
 **Mitigation.**
 - flyway.toml (FG018): `baselineOnMigrate = false` and `createSchemas = false`.
+- bootstrap: `bootstrap/20_runway_database.sql` creates `FLYWAY.DEPLOY_LOG` and `FLYWAY.DEPLOY_TASK_STATE`, so FLYWAY
+  is never empty and an un-baselined `migrate` stops with `NON_EMPTY_SCHEMA_WITHOUT_SCHEMA_HISTORY_TABLE` (a
+  deliberate safety net, GUIDE B3).
 - process: GUIDE Part D runs `flyway -environment=<ID> baseline -baselineVersion=<kit baseline_version>` once on each
   existing database, then checks it with `flyway info` before the first deploy.
 - pipeline: the deploy job refuses to migrate unless `flyway info -outputType=json` reports a `schemaVersion`, which
