@@ -21,10 +21,11 @@ Snowflake, Jenkins and Bitbucket evidence is a documentation URL or the plugin s
 verified from source, the text says "verify on first run".
 
 **Enforced by.** Each mitigation names the control that enforces it. Four controls are automatic:
-- **guard**: `python3 scripts/fw.py guard`, rules FG001-FG020 in `scripts/fwkit/guard.py`. It runs in every PR build
+- **guard**: `python3 scripts/fw.py guard`, rules FG001-FG021 in `scripts/fwkit/guard.py`. It runs in every PR build
   and every deploy, and an error fails the build.
 - **code review**: `flyway check -code -check.code.failOnError=true`, with `rules/ALFA01`-`ALFA06` and
-  `sqlfluff.cfg`.
+  `sqlfluff.cfg`. A code-review rule that repeats a waivable guard check is a warning, so a ticketed guard waiver is
+  never blocked by it (docs/CONVENTIONS.md section 8).
 - **pipeline**: a stage in `jenkins/Jenkinsfile` (CI) or `jenkins/Jenkinsfile.deploy` (one deploy job per runway).
 - **callback**: `callbacks/*.sql`, which Flyway runs inside every `migrate`.
 

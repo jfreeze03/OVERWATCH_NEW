@@ -28,14 +28,28 @@
 //   'kit' (main's scripts/fw.py + runways.toml + flyway.toml at the revision this run started from) and 'bundle'
 //   (the verified bundle). So the policy cannot change mid-run, a 24-hour approval wait does not pin a node, and no
 //   file from an earlier run can leak into Flyway's locations. Inside a node, docker.image(..).inside() gives the
-//   python image (fw.py, Snowflake CLI) and the flyway image (Flyway, curl) the same workspace.
+//   python image (fw.py, Snowflake CLI) and the flyway image (Flyway, curl) the same workspace. Both images are
+//   PULLED before every use: a tag already cached on the agent is never trusted. runways.toml may pin them by digest
+//   (redgate/flyway@sha256:..., <registry>/python@sha256:...); isImageRef() accepts '@'.
+// * Agents: every node of this job carries EDW_DEPLOY_AGENT_LABEL (default 'edw-deploy'), never the CI label
+//   EDW_AGENT_LABEL. A label alone does not separate them - a PR's Jenkinsfile can ask for node('edw-deploy') - so
+//   the deploy nodes must be restricted ON THE NODE SIDE to jobs matching EDW/deploy/.* (Job Restrictions plugin), or
+//   come from a separate cloud / ephemeral template the CI folder cannot use (casc-snippet.yaml). This matters because
+//   credentials bound for a step that runs in a container reach it as `docker exec --env NAME=value`: while a step
+//   runs, the deploy key's passphrase, the licence token and the Bitbucket token are visible in the agent HOST's
+//   process list, and the key file sits in <ws>@tmp on the host. Anything else that runs on that host (a PR build
+//   with the Docker socket is root there) could read them; dedicated deploy agents are the control, not this file.
+// * Who may start a run (resolvePolicy/startCause): a person (Build with Parameters), or the automatic DEV deploy of
+//   the CI main job's own build. Pipeline `build` steps run as SYSTEM, so any other upstream job could otherwise
+//   bypass the Job/Build roles in casc-snippet.yaml; such runs are refused.
 // * The deploy runs from the BUNDLE (flyway.toml, migrations, callbacks); policy and checks run with MAIN's fw.py.
 //   Provenance comes from SOURCE_JOB (copyArtifacts from the absolute job path), not from what a manifest claims.
 // * Every sh step is single-quoted; values flow through environment variables only. Flyway reads FLYWAY_<SETTING>
-//   variables as its own configuration (FLYWAY_TARGET = migrate target version, FLYWAY_ENVIRONMENT,
-//   FLYWAY_BASELINE_VERSION; ConfigUtils.convertKey), so fw.py env reports EDW_* keys, this file keeps its own values
-//   in KIT_/RW_/FW_ variables, and fw() still runs Flyway with every FLYWAY_*/flyway_* variable removed except the
-//   connection and licence variables flyway.toml and licensing read (FLYWAY_SF_*, FLYWAY_RH_DB, FLYWAY_EMAIL/TOKEN).
+//   and ENVIRONMENTS_<ENV>_<SETTING> variables as its own configuration (FLYWAY_TARGET = migrate target version,
+//   FLYWAY_ENVIRONMENT, FLYWAY_BASELINE_VERSION; ConfigUtils.convertKey), so fw.py env reports EDW_* keys, this file
+//   keeps its own values in KIT_/RW_/FW_ variables, and fw() still runs Flyway with every FLYWAY_*/flyway_* and
+//   environments_* variable (any case) removed except the connection and licence variables flyway.toml and licensing
+//   read (FLYWAY_SF_*, FLYWAY_RH_DB, FLYWAY_EMAIL/TOKEN).
 // * Placeholders and ignoreMigrationPatterns go on the command line as -environments.<ENV>.flyway.* overrides: in
 //   Flyway 13.10 an environment's own [environments.<ENV>.flyway] table replaces the root value instead of merging
 //   (ClassicConfiguration.getPlaceholders / getIgnoreMigrationPatterns), so root-level -placeholders.x would be
@@ -43,11 +57,14 @@
 //
 // Required plugins: workflow-aggregator (Pipeline), pipeline-model-definition, pipeline-input-step, lockable-resources,
 // copyartifact, pipeline-utility-steps (readJSON/writeJSON/findFiles), docker-workflow, credentials-binding,
-// workflow-basic-steps (unstable), timestamper, git. Script security: currentBuild.getBuildCauses(String) is
-// whitelisted in current workflow-support; if your sandbox still asks, approve it once (In-process Script Approval).
+// workflow-basic-steps (unstable), timestamper, git. lock(timeoutForAllocateResource:) needs a lockable-resources
+// release that has it; an older one logs "Unknown parameter(s)" and waits for the lock without a cap. Script security:
+// currentBuild.getBuildCauses() and getBuildCauses(String) are whitelisted in current workflow-support; if your
+// sandbox still asks, approve them once (In-process Script Approval).
 // Credentials (docs/GUIDE.md B4): this folder holds sf-flyway-<ID>, sf-flyway-AUDIT, flyway-license,
 // bitbucket-status-token; sf-account sits in /EDW. Controller env vars (casc-snippet.yaml): BITBUCKET_WORKSPACE,
-// BITBUCKET_REPO, EDW_AGENT_LABEL, optional EDW_JAVA_PROXY_ARGS and PIP_INDEX_URL.
+// BITBUCKET_REPO, EDW_DEPLOY_AGENT_LABEL (EDW_AGENT_LABEL is read only to refuse a deploy label equal to the CI one),
+// optional EDW_JAVA_PROXY_ARGS, HTTPS_PROXY and PIP_INDEX_URL.
 // =====================================================================================================================
 
 pipeline {

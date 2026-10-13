@@ -116,7 +116,7 @@ environment); FG005 rejects any other.
 |-------------|-----------|-----------------|
 | `${env}` | `DEV` | Runway id; rehearsals use the target's id (`MGM`/`PRD`). Use it in `shouldExecute` |
 | `${edw_db}` | `ALFA_EDW_DEV` | Database being migrated (`ALFA_EDW_RH_<ID>` in rehearsal). DDL target only |
-| `${home_db}` | `ALFA_EDW_DEV` | The runway's own database, so the LIVE target during rehearsal. Callbacks only (FG009) |
+| `${home_db}` | `ALFA_EDW_DEV` | The runway's own database: the LIVE target in rehearsal. Callbacks only (FG009) |
 | `${etl_wh}` | `WH_EDW_ETL_DEV` | Warehouse for tasks, alerts and dynamic tables |
 | `${role_prefix}` | `EDW_DEV` | Prefix of the runway's access roles: `${role_prefix}_SALES_READ` |
 | `${tasks_enabled}` | `false` | `true` on MGM/PRD. Gates task/alert resumes; pauses pipes and dynamic tables |
@@ -287,7 +287,13 @@ WHERE ORDER_CHANNEL IS NULL
 -- Incorrect
 DELETE FROM SALES.ORDER_STATUS_CODES;                                -- FG006: empties the table on six runways
 INSERT INTO SALES.ORDER_STATUS_CODES VALUES ('OPEN', 'Open', FALSE); -- duplicates on re-run after a failure
+UPDATE SALES.ORDERS SET ORDER_CHANNEL = 'WEB';                       -- code review RG09 (error): every row
 ```
+
+- **UPDATE without WHERE** fails code review (SQLFluff RG09, an error; the guard has no rule for it). If every row
+  really must change, end the `UPDATE` line with `-- noqa: RG09`; the code-review report lists the override.
+- **TRUNCATE and DELETE without WHERE** need a ticketed FG006 waiver (section 8). Code review lists them as RG13 /
+  RG06 warnings, which need no override.
 
 - **Big backfills.** Do not switch warehouses inside a migration: `USE WAREHOUSE` stays in effect for the rest of the
   Flyway run (FG008). Choose one of these instead:
@@ -412,11 +418,12 @@ SELECT o.ORDER_ID FROM SALES.ORDERS o;
 ```
 
 - Schema-qualify every name inside the body, even in the view's own schema. FG013 can check order only for
-  `SCHEMA.OBJECT` references, and qualified names stay correct when someone moves the file.
+  `SCHEMA.OBJECT` references (quoted or not: `"SALES"."V_ORDER_BASE"` counts), and qualified names stay correct when
+  someone moves the file.
 - Never write `SELECT *`. Snowflake stores the expanded column list, so a later column change in the base table breaks
   the view or silently hides the new column.
 - A view that reads another view defined in a repeatable that sorts later fails on a fresh database. FG013 catches it;
-  bump the layer (30 to 31).
+  bump the layer (30 to 31), which is safe for a file that already ran (section 5.15).
 
 ### 5.7 Materialized views and dynamic tables (layer 40)
 
@@ -496,7 +503,8 @@ $$;
   procedure is clone-safe and promotable. An owner's-rights procedure also cannot change session state. Caller's
   rights inherit the caller's database, schema and secondary roles, and they behave differently under a task, the
   pipeline or a person.
-- **The body goes in `$$ ... $$`.** Flyway reads it as one string, so it never splits the procedure (FG015).
+- **The body goes in `$$ ... $$`.** Flyway reads it as one string, so it never splits the procedure. FG015 fails a
+  `LANGUAGE SQL` procedure or function whose body is not a `$$` or `'...'` literal.
 - **No 3-part names.** FG009 rejects `ALFA_EDW_` literals even inside the body, and `${edw_db}` is rejected there too.
 - **Dynamic SQL is invisible to every check.** Keep it rare:
   - build names only from `SCHEMA.OBJECT` values on an allow-list;
@@ -644,6 +652,8 @@ ALTER TASK SALES.TASK_REFRESH_ORDER_SUMMARY RESUME;         -- FG014: resumes on
 
 ```sql
 -- repeatable/SALES/R__85_SALES__alert_stale_order_summary.sql
+-- Inside EXECUTE IMMEDIATE: Flyway's parser cannot split the alert's own IF (FG015). Placeholders are still replaced.
+EXECUTE IMMEDIATE $$
 CREATE OR REPLACE ALERT SALES.ALERT_STALE_ORDER_SUMMARY
     WAREHOUSE = ${etl_wh}
     SCHEDULE = '60 MINUTE'
@@ -652,7 +662,8 @@ CREATE OR REPLACE ALERT SALES.ALERT_STALE_ORDER_SUMMARY
         FROM SALES.ORDER_SUMMARY s
         WHERE s.REFRESHED_AT < DATEADD('hour', -26, CURRENT_TIMESTAMP())
     ))
-    THEN CALL SALES.SP_NOTIFY_STALE_ORDER_SUMMARY();
+    THEN CALL SALES.SP_NOTIFY_STALE_ORDER_SUMMARY()
+$$;
 
 EXECUTE IMMEDIATE $$
 BEGIN
@@ -663,14 +674,35 @@ END;
 $$;
 ```
 
+```sql
+-- Incorrect (FG015): Flyway opens a block at the alert's IF and never closes it ("Incomplete statement")
+CREATE OR REPLACE ALERT SALES.ALERT_STALE_ORDER_SUMMARY WAREHOUSE = ${etl_wh} SCHEDULE = '60 MINUTE'
+    IF (EXISTS (SELECT 1 FROM SALES.ORDER_SUMMARY s)) THEN CALL SALES.SP_NOTIFY_STALE_ORDER_SUMMARY();
+DROP ALERT IF EXISTS SALES.ALERT_OLD;   -- same trap: ALTER/DROP ALERT IF EXISTS also go inside EXECUTE IMMEDIATE
+```
+
+- **Write the alert inside `EXECUTE IMMEDIATE $$ ... $$`** (FG015). ALERT is not one of the object types after which
+  Flyway's Snowflake parser accepts an `IF`, so a bare `CREATE ALERT ... IF (EXISTS ...)` fails the deploy.
+  `fw.py new --layer 85` writes this form.
 - Alerts are created suspended, so resume them behind the same `${tasks_enabled}` gate as tasks. FG014 covers tasks
   only, so this one is **review**.
+- **Resuming needs EXECUTE ALERT.** The alert's owner, the deploy role, must hold `EXECUTE ALERT` on the account.
+  Before the first layer-85 file is merged, a Snowflake admin runs bootstrap/10's
+  `GRANT EXECUTE ALERT ON ACCOUNT TO ROLE EDW_<ID>_DEPLOYER` for every runway, MGM and PRD at least (GUIDE B2).
+  Only MGM and PRD resume alerts, and their rehearsals keep them off, so without the grant the first MGM deploy
+  fails at the resume, after its approval.
 - A replaced alert loses its explicit grants. Schema-level future grants (section 5.13) restore them.
 
 ### 5.13 Grants (layer 90)
 
-There is one grants file per schema: `R__90_<SCHEMA>__grants.sql`. Grants go to the runway's own access roles, which
-bootstrap creates, through `${role_prefix}`.
+There is one grants file per schema: `R__90_<SCHEMA>__grants.sql`. Grants go to the runway's own access roles through
+`${role_prefix}`: `EDW_<ID>_<SCHEMA>_READ`, plus `EDW_<ID>_<SCHEMA>_WRITE` where a schema needs one.
+
+**The access roles must exist before the grants deploy.** Roles are account objects, so no migration creates them
+(FG007). A Snowflake admin creates them, for every runway, with bootstrap/10's access-role section before the first
+deploy of a grants file that names them (GUIDE B3). A missing role fails the grants file on that runway, and its
+Failed history row then blocks every later deploy there until RUNBOOKS R1 is done. The same holds for a new schema
+added later: its roles come first.
 
 ```sql
 -- repeatable/SALES/R__90_SALES__grants.sql
@@ -678,7 +710,7 @@ GRANT USAGE ON SCHEMA SALES TO ROLE ${role_prefix}_SALES_READ;
 GRANT SELECT ON ALL VIEWS IN SCHEMA SALES TO ROLE ${role_prefix}_SALES_READ;
 GRANT SELECT ON FUTURE VIEWS IN SCHEMA SALES TO ROLE ${role_prefix}_SALES_READ;
 GRANT USAGE ON FUNCTION SALES.FN_NET_AMOUNT(NUMBER, NUMBER) TO ROLE ${role_prefix}_SALES_READ;
-GRANT USAGE ON FUTURE FILE FORMATS IN SCHEMA SALES TO ROLE ${role_prefix}_SALES_LOAD;
+GRANT USAGE ON FUTURE FILE FORMATS IN SCHEMA SALES TO ROLE ${role_prefix}_SALES_WRITE;
 ```
 
 ```sql
@@ -689,6 +721,10 @@ GRANT OWNERSHIP ON TASK SALES.TASK_PUBLISH_ORDER_SUMMARY TO ROLE X;    -- FG007;
 ```
 
 **The grant model.**
+- Every EDW schema is a managed-access schema owned by the runway's deployer (section 5.1). In a managed-access schema
+  the schema owner grants on every object in it and defines its future grants. In a standard schema, defining future
+  grants needs the account-wide MANAGE GRANTS privilege, which the kit never gives a deploy role: there this file
+  would fail on its first DEV deploy. Schema ownership alone is not enough.
 - Explicit grants travel with each object: COPY GRANTS on every `CREATE OR REPLACE` that supports it.
 - Schema-level future grants cover new objects, and replaced objects of types that have no COPY GRANTS (tasks, alerts,
   file formats).
@@ -699,8 +735,8 @@ GRANT OWNERSHIP ON TASK SALES.TASK_PUBLISH_ORDER_SUMMARY TO ROLE X;    -- FG007;
 - Verify on first run that a brand-new view created with `COPY GRANTS` still receives the schema's future grants:
   `SHOW GRANTS ON VIEW SALES.V_OPEN_ORDERS;`.
 - The grants file re-runs only when its text changes. Edit it when you add a grant, not when you add a view.
-- In a managed-access schema, only the schema owner, which is the deployer, can grant. That is why bootstrap makes the
-  deployer the owner of every schema.
+- In a managed-access schema only the schema owner (the deployer) or MANAGE GRANTS can grant, so a functional role
+  that owned objects before adoption can no longer re-grant them. Request access through this file.
 
 ### 5.14 Undo scripts
 
@@ -723,11 +759,32 @@ DROP TABLE IF EXISTS SALES.ORDERS;
 
 Undo assumes the V fully succeeded. After a partial failure, follow RUNBOOKS R1, not undo.
 
+### 5.15 Renaming or retiring a repeatable
+
+A repeatable's history row is keyed by its description (the file name), so renaming or deleting a file that already
+ran leaves a history row with no file: state "missing". Every runway tolerates that for repeatables: flyway.toml
+ignores `*:missing` on DEV, SAN, SEA and PHX and `repeatable:missing` on MGM, PRD, RH_MGM and RH_PRD (FG018).
+Versioned migrations stay strict: a V or U file on `main` is never renamed or deleted (FG003).
+
+- **Rename** (a new layer number for FG013, or a better object part in the name): `git mv` the file. The new
+  description is pending on every runway, so the file runs once everywhere and replaces the same object. If the
+  OBJECT itself gets a new name, the old object stays in the database: retire it as below.
+- **Retire**: in one PR, delete the R file and add a V migration that drops the object
+  (`DROP VIEW IF EXISTS SALES.V_OLD_ORDERS;`, `DROP TASK IF EXISTS ...` after suspending its graph's root). A drop that
+  FG006 flags, such as a table, carries its ticketed waiver.
+- Deleting only the R file removes nothing from the database: the object keeps running in its last definition.
+
 ## 6. Snowflake Scripting and the Flyway parser
 
-Flyway's Snowflake parser has two traps. A top-level `DECLARE`/`BEGIN` block is split wrongly (and a lower-case
-`declare` swallows the rest of the file), and `BEGIN` counts as a transaction only when exactly one space and
-`TRANSACTION`/`WORK` follow it on the same line.
+Flyway's Snowflake parser has three traps, and FG015 emulates it for each:
+
+1. A top-level `DECLARE`/`BEGIN` block is split wrongly (and a lower-case `declare` swallows the rest of the file).
+2. `BEGIN` counts as a transaction only when exactly one space and `TRANSACTION`/`WORK` follow it on the same line.
+3. An `IF` opens a block unless the keyword before it is an object type Flyway knows can be created conditionally
+   (TABLE, VIEW, SCHEMA, TASK, COLUMN, PROCEDURE, ...), or END or CURSOR. So `CREATE ALERT ... IF (EXISTS ...)`,
+   `ALTER TABLE ... ADD IF NOT EXISTS c` (no COLUMN), `ALTER ALERT IF EXISTS`, `DROP ALERT IF EXISTS` and
+   `CREATE SECRET IF NOT EXISTS` never close, and the deploy fails with "Incomplete statement". Write
+   `ADD COLUMN IF NOT EXISTS` / `DROP COLUMN IF EXISTS`, or wrap the statement in `EXECUTE IMMEDIATE $$ ... $$`.
 
 ```sql
 -- Correct: every anonymous block wrapped; Flyway sees one string.
@@ -742,9 +799,10 @@ BEGIN
 END;
 $$;
 
--- Correct: explicit transaction, written on one line with one space. Rarely needed: Flyway already runs
--- each migration in a transaction.
+-- Correct: explicit transaction, written on one line with one space. On Snowflake this is the only way to make
+-- several DML statements atomic: Flyway does not wrap a migration in a transaction (section 5.3). No DDL inside.
 BEGIN TRANSACTION;
+UPDATE SALES.ORDERS SET ORDER_CHANNEL = 'STORE' WHERE ORDER_CHANNEL IS NULL AND ORDER_SOURCE = 'POS';
 UPDATE SALES.ORDERS SET ORDER_CHANNEL = 'WEB' WHERE ORDER_CHANNEL IS NULL;
 COMMIT;
 ```
@@ -759,10 +817,14 @@ END;
 
 BEGIN
 TRANSACTION;                          -- split across lines: Flyway opens a block and mis-splits the file
+
+ALTER TABLE SALES.ORDERS DROP IF EXISTS LEGACY_FLAG;   -- IF after DROP opens a block: write DROP COLUMN IF EXISTS
 ```
 
 - Placeholders inside `$$` are still replaced. That is how `'${tasks_enabled}'` works inside the gates above.
 - An odd number of `$$` markers, or a file that ends inside a string or a comment, is an FG015 error.
+- Wrapping hides nothing from the guard: FG006, FG007 and FG008 also check the statements inside
+  `EXECUTE IMMEDIATE $$ ... $$` blocks and `EXECUTE IMMEDIATE '...'` strings, with the same waiver rules.
 
 ## 7. Script configuration (`<file>.sql.conf`)
 
@@ -773,11 +835,11 @@ other key breaks every Flyway command on every runway:
 |------------------------|------------------------------|---------------------------------------------------------|
 | `shouldExecute`        | expression (Enterprise)      | run a script on some runways only. See the rules below  |
 | `placeholderReplacement` | `true` / `false`           | `false` for JavaScript bodies (section 5.5)             |
-| `executeInTransaction` | `true` / `false`             | rarely needed on Snowflake                              |
+| `executeInTransaction` | `true` / `false`             | no effect on Snowflake: Flyway never opens one (5.3)    |
 | `encoding`             | e.g. `UTF-8`                 | only for non-UTF-8 files                                |
 
-FG020 checks for unknown keys and true/false values. FG020 compares key names without regard to case, but Flyway does
-not, so write them exactly as shown.
+FG020 checks for unknown keys and true/false values. It matches the keys case-sensitively, as Flyway does, and points
+out a key that differs only in case. Write them exactly as shown.
 
 ```properties
 # V2026.10.20.1100__sales_mask_customer_email.sql.conf
@@ -811,36 +873,57 @@ A waiver line suppresses one rule's **errors** for the **whole file**:
   - FG003, applied-file immutability;
   - FG006 for DROP DATABASE and CREATE OR REPLACE DATABASE/SCHEMA;
   - FG008 for USE DATABASE/SCHEMA/ROLE/SECONDARY ROLES;
+  - FG009 for `${home_db}` in `migrations/` or `repeatable/`;
   - FG017, secrets;
-  - the configuration rules FG018 and FG019.
+  - the configuration rules FG018 and FG019;
+  - FG021, unfinished scaffold markers.
 - Typical legitimate waivers:
-  - FG006, a planned drop with a data-owner sign-off;
-  - FG007, a one-off grant that security approved;
+  - FG006, a planned drop, TRUNCATE or DELETE without WHERE with a data-owner sign-off;
+  - FG007, rarely: account-level changes belong in `bootstrap/`; waive only a one-off that security approved and that
+    is right to replay on all six runways;
   - FG008, `USE WAREHOUSE` for a backfill (section 5.3 lists better options).
+
+**Waivers and code review.** The guard is the hard gate for every waivable rule. `flyway check -code` runs too, and
+its rules that repeat a waivable guard check are **warnings**: a waived file passes code review, and the code-review
+report lists the statement for the reviewer. These are ALFA03 (CREATE OR REPLACE TABLE, DROP SCHEMA), ALFA06
+(account-level DDL and grants) and the SQLFluff rules RG06 (DELETE without WHERE), RG13 (TRUNCATE), RG08 (ALTER USER)
+and RG11 (CREATE ROLE). The code-review **errors** stay errors:
+
+- ALFA01 (an `ALFA_EDW_` name), ALFA02 (USE), ALFA04 (DROP DATABASE, CREATE OR REPLACE SCHEMA/DATABASE) and RG03 (DROP
+  DATABASE) repeat guard checks that you never waive anyway (so never waive FG009 for an `ALFA_EDW_` literal). Regex
+  rules have no per-file or per-line waiver.
+- SQLFluff errors with no guard rule behind them: RG09 (UPDATE without WHERE), RG12 (grants to PUBLIC), AL04, AL08 and
+  CV05. When one is intended, end the flagged line with `-- noqa: <code>`, for example `-- noqa: RG09`; Flyway lists
+  every noqa in the code-review report as a policy override.
 
 ## 9. Review checklist
 
 The author ticks these before asking for review, and the reviewer checks them. The guard covers the starred items;
 the rest are judgment.
 
-- [ ] File created with `fw.py new`; the header is filled in (ticket, author, why).*
+- [ ] File created with `fw.py new`; no `<...>` scaffold marker is left (FG021).* The header names the real ticket,
+      author and reason.
 - [ ] Every object is `SCHEMA.OBJECT`; no database names, no `USE`, no `ALTER SESSION`.*
 - [ ] Tables and data change only in V scripts, which are idempotent (`IF NOT EXISTS`, MERGE, guarded UPDATE).
-- [ ] One logical change per V script; no DDL and DML mixed in one data fix.
+- [ ] One logical change per V script; DML that must be atomic is one statement or one explicit transaction (5.3).
 - [ ] No V/U file that is already on `main` was edited, renamed or deleted.*
 - [ ] Every `CREATE OR REPLACE` that supports COPY GRANTS has it.*
+- [ ] New schema: `WITH MANAGED ACCESS`, and its access roles exist on every runway before its grants deploy.
 - [ ] No `SELECT *` in views.
 - [ ] Repeatable layer is right; anything this file uses sorts before it.*
+- [ ] Renamed or deleted repeatable: a retired object is dropped by a V script (section 5.15).
 - [ ] Signature change: old overload dropped in a V script; every caller touched in the same PR.
 - [ ] Task files: root suspended first, `CREATE OR ALTER TASK`, `${tasks_enabled}` gate,
       `SYSTEM$TASK_DEPENDENTS_ENABLE`.*
+- [ ] Alerts are written inside `EXECUTE IMMEDIATE $$ ... $$`;* EXECUTE ALERT is granted on the runways (5.12).
 - [ ] Alerts, pipes and dynamic tables are gated or paused where `${tasks_enabled}` is `false`.
 - [ ] Pipe COPY INTO targets are bare table names.*
-- [ ] No `${deploy_id}`, `${git_sha}`, `${build_url}`, `${approver}`, `${flyway:timestamp}` or `${flyway:database}`
-      in migrations or repeatables.
+- [ ] No `${deploy_id}`, `${git_sha}`, `${build_url}`, `${approver}`, `${flyway:timestamp}`, `${flyway:database}` or
+      `${home_db}` in migrations or repeatables, comments included.
 - [ ] New placeholder: declared for every environment in flyway.toml, including RH_MGM and RH_PRD.*
 - [ ] `.sql.conf` keys spelt exactly; `shouldExecute` uses `${env}` and does not skip DEV, MGM or all test runways.
-- [ ] Destructive statements carry a waiver with a ticket; an undo script exists where it makes sense.
+- [ ] Destructive statements carry a waiver with a ticket; an intended UPDATE without WHERE carries `-- noqa: RG09`;
+      an undo script exists where it makes sense.
 - [ ] Out-of-order warning (FG004) understood: the change does not depend on migrations merged after it.
 - [ ] Grants: new access granted in the schema's layer-90 file; future grants at schema level only.
 - [ ] `python3 scripts/fw.py guard --base origin/main` is clean locally; the PR build is green.
