@@ -4,7 +4,7 @@
 #
 # NO SECRETS IN THIS FILE (guard rule FG017/FG018). Everything that identifies a login comes from environment
 # variables at run time through Flyway's ${env.NAME} resolver; the Jenkins deploy job sets them from folder-scoped
-# credentials, and `scripts/fw.py env --runway <ID>` prints them for a manual run (docs/GUIDE.md section 9):
+# credentials, and `scripts/fw.py env --runway <ID>` prints them for a manual run (docs/GUIDE.md Part B, step B7):
 #   SNOWFLAKE_ACCOUNT    account identifier (<orgname>-<account_name>)
 #   FLYWAY_SF_USER       SVC_EDW_FLYWAY_<ID> (deploy) or SVC_EDW_FLYWAY_AUDIT (read-only info/validate)
 #   FLYWAY_SF_ROLE       EDW_<ID>_DEPLOYER or EDW_FLYWAY_AUDITOR

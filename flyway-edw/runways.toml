@@ -13,7 +13,7 @@
 # drift_gate     out-of-band DDL since the last deploy: "warn" prints it, "fail" stops the deploy (ACK_DRIFT=true
 #                lets an approver proceed). Start MGM/PRD on "warn" and switch to "fail" after two clean releases.
 # save_snapshot / preview_checks   Flyway Enterprise snapshot + check -drift/-changes are PREVIEW on Snowflake: keep
-#                false until the spike in docs/GUIDE.md step 11 passes, then switch on per runway.
+#                false until the spike in docs/GUIDE.md Part G (G1) passes, then switch on per runway (G2).
 
 [kit]
 flyway_version = "13.8.1"

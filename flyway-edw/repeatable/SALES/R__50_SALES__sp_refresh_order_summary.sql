@@ -6,7 +6,7 @@
 --          EXECUTE AS OWNER: the procedure runs with the deploy role's privileges and resolves SCHEMA.OBJECT names in
 --          its own database, so the same body is correct on every runway and in a zero-copy clone. Keeping the task
 --          body a one-line CALL means logic changes replace only this procedure, never the task (no suspend needed).
---          CREATE OR REPLACE + COPY GRANTS keeps the USAGE grant from R__90 across the replace (guard FG011).
+--          CREATE OR REPLACE + COPY GRANTS keeps every explicit grant on the procedure across the replace (FG011).
 --          The body is a dollar-quoted block, which Flyway's Snowflake parser reads as ONE statement.
 -- Rules  : docs/CONVENTIONS.md. Schema-qualify every object (SCHEMA.OBJECT); never name the database.
 

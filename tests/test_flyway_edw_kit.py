@@ -568,3 +568,80 @@ def test_env_command_formats(capsys):
 def _jenkinsfiles() -> list[Path]:
     return sorted((KIT / "jenkins").glob("Jenkinsfile*"))
 
+
+# --------------------------------------------------------------------------- shipped content
+
+def test_shipped_kit_passes_guard():
+    findings = guard_mod.Guard(manifest_mod.load_kit(KIT), now=NOW).run()
+    errors = [f.render() for f in findings if f.severity == "error"]
+    assert errors == []
+
+
+def test_shipped_kit_has_sample_objects_of_every_kind():
+    names = {p.name for p in KIT.rglob("*.sql")}
+    assert any(n.startswith("V") for n in names) and any(n.startswith("U") for n in names)
+    for layer in ("R__20_", "R__30_", "R__50_", "R__80_", "R__90_"):
+        assert any(n.startswith(layer) for n in names), layer
+    assert {p.name.split("__")[0] for p in (KIT / "callbacks").glob("*.sql")} >= {
+        "beforeMigrate", "afterMigrate", "afterMigrateError"}
+
+
+def test_bundle_is_deterministic_and_verifies(tmp_path):
+    a = bundle_mod.build(KIT, tmp_path / "a", build_id="7", git_sha="abc", branch="main",
+                         created=datetime(2026, 10, 13, tzinfo=UTC))
+    b = bundle_mod.build(KIT, tmp_path / "b", build_id="7", git_sha="abc", branch="main",
+                         created=datetime(2026, 10, 13, tzinfo=UTC))
+    assert a.archive.read_bytes() == b.archive.read_bytes()
+    m = a.manifest
+    assert m["digest"] == bundle_mod.digest_of(m["files"]) and "flyway.toml" in m["files"]
+    assert any(x["path"].startswith("migrations/") for x in m["versioned"])
+    assert not any("__pycache__" in f for f in m["files"])
+    bdir = bundle_mod.extract(a.archive, tmp_path / "x")
+    assert bundle_mod.verify(bdir, require_branch="main")["build_id"] == "7"
+
+
+def test_jenkinsfiles_never_interpolate_into_shell():
+    """Double-quoted sh strings let Groovy interpolate secrets/params into the command line (leak + injection)."""
+    assert _jenkinsfiles(), "jenkins/Jenkinsfile* missing"
+    for jf in _jenkinsfiles():
+        text = jf.read_text()
+        bad = re.findall(r'\b(?:sh|bat|powershell)\s*\(?\s*(?:script\s*:\s*)?"(?!"")[^"\n]*\$\{?[A-Za-z]', text)
+        bad += re.findall(r'\b(?:sh|bat)\s*\(?\s*(?:script\s*:\s*)?"""', text)
+        assert bad == [], f"{jf.name}: {bad[:3]}"
+
+
+def test_jenkinsfiles_use_the_kit_contract():
+    deploy = (KIT / "jenkins" / "Jenkinsfile.deploy").read_text()
+    for needle in ("lock(", "disableRestartFromStage", "copyArtifacts", "verify-bundle", "promote-check",
+                   "drift-eval", "rehearsal-sql", "--entrypoint", "submitter", "migrate"):
+        assert needle in deploy, needle
+    ci = (KIT / "jenkins" / "Jenkinsfile").read_text()
+    for needle in ("guard", "check -code", "bundle", "copyArtifactPermission", "archiveArtifacts"):
+        assert needle in ci, needle
+
+
+def test_docs_reference_only_real_rules_and_commands():
+    rule_ids = set(guard_mod.RULES)
+    commands = set(fw.parser()._subparsers._group_actions[0].choices)  # type: ignore[attr-defined]
+    docs = [*list((KIT / "docs").glob("*.md")), KIT / "README.md"]
+    assert len(docs) >= 5
+    seen_rules: set[str] = set()
+    for p in docs + _jenkinsfiles():
+        text = p.read_text()
+        for rid in re.findall(r"\bFG\d{3}\b", text):
+            assert rid in rule_ids, f"{p.name} cites unknown rule {rid}"
+            seen_rules.add(rid)
+        # invocations only: `python3 [path/]fw.py <cmd>` or a backticked `fw.py <cmd>` (not prose like a folder map)
+        invocations = re.findall(r"python3?\s+(?:\S*/)?fw\.py\s+(?:--root\s+\S+\s+)?([a-z][a-z-]+)", text)
+        invocations += re.findall(r"`(?:\S*/)?fw\.py\s+(?:--root\s+\S+\s+)?([a-z][a-z-]+)", text)
+        for cmd in invocations:
+            assert cmd in commands, f"{p.name} uses unknown fw.py command {cmd!r}"
+    shortcomings = (KIT / "docs" / "SHORTCOMINGS.md").read_text()
+    missing = sorted(r for r in rule_ids if r not in shortcomings)
+    assert missing == [], f"SHORTCOMINGS.md does not map rules {missing}"
+
+
+def test_docs_name_every_runway():
+    guide = (KIT / "docs" / "GUIDE.md").read_text()
+    for rid in ("DEV", "SAN", "SEA", "PHX", "MGM", "PRD"):
+        assert f"ALFA_EDW_{rid}" in guide

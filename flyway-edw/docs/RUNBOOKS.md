@@ -483,8 +483,9 @@ out-of-band incident: `SHOW TASKS IN SCHEMA ...`, `SHOW GRANTS ON ...`.
 
    Alternatively, as the role that owns the user (USERADMIN), stop everything that user runs:
    `ALTER USER SVC_EDW_FLYWAY_PRD ABORT ALL QUERIES;`.
-4. **Find the interrupted deploy:** a STARTED row with no SUCCEEDED or FAILED row. The error callback never ran. A
-   cross-environment guard failure leaves the same signature (R10).
+4. **Find the interrupted deploy:** a STARTED row with no SUCCEEDED or FAILED row. The error callback never ran.
+   (A cross-environment guard trip or a failed task restore is different: those callbacks write their own FAILED row
+   before raising, R9 / R10.)
 
    ```sql
    SELECT s.DEPLOY_ID, s.EVENT_TS AS STARTED_AT, s.GIT_SHA, s.APPROVER
@@ -648,10 +649,10 @@ expiry date in GUIDE Part H's quarterly check.
    WHERE s.DEPLOY_ID = 'PRD-1234';
    ```
 
-   Run each generated line, for example:
+   Run each generated line. `TASK_FQN` is stored fully quoted, so a line looks like:
 
    ```sql
-   SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('ALFA_EDW_PRD.SALES.TASK_REFRESH_ORDER_SUMMARY');
+   SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('"ALFA_EDW_PRD"."SALES"."TASK_REFRESH_ORDER_SUMMARY"');
    ```
 5. On DEV, SAN, SEA, PHX and the rehearsal clones, suspended is the intended state (`tasks_enabled = "false"`). Do
    nothing there unless the project switched tasks on for its runway.
@@ -684,8 +685,9 @@ definitions name another `ALFA_EDW_*` database.
 - Every migration of the run has already committed and shows Success.
 - Callbacks of one event run in name order, so `afterMigrate__60_task_restore` had already run, and the SUCCEEDED row
   (`afterMigrate__99_deploy_log`) was never written.
-- No FAILED row was written either. `afterMigrateError` fires only when a migration fails, not when an `afterMigrate`
-  callback fails. `FLYWAY.DEPLOY_LOG` therefore shows a STARTED row with no end, like an aborted deploy (R6, step 4).
+- `afterMigrateError` fires only when a migration fails, not when an `afterMigrate` callback fails, so the guard writes
+  its own FAILED row (DETAIL starts "Cross-environment reference in") before it raises. The task restore does the
+  same when a root does not end in the intended state; the events TASKS_RESUMED / TASKS_SUSPENDED record what it did.
 
 **Steps.**
 

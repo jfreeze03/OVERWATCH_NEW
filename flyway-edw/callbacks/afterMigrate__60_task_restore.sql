@@ -10,7 +10,9 @@
 --          Work done is logged as one TASKS_RESUMED / TASKS_SUSPENDED row in FLYWAY.DEPLOY_LOG.
 -- Why    : migrations suspend graphs to change them and Snowflake DDL autocommits; repeatable task files resume
 --          only the graph they define (layer 80). This callback is the net under everything else. It resumes only
---          what was running before the deploy: a graph an operator had suspended stays suspended.
+--          what was running before the deploy: a graph an operator had suspended stays suspended. The other side
+--          of that rule: a migration that only SUSPENDS a running graph is undone here; retire a graph with
+--          DROP TASK (and its file) instead.
 --          Raising here (after the migrations committed) fails the Flyway command: afterMigrate__99 does not run
 --          and Flyway does not call afterMigrateError for it, which is why the FAILED row is written here first.
 -- Owner  : EDW platform team (kit code; projects do not edit callbacks). Ticket: EDW-0000.
@@ -18,7 +20,9 @@
 --          snapshot = rows with its DEPLOY_ID captured at or after its latest STARTED row (beforeMigrate__10 runs
 --          before __20). Each SHOW TASKS is read by the statement right after it (RESULT_SCAN(LAST_QUERY_ID())).
 --          Task names are passed as "DATABASE"."SCHEMA"."TASK" with embedded quotes doubled, built into a statement
---          string and run with EXECUTE IMMEDIATE (SYSTEM$ functions take the name as a string literal).
+--          string and run with EXECUTE IMMEDIATE (SYSTEM$ functions take the name as a string literal). Verify on
+--          first run (MGM) that SYSTEM$TASK_DEPENDENTS_ENABLE accepts this quoted form; if it does not, the
+--          verification pass below reports the root and its error instead of passing silently.
 --          A declared exception's message must be a literal, so the failure message is built into a one-line
 --          anonymous block that EXECUTE IMMEDIATE runs; its error carries the message to the Flyway log.
 --          Wrapped in EXECUTE IMMEDIATE with a dollar-quoted body (guard FG015).

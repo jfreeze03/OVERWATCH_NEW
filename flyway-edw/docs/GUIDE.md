@@ -100,9 +100,10 @@ before each deploy. MGM and PRD accept bundles built from `main` only.
 | No reference to another runway's database             | callback `afterMigrate__80_cross_env_guard`        | yes    |
 | Task graphs restored (or kept off) after a deploy     | callbacks `beforeMigrate__20`, `afterMigrate__60`  | yes    |
 | Deploy audit trail                                    | `FLYWAY.DEPLOY_LOG`, `deploy-<ID>` status, Jenkins | yes    |
+| Service logins only from the Jenkins egress range     | network policy (B1)                                | yes    |
 | Manual Flyway runs serialized with Jenkins            | reserve the Jenkins lock (B7)                      | no     |
 | Runway leases, refreshes, data-owner sign-off         | F2, bootstrap/30                                   | no     |
-| No human holds an MGM/PRD deploy role; break-glass    | B7 + quarterly audit (H3)                          | no     |
+| No person holds a deploy role; keys in the vault      | B7 + quarterly audit (H3)                          | no     |
 | Hotfix cherry-pick, undo, Time Travel restore         | F5, F6, RUNBOOKS                                   | no     |
 | Key rotation, licence renewal, access reviews         | H3                                                 | no     |
 
@@ -272,8 +273,9 @@ workstation (OpenSSL) and Snowsight (`bootstrap/10_account_objects.sql`, per-run
 3. Check that the deploy role holds `EXECUTE TASK` on the account (a task runs only if its owner role has it; add
    `EXECUTE MANAGED TASK` for serverless tasks). If bootstrap/10 does not grant it, grant it there: it is an
    account-level grant and never belongs in a migration (FG007).
-4. Give the `.p8` file and its passphrase to the Jenkins admin for B4 through your secret-transfer channel, then
-   delete the local copies (`shred -u "$U.p8"`) or file them in the enterprise vault.
+4. Store the `.p8` file and its passphrase in the enterprise vault (manual and break-glass sessions check them out
+   there, B7), give them to the Jenkins admin for B4 through your secret-transfer channel, then delete the local
+   copies (`shred -u "$U.p8"`).
 
 **Verify:** compare fingerprints, then the grants:
 
@@ -283,7 +285,7 @@ openssl rsa -pubin -in "$U.pub" -outform DER | openssl dgst -sha256 -binary | op
 
 ```sql
 DESC USER SVC_EDW_FLYWAY_DEV;            -- RSA_PUBLIC_KEY_FP = 'SHA256:' + the value above; TYPE = SERVICE
-SHOW GRANTS OF ROLE EDW_DEV_DEPLOYER;    -- SYSADMIN (role), SVC_EDW_FLYWAY_DEV (user); people only per B7
+SHOW GRANTS OF ROLE EDW_DEV_DEPLOYER;    -- exactly SYSADMIN (role) and SVC_EDW_FLYWAY_DEV (user)
 SHOW GRANTS TO ROLE EDW_DEV_DEPLOYER;    -- warehouse USAGE, EXECUTE TASK, (MGM/PRD) CREATE DATABASE
 ```
 
@@ -415,8 +417,8 @@ reduces a manual run to the Community feature set. Flyway warns 30 days before e
 
 ### B7. People: groups, human access, break-glass, running Flyway by hand
 
-**Who:** security/IAM, lead DBA, Jenkins admin. **Where:** Active Directory, Snowflake (SECURITYADMIN), Jenkins Role
-Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups.
+**Who:** security/IAM, lead DBA, Jenkins admin. **Where:** Active Directory, the enterprise vault, Jenkins Role
+Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups, a host inside the Jenkins egress range.
 
 **Do:**
 
@@ -431,99 +433,104 @@ Strategy (`jenkins/casc-snippet.yaml`), Bitbucket groups.
    | edw-release-approvers          | release managers            | Build + approve MGM; start PRD                    |
    | edw-prod-approvers             | two or more named approvers | Build + approve PRD (four-eyes)                   |
    | edw-jenkins-admins             | Jenkins admins              | Job/Configure on the deploy folders (only them)   |
-   | edw-breakglass                 | two or three senior DBAs    | push to `main`; temporary MGM/PRD deploy role     |
+   | edw-breakglass                 | two or three senior DBAs    | push to `main`; MGM/PRD key checkout (step 3)     |
 
    `casc-snippet.yaml` assigns exactly these group names. Nobody outside edw-jenkins-admins gets Job/Configure or
    Run/Replay on `EDW/deploy/*`: either would let them edit the approval out of a deploy.
 
-2. **Human Snowflake access.** Only the service users deploy. People hold functional (read/write) roles, plus:
+2. **Human Snowflake access.** People never hold an `EDW_<ID>_DEPLOYER` role: on every runway
+   `SHOW GRANTS OF ROLE` lists only SYSADMIN and the runway's service user. People work with functional (read/write)
+   roles, and `EDW_FLYWAY_AUDITOR` is granted on request to read Flyway history. When someone must run Flyway or
+   deploy-role SQL by hand (RUNBOOKS R0), they use the runway's **service login**, whose encrypted key and
+   passphrase live in the enterprise vault (B2 step 4). Vault access per runway:
 
-   | Runway      | May hold `EDW_<ID>_DEPLOYER`         | Read-only Flyway history      |
-   |-------------|--------------------------------------|-------------------------------|
-   | DEV         | edw-dba (repairs, adoption)          | EDW_FLYWAY_AUDITOR on request |
-   | SAN/SEA/PHX | edw-dba and the current lease's lead | EDW_FLYWAY_AUDITOR on request |
-   | MGM, PRD    | nobody (break-glass below)           | EDW_FLYWAY_AUDITOR on request |
+   | Runway      | May check out the `SVC_EDW_FLYWAY_<ID>` key   | Condition                          |
+   |-------------|-----------------------------------------------|------------------------------------|
+   | DEV         | edw-dba                                       | none                               |
+   | SAN/SEA/PHX | edw-dba and the current lease's lead          | during the lease                   |
+   | MGM, PRD    | edw-breakglass                                | break-glass session only (step 3)  |
 
    SYSADMIN holders inherit every deploy role through the role hierarchy: keep that group small and treat any DDL
    they run in MGM/PRD as break-glass.
 
 3. **Break-glass for MGM/PRD** (incident, emergency hotfix F5, adoption D5; PRD shown, MGM likewise):
-   1. An emergency change ticket approved by a member of edw-prod-approvers other than the operator.
+   1. An emergency change ticket, approved by the release manager and by a member of edw-prod-approvers other than
+      the operator.
    2. In Jenkins, a DBA **reserves** the lockable resource `ALFA_EDW_PRD` (Lockable Resources page, Reserve) so no
       deploy job can start; Flyway itself takes no lock on Snowflake.
-   3. SECURITYADMIN grants the deploy role for a fixed time box:
+   3. The operator (edw-breakglass) checks the `SVC_EDW_FLYWAY_PRD` key and passphrase out of the vault onto the
+      session host only.
+   4. The operator works as in step 4 (RUNBOOKS R0) and records every command and its output in the ticket.
+   5. Unreserve the lock, delete the key copy and the working folder, and codify any hand-made DDL as a migration the
+      same day (RUNBOOKS R5). If the key copy ever left the session host, rotate the key (RUNBOOKS R11).
 
-      ```sql
-      USE ROLE SECURITYADMIN;
-      GRANT ROLE EDW_PRD_DEPLOYER TO USER <OPERATOR_USER>;      -- CHG-nnnn, revoke by <time>
-      ```
-
-   4. The operator works (Flyway by hand, below), and records every command in the ticket.
-   5. Revoke, unreserve the lock, and codify any hand-made DDL as a migration the same day (RUNBOOKS R5):
-
-      ```sql
-      REVOKE ROLE EDW_PRD_DEPLOYER FROM USER <OPERATOR_USER>;
-      SHOW GRANTS OF ROLE EDW_PRD_DEPLOYER;                       -- back to SYSADMIN + SVC_EDW_FLYWAY_PRD only
-      ```
-
-4. **Running Flyway by hand.** Needs Python 3.11+, the same Flyway version as `runways.toml` (Redgate CLI download or
-   the `redgate/flyway` image, never the open-source `flyway/flyway` image), your own Snowflake user with a
-   registered key pair (B2 commands with your user name; an admin runs `ALTER USER ... SET RSA_PUBLIC_KEY`), a role
-   that may use the runway's deploy role (DEV, a leased runway, or break-glass) or the auditor role, and your PAT.
-   **Network:** run manual and break-glass sessions from a host inside the range the service users' network policy
-   allows (the Jenkins agents' egress CIDRs from B1: an admin host in that range, or an agent). A session that uses
-   a service login is refused from anywhere else, and security may put break-glass operators under the same policy.
+4. **Running Flyway by hand** (RUNBOOKS R0 is the same procedure in runbook form).
+   * **Where:** a host inside the range the service users' network policy allows (the Jenkins agents' egress CIDRs
+     from B1); in practice a Jenkins agent host. `SVC_EDW_FLYWAY_*` logins are refused from anywhere else, so a
+     laptop session fails at login.
+   * **What:** the bundle that is deployed (or about to be), verified with `fw.py` from a clean checkout of `main`,
+     never a feature-branch checkout. Tools: Docker or the Flyway CLI at exactly `runways.toml` `flyway_version`
+     (never the open-source `flyway/flyway` image), `snowflake-cli` at `[kit] snowflake_cli`, Python 3.11+.
 
    ```bash
-   eval "$(python3 scripts/fw.py env --runway DEV --format shell)"   # FLYWAY_SF_ROLE/WAREHOUSE + EDW_* policy
+   # from a clean checkout of main; for MGM/PRD add --require-branch main
+   python3 scripts/fw.py verify-bundle --bundle edw-flyway-bundle-<N>.tar.gz --extract work
+   cd work/bundle
+   eval "$(python3 scripts/fw.py env --runway DEV --format shell)"   # service user, role, warehouse, EDW_* policy
    export SNOWFLAKE_ACCOUNT='<orgname>-<account_name>'
-   export FLYWAY_SF_USER='<YOUR_SNOWFLAKE_USER>'        # fw.py printed the service user; people use their own
-   export FLYWAY_SF_KEY_FILE="$HOME/.snowflake/keys/<you>.p8"
+   export FLYWAY_SF_KEY_FILE="$HOME/secure/svc_edw_flyway_dev.p8"     # checked out of the vault
    read -rsp 'key passphrase: ' FLYWAY_SF_KEY_PWD && export FLYWAY_SF_KEY_PWD && echo
    read -rsp 'Redgate PAT: ' FLYWAY_TOKEN && export FLYWAY_TOKEN && echo
-   export FLYWAY_EMAIL='<you@company.com>'
-   export JAVA_ARGS='-Dnet.snowflake.jdbc.useBundledBouncyCastleForPrivateKeyDecryption=true'
+   export FLYWAY_EMAIL='<licensed Redgate email>'
+   export JAVA_ARGS="-Duser.home=$PWD/.flyway-home"                    # licence cache stays in the work folder
+   JAVA_ARGS="$JAVA_ARGS -Dnet.snowflake.jdbc.useBundledBouncyCastleForPrivateKeyDecryption=true"
+   flyway version -outputType=json                                     # "edition" must be Enterprise
    flyway -environment=DEV info
    ```
 
-   `fw.py env` prints the Snowflake role and warehouse that `flyway.toml` resolves (`FLYWAY_SF_ROLE`,
-   `FLYWAY_SF_WAREHOUSE`, the service user as `FLYWAY_SF_USER`, and `FLYWAY_RH_DB` for MGM/PRD) plus the runway
-   policy under `EDW_*` names. Policy never uses `FLYWAY_*` names because Flyway reads `FLYWAY_TARGET`,
-   `FLYWAY_ENVIRONMENT`, `FLYWAY_BASELINE_VERSION` and similar variables as its own settings; do not export such
-   names yourself. The account, key file and passphrase are always yours to export. For read-only work use
-   `fw.py env --runway <ID> --auditor` (it selects `EDW_FLYWAY_AUDITOR` and `WH_EDW_FLYWAY_AUDIT`) with your own
-   user. The same thing in the container image (its entrypoint is `flyway`):
+   `fw.py env` prints what `flyway.toml` resolves (`FLYWAY_SF_USER` = the service user, `FLYWAY_SF_ROLE`,
+   `FLYWAY_SF_WAREHOUSE`, and `FLYWAY_RH_DB` for MGM/PRD) plus the runway policy under `EDW_*` names. Policy never
+   uses `FLYWAY_*` names because Flyway reads variables such as `FLYWAY_TARGET`, `FLYWAY_ENVIRONMENT` and
+   `FLYWAY_BASELINE_VERSION` as its own settings: start from a clean shell and export no other `FLYWAY_*` name. The
+   account, key file, passphrase and licence are always exported by hand. (`--auditor` prints the read-only login
+   the PR builds and promotion checks use; people read history with SQL instead, see Part F.) The same in the
+   container image, whose entrypoint is `flyway` (`--rm` discards the licence cache with the container):
 
    ```bash
    docker run --rm -v "$PWD:/work" -w /work -v "$FLYWAY_SF_KEY_FILE:/keys/sf.p8:ro" \
      -e SNOWFLAKE_ACCOUNT -e FLYWAY_SF_USER -e FLYWAY_SF_ROLE -e FLYWAY_SF_WAREHOUSE \
-     -e FLYWAY_SF_KEY_FILE=/keys/sf.p8 -e FLYWAY_SF_KEY_PWD -e FLYWAY_EMAIL -e FLYWAY_TOKEN -e JAVA_ARGS \
+     -e FLYWAY_SF_KEY_FILE=/keys/sf.p8 -e FLYWAY_SF_KEY_PWD -e FLYWAY_EMAIL -e FLYWAY_TOKEN \
+     -e JAVA_ARGS='-Dnet.snowflake.jdbc.useBundledBouncyCastleForPrivateKeyDecryption=true' \
      redgate/flyway:13.8.1 -environment=DEV info
    ```
 
-   A **manual migrate** (DEV repairs, break-glass) should pass the deploy metadata the callbacks write to
+   A **manual migrate** (repairs, break-glass) should pass the deploy metadata the callbacks write to
    `FLYWAY.DEPLOY_LOG`, in the environment-scoped form. Every environment in `flyway.toml` has its own placeholders
    table, and that table **replaces** any root-level value (it is not merged), so a root-level
    `-placeholders.deploy_id=...` is silently ignored on every runway; `-environments.<ID>.flyway.placeholders.x=`
-   reaches it. Without the flags the defaults from `flyway.toml` apply (`deploy_id = "manual"`, `git_sha =
-   "unknown"`, ...), which leaves an anonymous row in the log:
+   reaches it. Without the flags the defaults from `flyway.toml` apply (`deploy_id = "manual"`,
+   `git_sha = "unknown"`, ...), which leaves an anonymous row in the log:
 
    ```bash
+   SHA=$(python3 -c 'import json; print(json.load(open("bundle-manifest.json"))["git_sha"])')
    flyway -environment=DEV migrate \
      -environments.DEV.flyway.placeholders.deploy_id="DEV-manual-$(date -u +%Y%m%d%H%M)" \
-     -environments.DEV.flyway.placeholders.git_sha="$(git rev-parse HEAD)" \
+     -environments.DEV.flyway.placeholders.git_sha="$SHA" \
      -environments.DEV.flyway.placeholders.build_url=manual \
-     -environments.DEV.flyway.placeholders.approver="$USER"
+     -environments.DEV.flyway.placeholders.approver="<ticket approver>"
    ```
 
-**Verify:** `SHOW GRANTS OF ROLE EDW_MGM_DEPLOYER;` and `... EDW_PRD_DEPLOYER;` list only SYSADMIN and the service
-user; the Jenkins approval prompt of a test MGM run (H1) is offered to edw-release-approvers members only.
+   When finished: unreserve the lock, delete `work/` (it holds the licence cache) and the key copy, close the shell.
+
+**Verify:** `SHOW GRANTS OF ROLE EDW_<ID>_DEPLOYER;` lists only SYSADMIN and the service user for all six runways;
+vault access to the six keys matches the table above; the Jenkins approval prompt of a test MGM run (H1) is offered
+to edw-release-approvers members only.
 
 **What can go wrong:** a stray `FLYWAY_*` variable in the shell (for example `FLYWAY_TARGET`) silently changes what
 Flyway does; a manual run without a reserved lock can collide with a Jenkins deploy (nothing in Flyway prevents two
 concurrent migrates); a manual migrate with `-placeholders.x=` instead of the environment-scoped form records
-`manual` / `unknown` in `FLYWAY.DEPLOY_LOG` without any error; a session from outside the allowed network range is
-refused at login (see the network note above).
+`manual` / `unknown` in `FLYWAY.DEPLOY_LOG` without any error; a session from outside the Jenkins egress range is
+refused at login by the network policy; a key copy left on a host is a leaked deploy key (rotate it, RUNBOOKS R11).
 
 ---
 
@@ -732,7 +739,8 @@ adopted database; everything at or below it counts as already delivered. Choose 
 
 ### D4. (Optional) Capture PRD's starting state as code
 
-**Who:** DBA. **Where:** workstation (Flyway, Snowflake CLI).
+**Who:** DBA. **Where:** a workstation with the Snowflake CLI and your own admin login for the GET_DDL extract; a
+B7 step 4 session for the Enterprise route (it connects with the PRD service login).
 
 Not needed for adoption, but useful: a reviewed record of what PRD looked like on day one, the reference for D6, and
 the source when someone first changes an object that predates Flyway (E1, tip 4). Keep it **outside** Flyway's
@@ -768,14 +776,14 @@ kit's procedure; prove it on a scratch database first if you need it.
 
 ### D5. Baseline ALFA_EDW_PRD (then DEV)
 
-**Who:** DBA under break-glass for PRD (B7: ticket, reserved lock `ALFA_EDW_PRD`, time-boxed role grant); a DBA with
-the DEV deploy role for DEV. **Where:** workstation (B7 setup), Snowsight.
+**Who:** for PRD a break-glass operator (B7: ticket, reserved lock `ALFA_EDW_PRD`, PRD key from the vault); for DEV
+an edw-dba member with the DEV key. **Where:** a host inside the Jenkins egress range (B7 step 4), Snowsight.
 
-**Do:**
+**Do:** from the latest main bundle (B7 step 4), or a clean checkout of `main` if no bundle exists yet:
 
 ```bash
 eval "$(python3 scripts/fw.py env --runway PRD --format shell)"
-# + the account/user/key/licence exports from B7
+# + the account/key/licence exports from B7 step 4
 flyway -environment=PRD info                      # expect: no schema history yet, nothing applied
 flyway -environment=PRD baseline -baselineVersion="$EDW_BASELINE_VERSION" \
   -baselineDescription="ALFA EDW adoption baseline"
@@ -927,9 +935,11 @@ python3 scripts/fw.py guard --base origin/main
 git add -A && git commit -m "EDW-1234 SALES: add ORDER_STATUS" && git push -u origin HEAD
 ```
 
-Open a pull request to `main`. Jenkins runs Guard, the licence check, `flyway check -code`, and `info`/`validate`
-against DEV with the read-only login. Reviewers: CODEOWNERS plus the branch-restriction approvals. After the merge,
-the `main` build bundles the change and deploys it to DEV automatically (F1).
+Every push of a branch without a pull request builds that branch: guard, code review and a **branch bundle** you can
+deploy to DEV or to your leased runway (F1, F2). Then open a pull request to `main`. Jenkins runs Guard (against
+`origin/main`), the licence check, `flyway check -code`, and `info`/`validate` of the merge result against DEV with
+the read-only login. Reviewers: CODEOWNERS plus the branch-restriction approvals. After the merge, the `main` build
+bundles the change and deploys it to DEV automatically (F1); only `main` triggers a deploy by itself.
 
 Tips:
 
@@ -1108,7 +1118,7 @@ by another run: the job waits (RUNBOOKS R6 if it is stuck).
 ### F5. Hotfix path
 
 **Who:** on-call DBA, release manager, a PRD approver, the emergency change approver. **Where:** Bitbucket, Jenkins,
-and (cherry-pick only) a break-glass workstation.
+and (cherry-pick only) a break-glass session host (B7 step 4).
 
 A hotfix is a normal release on a short clock. Cherry-pick only when `main` holds unreleased work that must not reach
 PRD yet. Details and recovery: RUNBOOKS R4.
@@ -1120,8 +1130,8 @@ PRD yet. Details and recovery: RUNBOOKS R4.
    unreleased) or edit the repeatable; PR with expedited review; merge. Build N bundles it and deploys DEV.
 3. **Fast path (preferred):** deploy N to one test runway, MGM and PRD back to back (F2-F4). Every gate still runs.
 4. **Cherry-pick path:** the deploy jobs ship whole bundles and have no cherry-pick switch, so this is a break-glass
-   run (B7: ticket, reserved locks `ALFA_EDW_MGM` / `ALFA_EDW_PRD`, time-boxed grants) from bundle N, downloaded
-   from build N's archived artifacts:
+   run (B7: ticket, reserved locks `ALFA_EDW_MGM` / `ALFA_EDW_PRD`, service keys from the vault, a host inside the
+   Jenkins egress range) from bundle N, downloaded from build N's archived artifacts:
 
    ```bash
    python3 scripts/fw.py verify-bundle --bundle edw-flyway-bundle-N.tar.gz --extract hotfix-N --require-branch main
@@ -1145,7 +1155,7 @@ PRD yet. Details and recovery: RUNBOOKS R4.
 5. **Back-merge:** the fix is already on `main` because it went through step 2. If the incident was first fixed by
    hand in PRD, the back-merge is writing that same change as a migration on `main` the same day and reconciling the
    drift (RUNBOOKS R5).
-6. Revoke, unreserve, record everything in the ticket.
+6. Delete the key copies and work folders, unreserve the locks, record everything in the ticket.
 
 **Verify:** on MGM and PRD the hotfix version is Success and the unreleased versions are still Pending; DEPLOY_LOG
 has the hotfix `DEPLOY_ID`.
@@ -1181,7 +1191,8 @@ them.
 
 ### G1. Spike: prove snapshot and check -drift on this EDW
 
-**Who:** DBA with the DEV deploy role. **Where:** workstation (B7 setup), DEV.
+**Who:** an edw-dba member with the DEV service login. **Where:** a host inside the Jenkins egress range (B7 step
+4), DEV.
 
 **Do:**
 
@@ -1245,11 +1256,12 @@ by PR. From then on, drift stops the deploy until it is reconciled (RUNBOOKS R5)
 Limit: the kit's drift query sees tables and views (`LAST_DDL`) and functions and procedures (`LAST_ALTERED`); tasks,
 streams, pipes and alerts are covered only by the Enterprise check of G2. INFORMATION_SCHEMA shows only what the
 querying role can see, so the job runs the drift query with the target's deploy login, never the auditor. To look at
-drift by hand (a DBA with the runway's deploy role, B7):
+drift by hand, use the runway's service login in a B7 step 4 session (break-glass for MGM/PRD) and the `sfsql`
+helper from RUNBOOKS R0 (`snow sql` with the same key-pair login):
 
 ```bash
 python3 scripts/fw.py drift-sql --runway MGM > drift.sql
-snow sql --connection <your-mgm-deployer-connection> --format json --filename drift.sql > rows.json
+sfsql --format json --filename drift.sql > rows.json
 python3 scripts/fw.py drift-eval --runway MGM --rows rows.json      # exit 1 = the runway's gate would stop
 ```
 
@@ -1282,7 +1294,7 @@ python3 scripts/fw.py drift-eval --runway MGM --rows rows.json      # exit 1 = t
 - [ ] PRD: change ticket approved; window and on-call DBA booked; Time Travel retention checked.
 - [ ] PRD: dry-run report and rehearsal reviewed; drift clean or `ACK_DRIFT` justified in the ticket.
 - [ ] PRD: approver is not the starter; post-checks done; Time Travel point written into the ticket.
-- [ ] Hotfix only: back-merge done (F5 step 5); break-glass grants revoked; locks unreserved.
+- [ ] Hotfix only: back-merge done (F5 step 5); break-glass key copies deleted; locks unreserved.
 
 ### H3. Quarterly
 
@@ -1293,9 +1305,9 @@ python3 scripts/fw.py drift-eval --runway MGM --rows rows.json      # exit 1 = t
 - [ ] **Licence:** `flyway version -outputType=json` shows Enterprise and a `permitExpiry` more than 90 days away;
       CI PAT valid; offline permit renewed if used.
 - [ ] **Bitbucket tokens:** the Jenkins repository access token and any webhook secret still valid; rotate per policy.
-- [ ] **Access review:** `SHOW GRANTS OF ROLE EDW_MGM_DEPLOYER;` and `EDW_PRD_DEPLOYER` list only SYSADMIN and the
-      service user; SYSADMIN holders reviewed; AD approver groups, Jenkins role assignments and the Bitbucket
-      break-glass group reviewed.
+- [ ] **Access review:** `SHOW GRANTS OF ROLE EDW_<ID>_DEPLOYER;` lists only SYSADMIN and the service user on all
+      six runways; vault access to the six service keys matches B7; SYSADMIN holders reviewed; AD approver groups,
+      Jenkins role assignments and the Bitbucket break-glass group reviewed.
 - [ ] **Leftovers:** `SHOW DATABASES LIKE 'ALFA_EDW_RH_%';` returns nothing outside a running deploy (RUNBOOKS R12).
 - [ ] **Task budget:** `SHOW TASKS IN ACCOUNT;` then
       `SELECT COUNT(*) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "state" = 'started';` well under 10,000.
