@@ -1,12 +1,14 @@
 -- Flyway callback: afterMigrateError (runs when a migration of this `flyway migrate` FAILED; the afterMigrate
 --                  callbacks do not run then: no task restore, no cross-environment scan, no SUCCEEDED row).
 -- What   : writes the FAILED row of FLYWAY.DEPLOY_LOG, best effort, with what the operator needs first:
---          the migrations Flyway recorded as failed in this run and, where tasks_enabled = "true", the root tasks
---          that were started before the run (beforeMigrate__20 snapshot) and are suspended now.
+--          the migrations Flyway recorded as failed in this run and, where tasks_enabled = "true", the tasks that
+--          were started before the run (beforeMigrate__20 snapshot: roots and members of started graphs) and are
+--          suspended now; roots are marked "(root)".
 -- Why    : Snowflake DDL autocommits, so a failed migration is partly applied (Flyway records success=false) and
 --          the fix is manual cleanup + `flyway repair` + fix forward (docs/RUNBOOKS.md). Task graphs a migration
 --          suspended stay suspended ON PURPOSE: resuming production work against a half-applied change is worse
---          than a paused schedule. The listed roots are resumed by hand once the change is fixed.
+--          than a paused schedule. The listed tasks are resumed by hand once the change is fixed (RUNBOOKS R9:
+--          members first while the root is suspended, the root last).
 --          Flyway calls this callback from inside its own error handling and rethrows the migration error
 --          afterwards; an exception escaping from here would replace that original error. So the context query
 --          and the INSERT each sit in their own BEGIN ... EXCEPTION WHEN OTHER THEN ... END: a missing table or a
@@ -40,7 +42,8 @@ BEGIN
 
         IF ('${tasks_enabled}' = 'true') THEN
             SHOW TASKS IN DATABASE;
-            SELECT COALESCE(LISTAGG(DISTINCT s.TASK_FQN, ', '), '') INTO :stranded
+            SELECT COALESCE(LISTAGG(DISTINCT s.TASK_FQN || IFF(s.TASK_FQN = s.ROOT_FQN, ' (root)', ''), ', '), '')
+              INTO :stranded
               FROM FLYWAY.DEPLOY_TASK_STATE AS s
               JOIN TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t
                 ON s.TASK_FQN = '"' || REPLACE(t."database_name", '"', '""') || '"."'
@@ -54,8 +57,8 @@ BEGIN
         detail := 'migrate failed on ' || CURRENT_DATABASE() || '; failed migration(s): '
             || IFF(failed_list = '', 'none recorded in the history table', failed_list)
             || IFF(stranded = '', '',
-                   '; root task(s) started before this run and suspended now (resume after the fix): ' || stranded)
-            || '; afterMigrate callbacks (task restore, cross-environment guard) did not run';
+                   '; task(s) started before this run and suspended now (resume after the fix): ' || stranded)
+            || '; afterMigrate callbacks (cross-environment guard, task restore) did not run';
     EXCEPTION
         WHEN OTHER THEN
             detail := 'migrate failed on ' || CURRENT_DATABASE() || ' (context query failed: ' || SQLERRM || ')';

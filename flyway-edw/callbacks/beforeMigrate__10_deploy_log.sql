@@ -7,8 +7,8 @@
 --             Flyway runs beforeMigrate before the first migration, and a beforeMigrate failure does not trigger
 --             afterMigrateError, so the deploy simply stops.
 --          2. the audit trail: who deployed which build to which runway, approved by whom. afterMigrate__99 /
---             afterMigrateError__99 close it with SUCCEEDED / FAILED; afterMigrate__60 and __80 may add TASKS_* or
---             FAILED rows. A STARTED row with no later row for its DEPLOY_ID means the run died mid-way.
+--             afterMigrateError__99 close it with SUCCEEDED / FAILED; afterMigrate__50 and __60 may add FAILED or
+--             TASKS_* rows. A STARTED row with no later row for its DEPLOY_ID means the run died mid-way.
 -- Owner  : EDW platform team (kit code; projects do not edit callbacks). Ticket: EDW-0000.
 -- Notes  : FLYWAY.DEPLOY_LOG is created by bootstrap/20_runway_database.sql in every runway database; the callback
 --          names only FLYWAY.* (the session database is the runway, the session schema is FLYWAY).

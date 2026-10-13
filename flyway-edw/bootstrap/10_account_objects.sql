@@ -9,7 +9,8 @@
 --                                SVC_EDW_FLYWAY_AUDIT)
 --           PART 2  per runway:  warehouse WH_EDW_DEPLOY_<ID>, ETL warehouse WH_EDW_ETL_<ID>, role EDW_<ID>_DEPLOYER
 --                                (granted to SYSADMIN), service user SVC_EDW_FLYWAY_<ID>, EXECUTE TASK, and CREATE
---                                DATABASE for MGM / PRD only
+--                                DATABASE + EXECUTE ALERT for MGM / PRD only; 2e: the runway's access roles
+--                                EDW_<ID>_<SCHEMA>_READ / _WRITE (the layer-90 grantees)
 --           PART 3  after PART 1 and after every PART 2: network + authentication policy on every SVC_EDW_FLYWAY_*
 --           PART 4  public keys: the auditor's once, then each runway's own key
 --           PART 5  verification: a PASS / FAIL report for the runway in the SET block
@@ -17,6 +18,8 @@
 -- HOW     First time: edit PART 0, run PART 0 + 1, then PART 0 + 2 + 3 + 4 + 5 with runway = 'DEV'.
 --         Each further runway: set runway, run PART 0 + 2 + 3 + 4b + 5. Every statement is idempotent; re-running a
 --         part is safe. "Run All" in Snowsight stops at the first error, which is what you want here.
+--         A new schema with a layer-90 grants file: add its roles to access_roles, run PART 0 + 2e for EVERY runway
+--         (then bootstrap/20 PART 1's access-role block per runway) before the grants file merges.
 --         Keep a warehouse selected in the worksheet: the blocks read SHOW / DESC output with RESULT_SCAN, which
 --         needs one. People's sessions use their default secondary roles (ALL), so the warehouse you normally use
 --         stays usable after the USE ROLE switches below; if a block says "No active warehouse", USE WAREHOUSE yours.
@@ -32,9 +35,9 @@
 --   SECURITYADMIN  all grants (MANAGE GRANTS), network rules / policies, authentication policies, and attaching
 --                  them to users. It inherits USERADMIN, so it can alter the users USERADMIN owns.
 --   ACCOUNTADMIN   only ON ACCOUNT privileges, in two short blocks: APPLY AUTHENTICATION POLICY for SECURITYADMIN
---                  (PART 1d) and EXECUTE TASK / CREATE DATABASE for a deploy role (PART 2c). Snowflake documents
---                  EXECUTE TASK being granted by ACCOUNTADMIN; keeping every ON ACCOUNT grant in those two blocks
---                  makes them easy to audit.
+--                  (PART 1d) and EXECUTE TASK / CREATE DATABASE / EXECUTE ALERT for a deploy role (PART 2c).
+--                  Snowflake documents EXECUTE TASK and EXECUTE ALERT being granted by ACCOUNTADMIN; keeping every ON
+--                  ACCOUNT grant in those two blocks makes them easy to audit.
 --
 -- KEY PAIR (on a secured admin workstation; one key pair per service user, never shared between runways)
 --   umask 077
@@ -73,6 +76,11 @@ SET network_rule_name = 'NR_EDW_FLYWAY_JENKINS';
 SET network_policy_name = 'NP_EDW_FLYWAY_JENKINS';
 SET auth_policy_name = 'AP_EDW_FLYWAY_KEYPAIR';
 
+-- PART 2e: the access roles every runway gets, as <SCHEMA>_READ / <SCHEMA>_WRITE, comma-separated (upper case). One
+-- entry per role a layer-90 grants file names through ${role_prefix} (R__90_SALES__grants.sql grants to
+-- ${role_prefix}_SALES_READ = EDW_<ID>_SALES_READ). Add <SCHEMA>_WRITE only where a grants file grants to one.
+SET access_roles = 'SALES_READ,FINANCE_READ';
+
 -- Derived names (runways.toml / flyway.toml conventions). Do not edit.
 SET admin_schema_fqn = $admin_db || '.' || $admin_schema;
 SET deploy_role = 'EDW_' || $runway || '_DEPLOYER';
@@ -89,11 +97,14 @@ DECLARE
     nr VARCHAR;
     np VARCHAR;
     ap VARCHAR;
+    ar VARCHAR;
     bad_runway EXCEPTION (-20101, 'PART 0: runway must be one of DEV, SAN, SEA, PHX, MGM, PRD (upper case).');
     bad_name EXCEPTION (-20102, 'PART 0: admin_db, admin_schema and the policy names must be plain upper-case names.');
+    bad_access EXCEPTION (-20103, 'PART 0: access_roles must be comma-separated <SCHEMA>_READ / <SCHEMA>_WRITE.');
 BEGIN
-    SELECT $runway, $admin_db, $admin_schema, $network_rule_name, $network_policy_name, $auth_policy_name
-      INTO :rw, :adb, :asch, :nr, :np, :ap;
+    SELECT $runway, $admin_db, $admin_schema, $network_rule_name, $network_policy_name, $auth_policy_name,
+           REPLACE(COALESCE($access_roles, ''), ' ', '')
+      INTO :rw, :adb, :asch, :nr, :np, :ap, :ar;
     IF (rw IS NULL OR rw NOT IN ('DEV', 'SAN', 'SEA', 'PHX', 'MGM', 'PRD')) THEN
         RAISE bad_runway;
     END IF;
@@ -101,6 +112,9 @@ BEGIN
              AND REGEXP_LIKE(nr, '[A-Z][A-Z0-9_]*') AND REGEXP_LIKE(np, '[A-Z][A-Z0-9_]*')
              AND REGEXP_LIKE(ap, '[A-Z][A-Z0-9_]*'))) THEN
         RAISE bad_name;
+    END IF;
+    IF (NOT REGEXP_LIKE(ar, '[A-Z][A-Z0-9_]*_(READ|WRITE)(,[A-Z][A-Z0-9_]*_(READ|WRITE))*')) THEN
+        RAISE bad_access;
     END IF;
     RETURN 'PART 0 OK: runway ' || rw || ' -> EDW_' || rw || '_DEPLOYER / SVC_EDW_FLYWAY_' || rw
         || ' / WH_EDW_DEPLOY_' || rw || '; policies in ' || adb || '.' || asch;
@@ -289,16 +303,19 @@ ALTER USER IDENTIFIER($svc_user) SET
     QUOTED_IDENTIFIERS_IGNORE_CASE = FALSE;
 
 -- ----------------------------------------------------------------------------------------------- 2c ACCOUNTADMIN
--- EXECUTE TASK (always): a task runs, and SYSTEM$TASK_DEPENDENTS_ENABLE / ALTER TASK ... RESUME succeed, only if the
--- role that OWNS the task holds the account-level EXECUTE TASK privilege. The deploy role owns the runway's tasks, and
--- both the task repeatables (layer 80) and afterMigrate__60_task_restore resume graphs as that role.
-USE ROLE ACCOUNTADMIN;
-GRANT EXECUTE TASK ON ACCOUNT TO ROLE IDENTIFIER($deploy_role);
--- Only if the runway has serverless tasks (no WAREHOUSE clause; bootstrap/20 lists them during adoption):
--- GRANT EXECUTE MANAGED TASK ON ACCOUNT TO ROLE IDENTIFIER($deploy_role);
--- Only if the runway has alerts (layer 85): resuming an alert needs EXECUTE ALERT on its owner role:
--- GRANT EXECUTE ALERT ON ACCOUNT TO ROLE IDENTIFIER($deploy_role);
-
+-- EXECUTE TASK (every runway): a task runs, and SYSTEM$TASK_DEPENDENTS_ENABLE / ALTER TASK ... RESUME succeed, only if
+-- the role that OWNS the task holds the account-level EXECUTE TASK privilege. The deploy role owns the runway's tasks,
+-- and both the task repeatables (layer 80) and afterMigrate__60_task_restore resume graphs as that role.
+-- EXECUTE ALERT (MGM and PRD, granted below; not optional there): an alert runs, and ALTER ALERT ... RESUME
+-- succeeds, only if its owner holds EXECUTE ALERT on the account, and only ACCOUNTADMIN can grant it. MGM and PRD are
+-- the runways whose deploys resume alerts (tasks_enabled = "true"), so without it the first MGM deploy of a layer-85
+-- file fails at the resume, after its approval; bootstrap/20 PART 3 also refuses to adopt a database that holds
+-- alerts while the grant is missing. DEV / SAN / SEA / PHX need it only if they resume alerts (adoption of a
+-- database with running alerts, or a project that switches tasks on): then run, for that runway,
+--   GRANT EXECUTE ALERT ON ACCOUNT TO ROLE IDENTIFIER($deploy_role);
+-- Only for serverless tasks / alerts (no WAREHOUSE clause; bootstrap/20 PART 3 counts them during adoption):
+--   GRANT EXECUTE MANAGED TASK ON ACCOUNT TO ROLE IDENTIFIER($deploy_role);
+--   GRANT EXECUTE MANAGED ALERT ON ACCOUNT TO ROLE IDENTIFIER($deploy_role);
 -- CREATE DATABASE for the MGM and PRD deploy roles only. The deploy job rehearses every MGM/PRD release on a
 -- zero-copy clone ALFA_EDW_RH_<ID> (`fw.py rehearsal-sql`), and the clone must be created BY the deploy role: a clone
 -- contains only the tasks, pipes, streams and alerts the cloning role owns, so any other role would rehearse on an
@@ -306,21 +323,32 @@ GRANT EXECUTE TASK ON ACCOUNT TO ROLE IDENTIFIER($deploy_role);
 -- Trade-off: CREATE DATABASE is account-wide. The role can create any database, not only ALFA_EDW_RH_<ID>, and owns
 -- what it creates, so a stolen PRD key could copy production data into a new database and grant it out. Accepted
 -- because (a) that key works only from the Jenkins agents (network policy) and only in the EDW/deploy/PRD folder,
--- (b) fw.py refuses any rehearsal name other than ALFA_EDW_RH_<ID>, (c) PART 5 and bootstrap/90 list every database
--- these roles own, and (d) the alternative -- an owner's-rights clone procedure owned by another role -- would own
--- the clone's tasks and pipes itself and rehearse a different ownership model than production. DEV/SAN/SEA/PHX never
--- rehearse and do not get it.
+-- (b) fw.py refuses any rehearsal name other than ALFA_EDW_RH_<ID>, (c) PART 5 (check 5) and bootstrap/90 PART 1 list
+-- every database these roles own, and (d) the alternative -- an owner's-rights clone procedure owned by another role
+-- -- would own the clone's tasks and pipes itself and rehearse a different ownership model than production.
+-- DEV/SAN/SEA/PHX never rehearse and do not get it.
+-- The block re-derives the role from runway, so a partly re-run PART 0 cannot grant to another runway's role.
+USE ROLE ACCOUNTADMIN;
+
 EXECUTE IMMEDIATE $$
 DECLARE
     rw VARCHAR;
     r VARCHAR;
+    bad_vars EXCEPTION (-20125, 'PART 2c: runway and deploy_role disagree (or runway is invalid): re-run PART 0.');
 BEGIN
     SELECT $runway, $deploy_role INTO :rw, :r;
-    IF (rw IN ('MGM', 'PRD')) THEN
-        EXECUTE IMMEDIATE 'GRANT CREATE DATABASE ON ACCOUNT TO ROLE ' || :r;
-        RETURN 'PART 2c: EXECUTE TASK and CREATE DATABASE (rehearsal clones) granted to ' || r;
+    IF (rw IS NULL OR rw NOT IN ('DEV', 'SAN', 'SEA', 'PHX', 'MGM', 'PRD')
+        OR r IS DISTINCT FROM ('EDW_' || rw || '_DEPLOYER')) THEN
+        RAISE bad_vars;
     END IF;
-    RETURN 'PART 2c: EXECUTE TASK granted to ' || r || '; no CREATE DATABASE (only MGM / PRD rehearse)';
+    EXECUTE IMMEDIATE 'GRANT EXECUTE TASK ON ACCOUNT TO ROLE ' || :r;
+    IF (rw IN ('MGM', 'PRD')) THEN
+        EXECUTE IMMEDIATE 'GRANT EXECUTE ALERT ON ACCOUNT TO ROLE ' || :r;
+        EXECUTE IMMEDIATE 'GRANT CREATE DATABASE ON ACCOUNT TO ROLE ' || :r;
+        RETURN 'PART 2c: EXECUTE TASK, EXECUTE ALERT and CREATE DATABASE (rehearsal clones) granted to ' || r;
+    END IF;
+    RETURN 'PART 2c: EXECUTE TASK granted to ' || r || '; no CREATE DATABASE (only MGM / PRD rehearse); '
+        || 'EXECUTE ALERT only if this runway resumes alerts (see the comment above)';
 END;
 $$;
 
@@ -336,6 +364,77 @@ GRANT USAGE ON WAREHOUSE IDENTIFIER($deploy_wh) TO ROLE IDENTIFIER($deploy_role)
 -- Tasks run with their owner's privileges: the owner (the deploy role) needs USAGE on the warehouse they name.
 GRANT USAGE ON WAREHOUSE IDENTIFIER($etl_wh) TO ROLE IDENTIFIER($deploy_role);
 
+
+-- ---------------------------------------------------------------------------- 2e USERADMIN, then SECURITYADMIN
+-- The runway's ACCESS ROLES: EDW_<ID>_<SCHEMA>_READ / _WRITE for every entry of access_roles (PART 0). The layer-90
+-- grants files grant to them through ${role_prefix} (R__90_SALES__grants.sql: ${role_prefix}_SALES_READ), and a
+-- migration never creates a role (guard FG007), so they MUST exist on every runway before the first deploy of a
+-- grants file that names them: a missing role fails that file on that runway, and its Failed history row blocks
+-- every later deploy there until RUNBOOKS R1. Run this section for all six runways whenever access_roles grows.
+-- Each role rolls up to SYSADMIN like every custom role. Who holds them (people, groups, functional roles) is your
+-- access process, not the kit's. USAGE on the runway database is a database-level grant: bootstrap/20 PART 1 gives
+-- it to every EDW_<ID>_*_READ / _WRITE role (run it after this section).
+USE ROLE USERADMIN;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    rw VARCHAR;
+    ar VARCHAR;
+    parts ARRAY;
+    n INTEGER;
+    role_name VARCHAR;
+    report VARCHAR DEFAULT '';
+    bad_list EXCEPTION (-20126, 'PART 2e: access_roles must be <SCHEMA>_READ / <SCHEMA>_WRITE entries (see PART 0).');
+BEGIN
+    SELECT $runway, REPLACE(COALESCE($access_roles, ''), ' ', '') INTO :rw, :ar;
+    IF (rw IS NULL OR rw NOT IN ('DEV', 'SAN', 'SEA', 'PHX', 'MGM', 'PRD')
+        OR NOT REGEXP_LIKE(ar, '[A-Z][A-Z0-9_]*_(READ|WRITE)(,[A-Z][A-Z0-9_]*_(READ|WRITE))*')) THEN
+        RAISE bad_list;
+    END IF;
+    parts := SPLIT(ar, ',');
+    n := ARRAY_SIZE(parts);
+    FOR i IN 1 TO n DO
+        role_name := 'EDW_' || rw || '_' || GET(parts, i - 1)::VARCHAR;
+        EXECUTE IMMEDIATE 'CREATE ROLE IF NOT EXISTS ' || :role_name
+            || ' COMMENT = ''ALFA EDW access role: layer-90 grants files grant to it (bootstrap/10 PART 2e)''';
+        report := report || 'ok      ' || role_name || CHR(10);
+    END FOR;
+    RETURN 'PART 2e: ' || n || ' access role(s) for runway ' || rw || CHR(10) || report;
+END;
+$$;
+
+USE ROLE SECURITYADMIN;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    rw VARCHAR;
+    ar VARCHAR;
+    parts ARRAY;
+    n INTEGER;
+    role_name VARCHAR;
+    report VARCHAR DEFAULT '';
+    bad_list EXCEPTION (-20127, 'PART 2e: access_roles must be <SCHEMA>_READ / <SCHEMA>_WRITE entries (see PART 0).');
+BEGIN
+    SELECT $runway, REPLACE(COALESCE($access_roles, ''), ' ', '') INTO :rw, :ar;
+    IF (rw IS NULL OR rw NOT IN ('DEV', 'SAN', 'SEA', 'PHX', 'MGM', 'PRD')
+        OR NOT REGEXP_LIKE(ar, '[A-Z][A-Z0-9_]*_(READ|WRITE)(,[A-Z][A-Z0-9_]*_(READ|WRITE))*')) THEN
+        RAISE bad_list;
+    END IF;
+    parts := SPLIT(ar, ',');
+    n := ARRAY_SIZE(parts);
+    FOR i IN 1 TO n DO
+        role_name := 'EDW_' || rw || '_' || GET(parts, i - 1)::VARCHAR;
+        BEGIN
+            EXECUTE IMMEDIATE 'GRANT ROLE ' || :role_name || ' TO ROLE SYSADMIN';
+            report := report || 'ok      ' || role_name || ' granted to SYSADMIN' || CHR(10);
+        EXCEPTION
+            WHEN OTHER THEN
+                report := report || 'FAILED  ' || role_name || ': ' || SQLERRM || CHR(10);
+        END;
+    END FOR;
+    RETURN 'PART 2e: access roles of runway ' || rw || ' under SYSADMIN' || CHR(10) || report;
+END;
+$$;
 
 -- =====================================================================================================================
 -- PART 3 -- network policy + authentication policy on every SVC_EDW_FLYWAY_* user (SECURITYADMIN)
@@ -461,12 +560,15 @@ DECLARE
     uu VARCHAR;
     fp1 VARCHAR;
     fp2 VARCHAR;
+    c5 INTEGER;
+    dbs VARCHAR;
+    ar VARCHAR;
     seen VARCHAR DEFAULT '|';
     report VARCHAR DEFAULT '';
 BEGIN
     SELECT $runway, $svc_user, $deploy_role, $deploy_wh, $etl_wh, $network_policy_name, $admin_db, $admin_schema,
-           $auth_policy_name
-      INTO :rw, :u, :r, :wh, :ewh, :np, :adb, :asch, :ap;
+           $auth_policy_name, REPLACE(COALESCE($access_roles, ''), ' ', '')
+      INTO :rw, :u, :r, :wh, :ewh, :np, :adb, :asch, :ap, :ar;
     report := 'INFO   runway ' || rw || ': user ' || u || ', role ' || r || ', warehouse ' || wh || CHR(10);
 
     -- (1) the service user's properties
@@ -480,15 +582,19 @@ BEGIN
                       || '   DEFAULT_WAREHOUSE = ' || t."value"
                  WHEN 'DEFAULT_SECONDARY_ROLES' THEN IFF(COALESCE(t."value", '') IN ('[]', '', 'null'), 'PASS', 'CHECK')
                       || '   DEFAULT_SECONDARY_ROLES = ' || COALESCE(t."value", '') || ' (want empty)'
-                 WHEN 'RSA_PUBLIC_KEY_FP' THEN IFF(STARTSWITH(COALESCE(t."value", ''), 'SHA256:'), 'PASS', 'FAIL')
-                      || '   RSA_PUBLIC_KEY_FP = ' || COALESCE(t."value", '(none: PART 4b)')
-                      || '  -- must equal the openssl fingerprint of THIS runway''s key'
-                 END, CHR(10)) WITHIN GROUP (ORDER BY t."property")
-          INTO :v
+                 END, CHR(10)) WITHIN GROUP (ORDER BY t."property"),
+               MAX(IFF(t."property" = 'RSA_PUBLIC_KEY_FP', NULLIF(NULLIF(t."value", 'null'), ''), NULL)),
+               MAX(IFF(t."property" = 'RSA_PUBLIC_KEY_2_FP', NULLIF(NULLIF(t."value", 'null'), ''), NULL))
+          INTO :v, :fp1, :fp2
           FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t
          WHERE t."property" IN ('TYPE', 'DISABLED', 'DEFAULT_ROLE', 'DEFAULT_WAREHOUSE', 'DEFAULT_SECONDARY_ROLES',
-                                'RSA_PUBLIC_KEY_FP');
-        report := report || COALESCE(v, 'FAIL   DESC USER returned no properties') || CHR(10);
+                                'RSA_PUBLIC_KEY_FP', 'RSA_PUBLIC_KEY_2_FP');
+        -- Two key slots: after a zero-downtime rotation (PART 4) the live key may sit in slot 2.
+        report := report || COALESCE(v, 'FAIL   DESC USER returned no properties') || CHR(10)
+            || IFF(STARTSWITH(COALESCE(fp1, ''), 'SHA256:') OR STARTSWITH(COALESCE(fp2, ''), 'SHA256:'), 'PASS', 'FAIL')
+            || '   RSA_PUBLIC_KEY_FP = ' || COALESCE(fp1, '(none)') || ', RSA_PUBLIC_KEY_2_FP = '
+            || COALESCE(fp2, '(none)') || IFF(fp1 IS NULL AND fp2 IS NULL, ' (no key: PART 4b)', '')
+            || '  -- one must equal the openssl fingerprint of THIS runway''s key' || CHR(10);
     EXCEPTION
         WHEN OTHER THEN
             report := report || 'FAIL   DESC USER ' || u || ': ' || SQLERRM || CHR(10);
@@ -554,14 +660,33 @@ BEGIN
         SELECT COUNT_IF(t."privilege" = 'USAGE' AND t."granted_on" = 'WAREHOUSE' AND t."name" = :wh),
                COUNT_IF(t."privilege" = 'USAGE' AND t."granted_on" = 'WAREHOUSE' AND t."name" = :ewh),
                COUNT_IF(t."privilege" = 'EXECUTE TASK' AND t."granted_on" = 'ACCOUNT'),
-               COUNT_IF(t."privilege" = 'CREATE DATABASE' AND t."granted_on" = 'ACCOUNT')
-          INTO :c1, :c2, :c3, :c4
+               COUNT_IF(t."privilege" = 'CREATE DATABASE' AND t."granted_on" = 'ACCOUNT'),
+               COUNT_IF(t."privilege" = 'EXECUTE ALERT' AND t."granted_on" = 'ACCOUNT'),
+               LISTAGG(IFF(t."privilege" = 'OWNERSHIP' AND t."granted_on" = 'DATABASE', t."name", NULL), ', ')
+                   WITHIN GROUP (ORDER BY t."name")
+          INTO :c1, :c2, :c3, :c4, :c5, :dbs
           FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t;
         report := report || IFF(c1 > 0, 'PASS', 'FAIL') || '   USAGE on ' || wh || CHR(10)
             || IFF(c2 > 0, 'PASS', 'FAIL') || '   USAGE on ' || ewh || ' (task warehouse)' || CHR(10)
             || IFF(c3 > 0, 'PASS', 'FAIL') || '   EXECUTE TASK on account' || CHR(10)
             || IFF((c4 > 0) = (rw IN ('MGM', 'PRD')), 'PASS', 'FAIL') || '   CREATE DATABASE on account: '
-            || IFF(c4 > 0, 'yes', 'no') || ' (want ' || IFF(rw IN ('MGM', 'PRD'), 'yes', 'no') || ')' || CHR(10);
+            || IFF(c4 > 0, 'yes', 'no') || ' (want ' || IFF(rw IN ('MGM', 'PRD'), 'yes', 'no') || ')' || CHR(10)
+            || IFF(c5 > 0, 'PASS', IFF(rw IN ('MGM', 'PRD'), 'FAIL', 'INFO')) || '   EXECUTE ALERT on account: '
+            || IFF(c5 > 0, 'yes', 'no') || IFF(rw IN ('MGM', 'PRD'), ' (want yes: MGM / PRD resume alerts, PART 2c)',
+                                                 ' (needed only if this runway resumes alerts, PART 2c)') || CHR(10);
+        -- Databases the deploy role OWNS (it creates rehearsal clones; anything else is a leftover or misuse).
+        -- MGM / PRD: only ALFA_EDW_RH_<ID>, and only while a deploy job rehearses (else: a leftover clone, RUNBOOKS
+        -- R12). Other runways have no CREATE DATABASE and should own none.
+        IF (COALESCE(dbs, '') = '') THEN
+            report := report || 'PASS   ' || r || ' owns no database' || CHR(10);
+        ELSEIF (rw IN ('MGM', 'PRD') AND dbs = 'ALFA_EDW_RH_' || rw) THEN
+            report := report || 'CHECK  ' || r || ' owns database(s): ' || dbs || ' (the rehearsal clone: fine only '
+                || 'while a deploy job runs; otherwise drop it, RUNBOOKS R12)' || CHR(10);
+        ELSE
+            report := report || 'FAIL   ' || r || ' owns database(s): ' || dbs || ' (expected none'
+                || IFF(rw IN ('MGM', 'PRD'), ' but a running rehearsal clone ALFA_EDW_RH_' || rw, '')
+                || '; find out who created it and why)' || CHR(10);
+        END IF;
     EXCEPTION
         WHEN OTHER THEN
             report := report || 'FAIL   SHOW GRANTS TO ROLE ' || r || ': ' || SQLERRM || CHR(10);
@@ -616,6 +741,23 @@ BEGIN
     EXCEPTION
         WHEN OTHER THEN
             report := report || 'FAIL   SHOW GRANTS TO ROLE EDW_FLYWAY_AUDITOR: ' || SQLERRM || CHR(10);
+    END;
+
+    -- (8) this runway's access roles (PART 2e): exist (the layer-90 grants files fail without them)
+    BEGIN
+        EXECUTE IMMEDIATE 'SHOW ROLES LIKE ''EDW_' || :rw || '_%''';
+        -- EDW_<ID>_ is LENGTH(rw) + 5 characters: what follows it is the access_roles entry
+        SELECT ARRAY_TO_STRING(ARRAY_EXCEPT(SPLIT(:ar, ','),
+                                            COALESCE(ARRAY_AGG(SUBSTR(t."name", LENGTH(:rw) + 6)), ARRAY_CONSTRUCT())),
+                               ', ')
+          INTO :v
+          FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t
+         WHERE STARTSWITH(t."name", 'EDW_' || :rw || '_');
+        report := report || IFF(COALESCE(v, '') = '', 'PASS', 'FAIL') || '   access roles EDW_' || rw || '_<' || ar
+            || '>' || IFF(COALESCE(v, '') = '', ' exist', ': missing ' || v || ' (PART 2e)') || CHR(10);
+    EXCEPTION
+        WHEN OTHER THEN
+            report := report || 'FAIL   access-role check: ' || SQLERRM || CHR(10);
     END;
 
     RETURN report;

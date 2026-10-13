@@ -1,4 +1,4 @@
--- Flyway callback: afterMigrate (runs only after a SUCCESSFUL migrate; last of 60_task_restore, 80_cross_env_guard,
+-- Flyway callback: afterMigrate (runs only after a SUCCESSFUL migrate; last of 50_cross_env_guard, 60_task_restore,
 --                  99_deploy_log). It is reached only when both earlier callbacks passed.
 -- What   : writes the SUCCEEDED row of FLYWAY.DEPLOY_LOG for this deploy, with what the run applied: the number
 --          of versioned and repeatable migrations Flyway recorded since this run's STARTED row, and their versions.

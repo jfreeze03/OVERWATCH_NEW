@@ -10,7 +10,8 @@
 -- REMOVED     (when uncommented) what bootstrap/10 and 20 created for the kit: the service users, the deploy and
 --             auditor roles, the deploy and auditor warehouses, the network rule / network policy / authentication
 --             policy, the admin schema, and leftovers of the deploy job (rehearsal clones ALFA_EDW_RH_<ID>) and of
---             bootstrap/30 (parked runways <runway>_PRE_REFRESH).
+--             bootstrap/30 (parked runways <runway>_PRE_REFRESH). The runway's access roles EDW_<ID>_<SCHEMA>_READ /
+--             _WRITE (bootstrap/10 PART 2e) only if nothing outside the kit uses them (step 2.6b).
 -- ORDER       Logins first (nothing can deploy while you work), then what references other things before what is
 --             referenced: a user's policies are unset before the user goes; a network policy goes before its network
 --             rule (a rule assigned to a policy cannot be dropped); an authentication policy goes only when no user
@@ -56,6 +57,7 @@ DECLARE
     v VARCHAR;
     c1 INTEGER;
     c2 INTEGER;
+    acc VARCHAR;
     report VARCHAR DEFAULT '';
 BEGIN
     SELECT $svc_user, $deploy_role INTO :u, :r;
@@ -97,12 +99,16 @@ BEGIN
     END;
 
     SHOW ROLES LIKE 'EDW_%';
-    SELECT LISTAGG(t."name", ', ') WITHIN GROUP (ORDER BY t."name"), COUNT_IF(t."name" = 'EDW_FLYWAY_AUDITOR')
-      INTO :v, :c2
-      FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t
-     WHERE ENDSWITH(t."name", '_DEPLOYER') OR t."name" = 'EDW_FLYWAY_AUDITOR';
+    SELECT LISTAGG(IFF(ENDSWITH(t."name", '_DEPLOYER') OR t."name" = 'EDW_FLYWAY_AUDITOR', t."name", NULL), ', ')
+               WITHIN GROUP (ORDER BY t."name"),
+           COUNT_IF(t."name" = 'EDW_FLYWAY_AUDITOR'),
+           LISTAGG(IFF(REGEXP_LIKE(t."name", 'EDW_[A-Z]+_[A-Z][A-Z0-9_]*_(READ|WRITE)'), t."name", NULL), ', ')
+               WITHIN GROUP (ORDER BY t."name")
+      INTO :v, :c2, :acc
+      FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t;
     report := report || 'kit roles: ' || COALESCE(v, '(none)') || '; auditor role '
-        || IFF(c2 > 0, 'present', 'absent') || CHR(10);
+        || IFF(c2 > 0, 'present', 'absent') || CHR(10)
+        || 'access roles (bootstrap/10 PART 2e; step 2.6b): ' || COALESCE(NULLIF(acc, ''), '(none)') || CHR(10);
     RETURN report;
 END;
 $$;
@@ -157,6 +163,12 @@ SHOW DATABASES LIKE '%_PRE_REFRESH';
 -- GRANT OWNERSHIP ON ROLE IDENTIFIER($deploy_role) TO ROLE SYSADMIN COPY CURRENT GRANTS;
 -- USE ROLE SYSADMIN;
 -- DROP ROLE IF EXISTS IDENTIFIER($deploy_role);
+
+-- 2.6b USERADMIN -- the runway's access roles (bootstrap/10 PART 2e), ONLY if no consumer outside the kit holds or
+--      uses them (SHOW GRANTS OF ROLE <role> first): the layer-90 grants files are their only source of privileges,
+--      and a dropped role takes every grant to it along. One line per role listed by PART 1, for example:
+-- USE ROLE USERADMIN;
+-- DROP ROLE IF EXISTS EDW_<ID>_SALES_READ;
 
 -- 2.7  SYSADMIN -- the deploy warehouse. (WH_EDW_ETL_<ID> is NOT removed: it runs the runway's own tasks.)
 -- USE ROLE SYSADMIN;

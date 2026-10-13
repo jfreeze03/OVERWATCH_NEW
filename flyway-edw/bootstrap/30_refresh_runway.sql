@@ -7,7 +7,9 @@
 --                   drops or that would load PRD, PRD code naming ALFA_EDW_PRD (3-part names), objects the cloning
 --                   role does not own, a PRD deploy in flight. Then SET prechecks_reviewed = TRUE.
 --           PART 2  SYSADMIN          pause the outgoing runway's schedules and park it as ALFA_EDW_<ID>_PRE_REFRESH
---           PART 3  EDW_PRD_DEPLOYER  CREATE OR REPLACE DATABASE ALFA_EDW_<ID> CLONE ALFA_EDW_PRD
+--                                     (PART 2R, commented: undo PART 2 when PART 3 cannot complete)
+--           PART 3  EDW_PRD_DEPLOYER  CREATE OR REPLACE DATABASE ALFA_EDW_<ID> CLONE ALFA_EDW_PRD (only while the
+--                                     runway is parked: it refuses to replace a database it does not own)
 --           PART 4  EDW_PRD_DEPLOYER  every schema + object -> EDW_<ID>_DEPLOYER (schema-wide, COPY CURRENT
 --                                     GRANTS); the database -> SYSADMIN
 --           PART 5  SYSADMIN          database-level grants (they are never cloned): kit grants + the parked
@@ -26,7 +28,14 @@
 --           parked copy keeps it until PART 8).
 -- WHO     A Snowflake admin holding SYSADMIN, SECURITYADMIN and (PART 1a only) ACCOUNTADMIN, in Snowsight. PARTs 3-4
 --         run as EDW_PRD_DEPLOYER, which SYSADMIN holders inherit (bootstrap/10): using the PRD deploy role by hand
---         is break-glass (GUIDE B7) -- record this refresh in the change ticket.
+--         is break-glass (GUIDE B7) -- record this refresh in the change ticket. PARTs 3-4 switch secondary roles
+--         off (USE SECONDARY ROLES NONE: only the PRD deploy role acts, never your SYSADMIN), PART 5 switches them
+--         back on (USE SECONDARY ROLES ALL). PARTs 5-7 run on the runway's deploy warehouse WH_EDW_DEPLOY_<ID>
+--         (SYSADMIN owns it), not on PRD's; PART 6 runs as SECURITYADMIN, which has no USAGE on it and uses it
+--         through your secondary roles (SYSADMIN): if PART 6 says "No active warehouse", USE WAREHOUSE one that
+--         SECURITYADMIN may use.
+--         Every part that changes something re-checks target_runway, allow_mgm and the derived names from PART 0
+--         (a stale SET from an earlier session can never point a part at PRD, DEV, or MGM without allow_mgm).
 -- WHY EDW_PRD_DEPLOYER CLONES
 --   A clone contains only what the cloning role may see: SELECT for tables, USAGE for most objects, and OWNERSHIP for
 --   tasks, pipes, streams and alerts. The PRD deploy role owns all of them (bootstrap/20 PART 3), so its clone is
@@ -36,8 +45,11 @@
 --   * Grants on child objects come along (PRD functional roles included: PART 6); grants on the database do not
 --     (PART 5). Schema-level future grants come along (PART 6 re-points them).
 --   * Tasks, alerts and dynamic tables arrive SUSPENDED; auto-ingest pipes arrive STOPPED_CLONED, others paused;
---     pipes on internal stages and external tables are not cloned; hybrid tables are skipped (IGNORE HYBRID TABLES);
---     streams start at the clone point (unconsumed PRD changes are not readable).
+--     named internal stages (and so their files and pipes) are not cloned unless include_internal_stages = TRUE;
+--     external tables are not cloned; hybrid tables are skipped (IGNORE HYBRID TABLES); streams start at the clone
+--     point (unconsumed PRD changes are not readable).
+--   * Tasks, dynamic tables and alerts keep the warehouse named in PRD (WH_EDW_ETL_PRD): set the runway's own
+--     before any resume (PART 7a flags them, PART 8 item 6).
 --   * Definitions are copied verbatim: a view / procedure / task that names ALFA_EDW_PRD keeps reading or writing
 --     PRD from the runway, and a pipe whose COPY target is schema-qualified loads the PRD table once resumed.
 --   * FLYWAY comes along: the runway's history becomes PRD's, so the runway is at PRD's state and still baselined.
@@ -64,6 +76,7 @@ SET include_internal_stages = FALSE;
 -- Derived names. Do not edit.
 SET target_db = 'ALFA_EDW_' || $target_runway;
 SET target_role = 'EDW_' || $target_runway || '_DEPLOYER';
+SET target_wh = 'WH_EDW_DEPLOY_' || $target_runway;
 SET parked_db = $target_db || '_PRE_REFRESH';
 
 USE ROLE SYSADMIN;
@@ -114,6 +127,13 @@ $$;
 -- the parked copy later (PART 8); PRD objects governed from outside PRD stay governed by that outside policy in the
 -- runway (shared governance: changing it changes every runway).
 USE ROLE ACCOUNTADMIN;
+
+-- Behavior change bundle 2026_07 (BCR-2365): until it is enabled, cloning a database whose EVENT_TABLE parameter is
+-- set at database level FAILS for any role but ACCOUNTADMIN, and PART 3 clones as EDW_PRD_DEPLOYER. PART 1b rates a
+-- database-level EVENT_TABLE on PRD from this value. If the second SET fails (the bundle name is unknown to your
+-- account), keep 'UNKNOWN' and continue with the next statement: the finding is then rated BLOCKER.
+SET bcr_2026_07 = 'UNKNOWN';
+SET bcr_2026_07 = (SELECT SYSTEM$BEHAVIOR_CHANGE_BUNDLE_STATUS('2026_07'));
 
 SELECT CASE
            WHEN r.POLICY_DB = $target_db THEN 'BLOCKS PART 8 DROP: a runway policy protects an object outside it'
@@ -233,7 +253,7 @@ findings AS (
     UNION ALL
     SELECT 2, 'HIGH', 'CROSS_DB_REFERENCE', c.KIND || ' ' || c.OBJECT_NAME,
            'names ' || REGEXP_SUBSTR(UPPER(c.DEF), 'ALFA_EDW_[A-Z0-9_]+') || ': the runway copy keeps using that '
-           || 'database, and afterMigrate__80_cross_env_guard fails every deploy to the runway until it is fixed'
+           || 'database, and afterMigrate__50_cross_env_guard fails every deploy to the runway until it is fixed'
       FROM code AS c
      WHERE REGEXP_INSTR(UPPER(c.DEF), 'ALFA_EDW_[A-Z0-9_]+"?[.]') > 0
     UNION ALL
@@ -268,9 +288,20 @@ findings AS (
      WHERE STARTSWITH(p.STAGE_REF, '%') OR STARTSWITH(p.STAGE_REF, '~')
         OR REPLACE(SPLIT_PART(p.STAGE_REF, '.', -1), '"', '') IN (SELECT i.STAGE_NAME FROM internal_stages AS i)
     UNION ALL
-    SELECT 3, 'WARN', 'EVENT_TABLE_SET', 'DATABASE ALFA_EDW_PRD',
-           'EVENT_TABLE = ' || e."value"::VARCHAR || ' at database level: a clone by a role other than ACCOUNTADMIN '
-           || 'may fail or not copy it; re-set it on the runway if needed (verify on first run)'
+    SELECT 3, 'WARN', 'INTERNAL_STAGE', 'STAGE ' || s."schema_name"::VARCHAR || '.' || s."name"::VARCHAR,
+           'not cloned (include_internal_stages = FALSE): it and its files are absent in the runway, and COPY / PUT, '
+           || 'pipes and file formats that name it fail there (PART 8)'
+      FROM TABLE(RESULT_SCAN($qid_stages)) AS s
+     WHERE UPPER(s."type"::VARCHAR) LIKE 'INTERNAL%' AND NOT COALESCE($include_internal_stages, FALSE)
+    UNION ALL
+    SELECT IFF($bcr_2026_07 IN ('ENABLED', 'RELEASED'), 3, 1),
+           IFF($bcr_2026_07 IN ('ENABLED', 'RELEASED'), 'WARN', 'BLOCKER'),
+           'EVENT_TABLE_SET', 'DATABASE ALFA_EDW_PRD',
+           'EVENT_TABLE = ' || e."value"::VARCHAR || ' at database level; bundle 2026_07 is ' || $bcr_2026_07
+           || IFF($bcr_2026_07 IN ('ENABLED', 'RELEASED'),
+                  ': the clone does not copy it; after PART 3, ACCOUNTADMIN re-sets it on the runway if needed',
+                  ': PART 3 (a clone by EDW_PRD_DEPLOYER) FAILS on it and leaves the runway parked. Enable bundle '
+                  || '2026_07 (ACCOUNTADMIN, after reviewing it), or UNSET it on PRD for the clone and re-set it')
       FROM TABLE(RESULT_SCAN($qid_evt)) AS e
      WHERE UPPER(e."level"::VARCHAR) = 'DATABASE' AND COALESCE(e."value"::VARCHAR, '') <> ''
     UNION ALL
@@ -302,28 +333,46 @@ SELECT f.SEVERITY, f.CHECK_NAME, f.OBJECT_NAME, f.DETAIL
 -- PART 2 -- park the current runway (SYSADMIN, the database owner)
 -- =====================================================================================================================
 -- The outgoing runway is renamed, not dropped: it stays a complete fallback until PART 8, and its database-level
--- grants are the template PART 5 re-applies. Its tasks, alerts and dynamic tables are suspended and its pipes paused
--- first, so the parked copy cannot keep running (and spending) under its new name. Renaming also frees the name for
--- the clone: EDW_PRD_DEPLOYER could never replace a database SYSADMIN owns.
+-- grants are the template PART 5 re-applies. Its started root tasks (their graphs stop with them; finalizers follow
+-- their root) and started alerts are suspended, its running dynamic tables suspended and its pipes paused first, so
+-- the parked copy cannot keep running (and spending) under its new name. The suspended roots are recorded in the
+-- runway's own FLYWAY.DEPLOY_TASK_STATE (DEPLOY_ID REFRESH-<ID>-<timestamp>) before the rename, so the list travels
+-- with the parked copy; the report lists every object it paused ('-- ok' lines): PART 2R undoes exactly those.
+-- Renaming also frees the name for the clone; PART 3 refuses to replace a database that is not parked.
 -- A parked copy from an earlier refresh must be dropped first (PART 8): one parked copy per runway, by design.
 USE ROLE SYSADMIN;
 
 EXECUTE IMMEDIATE $$
 DECLARE
     reviewed BOOLEAN;
+    rw VARCHAR;
+    mgm_ok BOOLEAN;
     tgt VARCHAR;
+    trole VARCHAR;
     parked VARCHAR;
     n_tgt INTEGER;
     n_parked INTEGER;
+    roots ARRAY;
     obj_list ARRAY;
     part_list ARRAY;
     n INTEGER;
+    fqn VARCHAR;
     stmt VARCHAR;
+    refresh_id VARCHAR;
+    state_tbl VARCHAR;
     report VARCHAR DEFAULT '';
     not_reviewed EXCEPTION (-20311, 'PART 2: read the PART 1 reports, then SET prechecks_reviewed = TRUE.');
     parked_exists EXCEPTION (-20312, 'PART 2: <runway>_PRE_REFRESH exists from an earlier refresh: drop it (PART 8).');
+    bad_target EXCEPTION (-20313,
+        'PART 2: target must be SAN, SEA, PHX or MGM (allow_mgm) and match PART 0 names: re-run PART 0. Nothing done.');
 BEGIN
-    SELECT $prechecks_reviewed, $target_db, $parked_db INTO :reviewed, :tgt, :parked;
+    SELECT $prechecks_reviewed, $target_runway, $allow_mgm, $target_db, $target_role, $parked_db
+      INTO :reviewed, :rw, :mgm_ok, :tgt, :trole, :parked;
+    IF (NOT COALESCE(rw IN ('SAN', 'SEA', 'PHX') OR (rw = 'MGM' AND COALESCE(mgm_ok, FALSE)), FALSE)
+        OR tgt IS DISTINCT FROM ('ALFA_EDW_' || rw) OR trole IS DISTINCT FROM ('EDW_' || rw || '_DEPLOYER')
+        OR parked IS DISTINCT FROM (tgt || '_PRE_REFRESH')) THEN
+        RAISE bad_target;
+    END IF;
     IF (NOT COALESCE(reviewed, FALSE)) THEN
         RAISE not_reviewed;
     END IF;
@@ -338,14 +387,46 @@ BEGIN
         RAISE parked_exists;
     END IF;
 
-    -- one statement per object; a failure is reported, the rest continue
+    -- started root tasks (not finalizers: they follow their root)
     EXECUTE IMMEDIATE 'SHOW TASKS IN DATABASE ' || :tgt;
-    SELECT COALESCE(ARRAY_AGG('ALTER TASK "' || REPLACE(t."database_name", '"', '""') || '"."'
-               || REPLACE(t."schema_name", '"', '""') || '"."' || REPLACE(t."name", '"', '""') || '" SUSPEND'),
-               ARRAY_CONSTRUCT())
-      INTO :obj_list
-      FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t
-     WHERE LOWER(t."state") = 'started';
+    SELECT COALESCE(ARRAY_AGG(x.FQN) WITHIN GROUP (ORDER BY x.FQN), ARRAY_CONSTRUCT())
+      INTO :roots
+      FROM (SELECT '"' || REPLACE(t."database_name", '"', '""') || '"."' || REPLACE(t."schema_name", '"', '""')
+                   || '"."' || REPLACE(t."name", '"', '""') || '"' AS FQN,
+                   LOWER(t."state") AS STATE,
+                   REGEXP_REPLACE(COALESCE(t."predecessors"::VARCHAR, '[]'), '[[:space:]]', '') = '[]' AS IS_ROOT,
+                   NULLIF(GET(TRY_PARSE_JSON(GET(OBJECT_CONSTRUCT(*), 'task_relations')::VARCHAR),
+                              'FinalizedRootTask')::VARCHAR, '') AS FIN_OF
+              FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t) AS x
+     WHERE x.STATE = 'started' AND x.IS_ROOT AND x.FIN_OF IS NULL;
+
+    -- record them in the runway's own snapshot table before anything changes (best effort: the report lists them too)
+    refresh_id := 'REFRESH-' || rw || '-' || TO_CHAR(CURRENT_TIMESTAMP(), 'YYYYMMDDHH24MISS');
+    state_tbl := tgt || '.FLYWAY.DEPLOY_TASK_STATE';
+    n := ARRAY_SIZE(roots);
+    IF (n > 0) THEN
+        BEGIN
+            FOR i IN 1 TO n DO
+                fqn := GET(roots, i - 1)::VARCHAR;
+                INSERT INTO IDENTIFIER(:state_tbl) (DEPLOY_ID, TASK_FQN, STATE_BEFORE, CAPTURED_TS, ROOT_FQN)
+                VALUES (:refresh_id, :fqn, 'started', CURRENT_TIMESTAMP(), :fqn);
+            END FOR;
+            report := report || '-- started roots recorded in ' || state_tbl || ' as DEPLOY_ID ' || refresh_id
+                || CHR(10);
+        EXCEPTION
+            WHEN OTHER THEN
+                report := report || '-- WARNING roots NOT recorded in ' || state_tbl || ' (' || SQLERRM
+                    || '): keep this report for PART 2R' || CHR(10);
+        END;
+    END IF;
+    obj_list := ARRAY_CONSTRUCT();
+    IF (ARRAY_SIZE(roots) > 0) THEN
+        FOR i IN 1 TO ARRAY_SIZE(roots) DO
+            obj_list := ARRAY_APPEND(obj_list, 'ALTER TASK ' || GET(roots, i - 1)::VARCHAR || ' SUSPEND');
+        END FOR;
+    END IF;
+
+    -- started alerts, running dynamic tables, every pipe; one statement per object, a failure is reported
     EXECUTE IMMEDIATE 'SHOW ALERTS IN DATABASE ' || :tgt;
     SELECT COALESCE(ARRAY_AGG('ALTER ALERT "' || REPLACE(t."database_name", '"', '""') || '"."'
                || REPLACE(t."schema_name", '"', '""') || '"."' || REPLACE(t."name", '"', '""') || '" SUSPEND'),
@@ -355,11 +436,14 @@ BEGIN
      WHERE LOWER(t."state") = 'started';
     obj_list := ARRAY_CAT(obj_list, part_list);
     EXECUTE IMMEDIATE 'SHOW DYNAMIC TABLES IN DATABASE ' || :tgt;
-    SELECT COALESCE(ARRAY_AGG('ALTER DYNAMIC TABLE "' || REPLACE(t."database_name", '"', '""')
-               || '"."' || REPLACE(t."schema_name", '"', '""') || '"."' || REPLACE(t."name", '"', '""')
+    SELECT COALESCE(ARRAY_AGG('ALTER DYNAMIC TABLE "' || REPLACE(x.DB, '"', '""')
+               || '"."' || REPLACE(x.SCH, '"', '""') || '"."' || REPLACE(x.NAME, '"', '""')
                || '" SUSPEND'), ARRAY_CONSTRUCT())
       INTO :part_list
-      FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t;
+      FROM (SELECT t."database_name"::VARCHAR AS DB, t."schema_name"::VARCHAR AS SCH, t."name"::VARCHAR AS NAME,
+                   UPPER(COALESCE(GET(OBJECT_CONSTRUCT(*), 'scheduling_state')::VARCHAR, 'RUNNING')) AS SCHED
+              FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t) AS x
+     WHERE NOT CONTAINS(x.SCHED, 'SUSPENDED');
     obj_list := ARRAY_CAT(obj_list, part_list);
     EXECUTE IMMEDIATE 'SHOW PIPES IN DATABASE ' || :tgt;
     SELECT COALESCE(ARRAY_AGG('ALTER PIPE "' || REPLACE(t."database_name", '"', '""') || '"."'
@@ -384,20 +468,41 @@ BEGIN
     END IF;
 
     EXECUTE IMMEDIATE 'ALTER DATABASE ' || :tgt || ' RENAME TO ' || :parked;
-    RETURN 'PART 2 OK: ' || tgt || ' parked as ' || parked || ' (' || n || ' schedule(s) paused first)' || CHR(10)
-        || report;
+    RETURN 'PART 2 OK: ' || tgt || ' parked as ' || parked || ' (' || n || ' schedule(s) paused first; keep this '
+        || 'report: PART 2R undoes exactly the ok lines)' || CHR(10) || report;
 END;
 $$;
+
+-- ---------------------------------------------------------------------------------------------------------------------
+-- PART 2R -- undo PART 2 (SYSADMIN), commented out on purpose: only when PART 3 cannot complete (e.g. the
+--            EVENT_TABLE_SET blocker) and the runway must come back as it was. Not after a successful PART 3.
+-- ---------------------------------------------------------------------------------------------------------------------
+-- 1. The name back (fails while a half-made clone holds it: as EDW_PRD_DEPLOYER, DROP that clone first, PART 8):
+--      USE ROLE SYSADMIN;
+--      ALTER DATABASE IDENTIFIER($parked_db) RENAME TO IDENTIFIER($target_db);
+-- 2. As the runway's deploy role (EDW_<ID>_DEPLOYER, the owner), resume exactly the '-- ok' lines of PART 2's
+--    report, nothing else (an object PART 2 did not list was not running before):
+--      ALTER TASK <root> RESUME;            -- PART 2 suspended roots only; their members kept their own state
+--      ALTER ALERT <alert> RESUME;
+--      ALTER DYNAMIC TABLE <dynamic table> RESUME;
+--      ALTER PIPE <pipe> SET PIPE_EXECUTION_PAUSED = FALSE;   -- PART 2 paused EVERY pipe: unpause only the ones
+--                                                             -- that were loading before (the pipe owner knows)
+--    Lost the report? The roots are in the runway's snapshot table:
+--      SELECT s.TASK_FQN FROM <ALFA_EDW_ID>.FLYWAY.DEPLOY_TASK_STATE AS s
+--       WHERE s.DEPLOY_ID LIKE 'REFRESH-%' ORDER BY s.CAPTURED_TS DESC;      -- the latest REFRESH-<ID>-<ts> rows
 
 
 -- =====================================================================================================================
 -- PART 3 -- the clone (EDW_PRD_DEPLOYER; reserve the Jenkins lock ALFA_EDW_PRD for this part)
 -- =====================================================================================================================
 -- CREATE OR REPLACE, not CREATE: it also re-runs cleanly if PART 4 failed after a first attempt (the half-handled
--- clone is still owned by EDW_PRD_DEPLOYER). It can never replace a runway SYSADMIN owns -- this role lacks the
--- privilege -- and the block re-checks the name. Cloning is metadata-only (no warehouse time); it needs the CREATE
--- DATABASE privilege bootstrap/10 PART 2c gives the PRD deploy role.
+-- clone is still owned by EDW_PRD_DEPLOYER). It must never replace the live runway, and that is CHECKED, not assumed:
+-- the block refuses unless ALFA_EDW_<ID> is absent (PART 2 parked it) or owned by EDW_PRD_DEPLOYER (an earlier,
+-- half-handled clone). Secondary roles are switched off first: with DEFAULT_SECONDARY_ROLES = ALL your SYSADMIN (the
+-- live runway's owner) would otherwise authorise the replace. Cloning is metadata-only (no warehouse time); it needs
+-- the CREATE DATABASE privilege bootstrap/10 PART 2c gives the PRD deploy role.
 USE ROLE EDW_PRD_DEPLOYER;
+USE SECONDARY ROLES NONE;
 USE WAREHOUSE WH_EDW_DEPLOY_PRD;
 
 EXECUTE IMMEDIATE $$
@@ -407,19 +512,35 @@ DECLARE
     stages BOOLEAN;
     rw VARCHAR;
     tgt VARCHAR;
+    trole VARCHAR;
+    parked VARCHAR;
     stmt VARCHAR;
     taken_at VARCHAR;
+    n INTEGER;
+    own VARCHAR;
     not_reviewed EXCEPTION (-20321, 'PART 3: read the PART 1 reports, then SET prechecks_reviewed = TRUE.');
-    bad_target EXCEPTION (-20322, 'PART 3: target is not SAN, SEA, PHX or (with allow_mgm) MGM. Nothing was cloned.');
+    bad_target EXCEPTION (-20322,
+        'PART 3: target must be SAN, SEA, PHX or MGM (allow_mgm) and match PART 0 names: re-run PART 0. Not cloned.');
+    not_parked EXCEPTION (-20323,
+        'PART 3: the runway database exists and is not a clone owned by EDW_PRD_DEPLOYER: run PART 2 first.');
 BEGIN
-    SELECT $prechecks_reviewed, $allow_mgm, $include_internal_stages, $target_runway, $target_db
-      INTO :reviewed, :mgm_ok, :stages, :rw, :tgt;
+    SELECT $prechecks_reviewed, $allow_mgm, $include_internal_stages, $target_runway, $target_db, $target_role,
+           $parked_db
+      INTO :reviewed, :mgm_ok, :stages, :rw, :tgt, :trole, :parked;
     IF (NOT COALESCE(reviewed, FALSE)) THEN
         RAISE not_reviewed;
     END IF;
-    IF (NOT (rw IN ('SAN', 'SEA', 'PHX') OR (rw = 'MGM' AND COALESCE(mgm_ok, FALSE)))
-        OR tgt IS DISTINCT FROM ('ALFA_EDW_' || rw)) THEN
+    IF (NOT COALESCE(rw IN ('SAN', 'SEA', 'PHX') OR (rw = 'MGM' AND COALESCE(mgm_ok, FALSE)), FALSE)
+        OR tgt IS DISTINCT FROM ('ALFA_EDW_' || rw) OR trole IS DISTINCT FROM ('EDW_' || rw || '_DEPLOYER')
+        OR parked IS DISTINCT FROM (tgt || '_PRE_REFRESH')) THEN
         RAISE bad_target;
+    END IF;
+    EXECUTE IMMEDIATE 'SHOW DATABASES LIKE ''' || :tgt || '''';
+    SELECT COUNT_IF(t."name" = :tgt), MAX(IFF(t."name" = :tgt, t."owner", NULL))
+      INTO :n, :own
+      FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t;
+    IF (n > 0 AND own IS DISTINCT FROM 'EDW_PRD_DEPLOYER') THEN
+        RAISE not_parked;
     END IF;
     stmt := 'CREATE OR REPLACE DATABASE ' || tgt || ' CLONE ALFA_EDW_PRD IGNORE HYBRID TABLES'
         || IFF(COALESCE(stages, FALSE), ' INCLUDE INTERNAL STAGES', '');
@@ -437,30 +558,71 @@ $$;
 -- =====================================================================================================================
 -- Every schema and object goes to EDW_<ID>_DEPLOYER with COPY CURRENT GRANTS, schema-wide (GRANT OWNERSHIP ON ALL
 -- <type> IN SCHEMA), which keeps task graphs linked -- never task by task. Objects first, then the schema, so this
--- role still owns the schema while it moves the contents. Then the database goes to SYSADMIN (bootstrap/20 model:
--- the deploy role never owns its database). A FAILED line names an object this role does not own (e.g. a policy a
--- governance role owns in PRD): decide its owner by hand.
+-- role still owns the schema while it moves the contents. Pipes are the exception: Snowflake refuses bulk ownership
+-- grants on pipes and moves a pipe only while it is paused, so every pipe of the clone is paused first (auto-ingest
+-- pipes arrive STOPPED_CLONED, not paused) and moved one by one after its tables and stages. Then the database goes
+-- to SYSADMIN (bootstrap/20 model: the deploy role never owns its database). A FAILED line names an object this
+-- role does not own (e.g. a policy a governance role owns in PRD): decide its owner by hand. PART 7c sweeps every
+-- object kind for an owner other than the runway's deploy role.
 USE ROLE EDW_PRD_DEPLOYER;
+USE SECONDARY ROLES NONE;
 USE WAREHOUSE WH_EDW_DEPLOY_PRD;
 
 EXECUTE IMMEDIATE $$
 DECLARE
+    rw VARCHAR;
+    mgm_ok BOOLEAN;
     tgt VARCHAR;
     trole VARCHAR;
+    parked VARCHAR;
+    -- Extend the list if your schemas hold other types (e.g. 'SEMANTIC VIEWS', 'NOTEBOOKS', 'STREAMLITS', 'ICEBERG
+    -- TABLES'); a type Snowflake does not accept for ALL ... IN SCHEMA shows as a FAILED line, nothing else is
+    -- affected. Never add 'PIPES': bulk ownership grants on pipes are refused (they are moved one by one below).
     obj_types ARRAY DEFAULT ARRAY_CONSTRUCT('TAGS', 'MASKING POLICIES', 'ROW ACCESS POLICIES', 'SEQUENCES',
         'FILE FORMATS', 'STAGES', 'TABLES', 'EXTERNAL TABLES', 'EVENT TABLES', 'DYNAMIC TABLES', 'VIEWS',
-        'MATERIALIZED VIEWS', 'FUNCTIONS', 'PROCEDURES', 'STREAMS', 'PIPES', 'SECRETS', 'ALERTS', 'TASKS');
+        'MATERIALIZED VIEWS', 'FUNCTIONS', 'PROCEDURES', 'STREAMS', 'SECRETS', 'ALERTS', 'TASKS');
     schema_list ARRAY;
+    pipe_list ARRAY;
     n INTEGER;
     m INTEGER;
     m_plus_schema INTEGER;
+    s VARCHAR;
     fq VARCHAR;
     stmt VARCHAR;
     ok_cnt INTEGER DEFAULT 0;
     fail_cnt INTEGER DEFAULT 0;
     report VARCHAR DEFAULT '';
+    bad_target EXCEPTION (-20341,
+        'PART 4: target must be SAN, SEA, PHX or MGM (allow_mgm) and match PART 0 names: re-run PART 0. Nothing done.');
 BEGIN
-    SELECT $target_db, $target_role INTO :tgt, :trole;
+    SELECT $target_runway, $allow_mgm, $target_db, $target_role, $parked_db INTO :rw, :mgm_ok, :tgt, :trole, :parked;
+    IF (NOT COALESCE(rw IN ('SAN', 'SEA', 'PHX') OR (rw = 'MGM' AND COALESCE(mgm_ok, FALSE)), FALSE)
+        OR tgt IS DISTINCT FROM ('ALFA_EDW_' || rw) OR trole IS DISTINCT FROM ('EDW_' || rw || '_DEPLOYER')
+        OR parked IS DISTINCT FROM (tgt || '_PRE_REFRESH')) THEN
+        RAISE bad_target;
+    END IF;
+
+    -- every pipe of the clone, paused (an ownership transfer of a pipe needs it paused)
+    EXECUTE IMMEDIATE 'SHOW PIPES IN DATABASE ' || :tgt;
+    SELECT COALESCE(ARRAY_AGG(OBJECT_CONSTRUCT('s', t."schema_name"::VARCHAR,
+               'fqn', '"' || REPLACE(t."database_name", '"', '""') || '"."' || REPLACE(t."schema_name", '"', '""')
+                      || '"."' || REPLACE(t."name", '"', '""') || '"')), ARRAY_CONSTRUCT())
+      INTO :pipe_list
+      FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t;
+    IF (ARRAY_SIZE(pipe_list) > 0) THEN
+        FOR k IN 1 TO ARRAY_SIZE(pipe_list) DO
+            stmt := 'ALTER PIPE ' || GET(GET(pipe_list, k - 1), 'fqn')::VARCHAR || ' SET PIPE_EXECUTION_PAUSED = TRUE';
+            BEGIN
+                EXECUTE IMMEDIATE :stmt;
+                ok_cnt := ok_cnt + 1;
+            EXCEPTION
+                WHEN OTHER THEN
+                    fail_cnt := fail_cnt + 1;
+                    report := report || '-- FAILED ' || stmt || ';  -- ' || SQLERRM || CHR(10);
+            END;
+        END FOR;
+    END IF;
+
     EXECUTE IMMEDIATE 'SHOW SCHEMAS IN DATABASE ' || :tgt;
     SELECT COALESCE(ARRAY_AGG(t."name"::VARCHAR) WITHIN GROUP (ORDER BY t."name"), ARRAY_CONSTRUCT())
       INTO :schema_list
@@ -468,63 +630,120 @@ BEGIN
      WHERE t."name" <> 'INFORMATION_SCHEMA';
     n := ARRAY_SIZE(schema_list);
     m := ARRAY_SIZE(obj_types);
-    m_plus_schema := m + 1;                          -- every object type, then the schema itself
+    m_plus_schema := m + 2;                          -- every object type, the pipes, then the schema itself
     IF (n > 0) THEN
         FOR i IN 1 TO n DO
-            fq := tgt || '."' || REPLACE(GET(schema_list, i - 1)::VARCHAR, '"', '""') || '"';
+            s := GET(schema_list, i - 1)::VARCHAR;
+            fq := tgt || '."' || REPLACE(s, '"', '""') || '"';
             FOR j IN 1 TO m_plus_schema DO
                 IF (j <= m) THEN
                     stmt := 'GRANT OWNERSHIP ON ALL ' || GET(obj_types, j - 1)::VARCHAR || ' IN SCHEMA ' || fq
                         || ' TO ROLE ' || trole || ' COPY CURRENT GRANTS';
+                ELSEIF (j = m + 1) THEN
+                    stmt := NULL;                    -- the pipes of this schema, one by one (below)
+                    IF (ARRAY_SIZE(pipe_list) > 0) THEN
+                        FOR k IN 1 TO ARRAY_SIZE(pipe_list) DO
+                            IF (GET(GET(pipe_list, k - 1), 's')::VARCHAR = s) THEN
+                                stmt := 'GRANT OWNERSHIP ON PIPE ' || GET(GET(pipe_list, k - 1), 'fqn')::VARCHAR
+                                    || ' TO ROLE ' || trole || ' COPY CURRENT GRANTS';
+                                BEGIN
+                                    EXECUTE IMMEDIATE :stmt;
+                                    ok_cnt := ok_cnt + 1;
+                                EXCEPTION
+                                    WHEN OTHER THEN
+                                        fail_cnt := fail_cnt + 1;
+                                        report := report || '-- FAILED ' || stmt || ';  -- ' || SQLERRM || CHR(10);
+                                END;
+                            END IF;
+                        END FOR;
+                    END IF;
+                    stmt := NULL;
                 ELSE
                     stmt := 'GRANT OWNERSHIP ON SCHEMA ' || fq || ' TO ROLE ' || trole || ' COPY CURRENT GRANTS';
                 END IF;
-                BEGIN
-                    EXECUTE IMMEDIATE :stmt;
-                    ok_cnt := ok_cnt + 1;
-                EXCEPTION
-                    WHEN OTHER THEN
-                        fail_cnt := fail_cnt + 1;
-                        report := report || '-- FAILED ' || stmt || ';  -- ' || SQLERRM || CHR(10);
-                END;
+                IF (stmt IS NOT NULL) THEN
+                    BEGIN
+                        EXECUTE IMMEDIATE :stmt;
+                        ok_cnt := ok_cnt + 1;
+                    EXCEPTION
+                        WHEN OTHER THEN
+                            fail_cnt := fail_cnt + 1;
+                            report := report || '-- FAILED ' || stmt || ';  -- ' || SQLERRM || CHR(10);
+                    END;
+                END IF;
             END FOR;
         END FOR;
     END IF;
-    RETURN 'PART 4: ' || n || ' schema(s) handed to ' || trole || ': ' || ok_cnt || ' statement(s) ok, ' || fail_cnt
-        || ' failed' || CHR(10) || report;
+    RETURN 'PART 4: ' || n || ' schema(s) and ' || ARRAY_SIZE(pipe_list) || ' pipe(s) handed to ' || trole || ': '
+        || ok_cnt || ' statement(s) ok, ' || fail_cnt || ' failed' || CHR(10) || report;
 END;
 $$;
 
--- The database itself to SYSADMIN (still as EDW_PRD_DEPLOYER, its owner until this statement).
-GRANT OWNERSHIP ON DATABASE IDENTIFIER($target_db) TO ROLE SYSADMIN COPY CURRENT GRANTS;
+-- The database itself to SYSADMIN (still as EDW_PRD_DEPLOYER, its owner until this statement). The same target
+-- re-check as every other part, then the grant.
+EXECUTE IMMEDIATE $$
+DECLARE
+    rw VARCHAR;
+    mgm_ok BOOLEAN;
+    tgt VARCHAR;
+    trole VARCHAR;
+    parked VARCHAR;
+    bad_target EXCEPTION (-20342,
+        'PART 4: target must be SAN, SEA, PHX or MGM (allow_mgm) and match PART 0 names: re-run PART 0. Nothing done.');
+BEGIN
+    SELECT $target_runway, $allow_mgm, $target_db, $target_role, $parked_db INTO :rw, :mgm_ok, :tgt, :trole, :parked;
+    IF (NOT COALESCE(rw IN ('SAN', 'SEA', 'PHX') OR (rw = 'MGM' AND COALESCE(mgm_ok, FALSE)), FALSE)
+        OR tgt IS DISTINCT FROM ('ALFA_EDW_' || rw) OR trole IS DISTINCT FROM ('EDW_' || rw || '_DEPLOYER')
+        OR parked IS DISTINCT FROM (tgt || '_PRE_REFRESH')) THEN
+        RAISE bad_target;
+    END IF;
+    EXECUTE IMMEDIATE 'GRANT OWNERSHIP ON DATABASE ' || :tgt || ' TO ROLE SYSADMIN COPY CURRENT GRANTS';
+    RETURN 'PART 4: ' || tgt || ' now owned by SYSADMIN';
+END;
+$$;
 
 
 -- =====================================================================================================================
 -- PART 5 -- database-level grants (SYSADMIN, the database owner). Grants on a database are never cloned.
 -- =====================================================================================================================
+-- From here on: your secondary roles again, and the runway's own deploy warehouse instead of PRD's.
 USE ROLE SYSADMIN;
+USE SECONDARY ROLES ALL;
+USE WAREHOUSE IDENTIFIER($target_wh);
 
--- The kit's own (bootstrap/20 PART 1).
-GRANT USAGE, CREATE SCHEMA ON DATABASE IDENTIFIER($target_db) TO ROLE IDENTIFIER($target_role);
-GRANT USAGE ON DATABASE IDENTIFIER($target_db) TO ROLE EDW_FLYWAY_AUDITOR;
-
--- Everything else the outgoing runway had at database level (USAGE for its functional roles, MONITOR, ...), copied
--- from the parked database. Grants to EDW_PRD_* roles are not copied: production roles get no path into a runway.
+-- The kit's own (bootstrap/20 PART 1), then everything else the outgoing runway had at database level (USAGE for its
+-- functional and access roles, MONITOR, ...), copied from the parked database. Grants to EDW_PRD_* roles are not
+-- copied: production roles get no path into a runway. Access roles created after the parked copy was made:
+-- bootstrap/20 PART 1's access-role block (run it for this runway after PART 7).
 EXECUTE IMMEDIATE $$
 DECLARE
+    rw VARCHAR;
+    mgm_ok BOOLEAN;
     tgt VARCHAR;
+    trole VARCHAR;
     parked VARCHAR;
     n_parked INTEGER;
     grant_list ARRAY;
     n INTEGER;
     stmt VARCHAR;
     report VARCHAR DEFAULT '';
+    bad_target EXCEPTION (-20351,
+        'PART 5: target must be SAN, SEA, PHX or MGM (allow_mgm) and match PART 0 names: re-run PART 0. Nothing done.');
 BEGIN
-    SELECT $target_db, $parked_db INTO :tgt, :parked;
+    SELECT $target_runway, $allow_mgm, $target_db, $target_role, $parked_db INTO :rw, :mgm_ok, :tgt, :trole, :parked;
+    IF (NOT COALESCE(rw IN ('SAN', 'SEA', 'PHX') OR (rw = 'MGM' AND COALESCE(mgm_ok, FALSE)), FALSE)
+        OR tgt IS DISTINCT FROM ('ALFA_EDW_' || rw) OR trole IS DISTINCT FROM ('EDW_' || rw || '_DEPLOYER')
+        OR parked IS DISTINCT FROM (tgt || '_PRE_REFRESH')) THEN
+        RAISE bad_target;
+    END IF;
+    EXECUTE IMMEDIATE 'GRANT USAGE, CREATE SCHEMA ON DATABASE ' || :tgt || ' TO ROLE ' || :trole;
+    EXECUTE IMMEDIATE 'GRANT USAGE ON DATABASE ' || :tgt || ' TO ROLE EDW_FLYWAY_AUDITOR';
+    report := '-- ok     kit grants: USAGE, CREATE SCHEMA to ' || trole || '; USAGE to EDW_FLYWAY_AUDITOR' || CHR(10);
+
     EXECUTE IMMEDIATE 'SHOW DATABASES LIKE ''' || :parked || '''';
     SELECT COUNT_IF(t."name" = :parked) INTO :n_parked FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t;
     IF (n_parked = 0) THEN
-        RETURN 'PART 5: no parked runway (first refresh): only the kit grants were applied';
+        RETURN 'PART 5: no parked runway (first refresh): only the kit grants were applied' || CHR(10) || report;
     END IF;
     EXECUTE IMMEDIATE 'SHOW GRANTS ON DATABASE ' || :parked;
     SELECT COALESCE(ARRAY_AGG('GRANT ' || t."privilege" || ' ON DATABASE ' || :tgt || ' TO ROLE "'
@@ -548,7 +767,7 @@ BEGIN
             END;
         END FOR;
     END IF;
-    RETURN 'PART 5: ' || n || ' database grant(s) copied from ' || parked || CHR(10) || report;
+    RETURN 'PART 5: kit grants + ' || n || ' database grant(s) copied from ' || parked || CHR(10) || report;
 END;
 $$;
 
@@ -562,17 +781,27 @@ $$;
 -- but they are wrong: this part revokes each one and grants the same privilege to EDW_<ID>_<x> when that role
 -- exists (the kit's role_prefix convention, flyway.toml). Without a matching role the grant is only revoked; the
 -- R__90 grants repeatables re-create the runway's grants at the next deploy anyway (their checksum includes the
--- placeholders, so they re-run on a runway whose history came from PRD). USAGE on functions / procedures is moved
--- schema-wide (ON ALL FUNCTIONS IN SCHEMA), because SHOW GRANTS names them with their signature.
+-- placeholders, so they re-run on a runway whose history came from PRD). A grant on a function or procedure moves
+-- for that ONE object (never ON ALL ... IN SCHEMA: a role that may call one procedure must not get every owner's-
+-- rights procedure of the schema): its signature is rebuilt from the SHOW GRANTS name <db>.<schema>."NAME(ARG TYPE,
+-- ...):RETURN TYPE" (argument names dropped, verify the format on the first refresh); a name that does not parse is
+-- reported as FAILED and nothing is granted for it. WITH GRANT OPTION is carried over.
 -- SECURITYADMIN because MANAGE GRANTS is what lets one role revoke grants held by roles it does not own. Thousands of
--- grants take minutes: one statement each.
+-- grants take minutes: one statement each. It runs on the runway's warehouse through your secondary roles (WHO).
 USE ROLE SECURITYADMIN;
 
 EXECUTE IMMEDIATE $$
 DECLARE
     rw VARCHAR;
+    mgm_ok BOOLEAN;
     tgt VARCHAR;
+    trole VARCHAR;
+    parked VARCHAR;
     prefix VARCHAR;
+    sig VARCHAR;
+    obj VARCHAR;
+    bad_target EXCEPTION (-20361,
+        'PART 6: target must be SAN, SEA, PHX or MGM (allow_mgm) and match PART 0 names: re-run PART 0. Nothing done.');
     prd_roles ARRAY;
     tgt_roles ARRAY;
     grant_rows ARRAY;
@@ -599,7 +828,13 @@ DECLARE
     notes VARCHAR DEFAULT '';
     report VARCHAR DEFAULT '';
 BEGIN
-    SELECT $target_runway, $target_db INTO :rw, :tgt;
+    SELECT $target_runway, $allow_mgm, $target_db, $target_role, $parked_db INTO :rw, :mgm_ok, :tgt, :trole, :parked;
+    -- never PRD (a PRD role mapped to itself would be revoked), DEV, or MGM without allow_mgm
+    IF (NOT COALESCE(rw IN ('SAN', 'SEA', 'PHX') OR (rw = 'MGM' AND COALESCE(mgm_ok, FALSE)), FALSE)
+        OR tgt IS DISTINCT FROM ('ALFA_EDW_' || rw) OR trole IS DISTINCT FROM ('EDW_' || rw || '_DEPLOYER')
+        OR parked IS DISTINCT FROM (tgt || '_PRE_REFRESH')) THEN
+        RAISE bad_target;
+    END IF;
     prefix := tgt || '.';
 
     SHOW ROLES LIKE 'EDW_PRD_%';
@@ -640,11 +875,23 @@ BEGIN
                             revoke_stmt := 'REVOKE DATABASE ROLE ' || nm || ' FROM ROLE "' || r || '"';
                             grant_stmt := 'GRANT DATABASE ROLE ' || nm || ' TO ROLE "' || mapped || '"';
                         ELSEIF (obj_on IN ('FUNCTION', 'PROCEDURE')) THEN
-                            sch := SPLIT_PART(nm, '.', 1) || '.' || SPLIT_PART(nm, '.', 2);
-                            revoke_stmt := 'REVOKE ' || priv || ' ON ALL ' || obj_on || 'S IN SCHEMA ' || sch
-                                || ' FROM ROLE "' || r || '"';
-                            grant_stmt := 'GRANT ' || priv || ' ON ALL ' || obj_on || 'S IN SCHEMA ' || sch
-                                || ' TO ROLE "' || mapped || '"';
+                            -- <db>.<schema>."NAME(ARG TYPE, ...):RETURN TYPE" -> <db>.<schema>."NAME"(TYPE, ...)
+                            sig := REGEXP_REPLACE(SPLIT_PART(SPLIT_PART(nm, '"', 2), ':', 1), '([(]|, )[^ ,()]+ ',
+                                                  '\\1');
+                            IF (REGEXP_COUNT(nm, '"') = 2
+                                AND REGEXP_LIKE(sig, '[A-Za-z_][A-Za-z0-9_$]*[(][^"]*[)]')) THEN
+                                obj := SPLIT_PART(nm, '.', 1) || '.' || SPLIT_PART(nm, '.', 2) || '."'
+                                    || SPLIT_PART(sig, '(', 1) || '"(' || SUBSTR(sig, POSITION('(', sig) + 1);
+                                revoke_stmt := 'REVOKE ' || priv || ' ON ' || obj_on || ' ' || obj
+                                    || ' FROM ROLE "' || r || '"';
+                                grant_stmt := 'GRANT ' || priv || ' ON ' || obj_on || ' ' || obj || ' TO ROLE "'
+                                    || mapped || '"' || IFF(gopt = 'true', ' WITH GRANT OPTION', '');
+                            ELSE
+                                fail_cnt := fail_cnt + 1;
+                                report := report || '-- FAILED ' || priv || ' ON ' || obj_on || ' ' || nm || ' for '
+                                    || r || ': signature not parsed; move this grant by hand' || CHR(10);
+                                CONTINUE;
+                            END IF;
                         ELSE
                             revoke_stmt := 'REVOKE ' || priv || ' ON ' || REPLACE(obj_on, '_', ' ') || ' ' || nm
                                 || ' FROM ROLE "' || r || '"';
@@ -734,6 +981,10 @@ USE DATABASE IDENTIFIER($target_db);
 -- 7a  Scheduled objects in the runway. Nothing here resumes on its own, and nothing should be resumed blindly:
 --     on SAN / SEA / PHX the deploys keep tasks suspended (tasks_enabled = "false"); on MGM resume roots
 --     deliberately once PART 1's CROSS_DB_REFERENCE / PIPE_QUALIFIED_TARGET lines are fixed (PART 8).
+--     WAREHOUSE: the clone keeps PRD's (WH_EDW_ETL_PRD). EDW_<ID>_DEPLOYER has no USAGE on it, so such an object
+--     fails when resumed -- and would bill PRD's ETL warehouse if it ran. WH_NOTE flags every value other than the
+--     runway's WH_EDW_ETL_<ID>: SET WAREHOUSE before any resume (PART 8 item 6). A repeatable that names ${etl_wh}
+--     fixes its own objects at the next deploy; objects created by V migrations keep PRD's until changed.
 SHOW TASKS IN DATABASE;
 SET qid_rt = LAST_QUERY_ID();
 SHOW ALERTS IN DATABASE;
@@ -743,36 +994,68 @@ SET qid_rd = LAST_QUERY_ID();
 SHOW PIPES IN DATABASE;
 SET qid_rp = LAST_QUERY_ID();
 
-SELECT 'TASK' AS KIND, t."schema_name"::VARCHAR || '.' || t."name"::VARCHAR AS OBJECT_NAME,
-       t."state"::VARCHAR AS STATE, t."owner"::VARCHAR AS OWNER_ROLE,
-       IFF(REGEXP_REPLACE(COALESCE(t."predecessors"::VARCHAR, '[]'), '[[:space:]]', '') = '[]', 'root', 'child') AS NOTE
-  FROM TABLE(RESULT_SCAN($qid_rt)) AS t
-UNION ALL
-SELECT 'ALERT', a."schema_name"::VARCHAR || '.' || a."name"::VARCHAR, a."state"::VARCHAR, a."owner"::VARCHAR, ''
-  FROM TABLE(RESULT_SCAN($qid_ra)) AS a
-UNION ALL
-SELECT 'DYNAMIC TABLE', d."schema_name"::VARCHAR || '.' || d."name"::VARCHAR,
-       GET(OBJECT_CONSTRUCT(*), 'scheduling_state')::VARCHAR, d."owner"::VARCHAR, 'a resume starts a full refresh'
-  FROM TABLE(RESULT_SCAN($qid_rd)) AS d
-UNION ALL
-SELECT 'PIPE', p."schema_name"::VARCHAR || '.' || p."name"::VARCHAR, 'see SYSTEM$PIPE_STATUS', p."owner"::VARCHAR,
-       IFF(CONTAINS(REGEXP_SUBSTR(UPPER(p."definition"::VARCHAR), 'COPY[[:space:]]+INTO[[:space:]]+([^[:space:](]+)',
-                                  1, 1, 'e', 1), '.'), 'QUALIFIED COPY TARGET: never resume, recreate', 'bare target')
-  FROM TABLE(RESULT_SCAN($qid_rp)) AS p
-ORDER BY 1, 2;
+SELECT x.KIND, x.OBJECT_NAME, x.STATE, x.OWNER_ROLE, x.WAREHOUSE,
+       CASE WHEN x.KIND = 'PIPE' THEN ''
+            WHEN COALESCE(x.WAREHOUSE, '') = '' THEN 'serverless'
+            WHEN x.WAREHOUSE = 'WH_EDW_ETL_' || $target_runway THEN 'ok'
+            ELSE 'NOT THE RUNWAY''S: SET WAREHOUSE = WH_EDW_ETL_' || $target_runway || ' before any resume'
+       END AS WH_NOTE,
+       x.NOTE
+  FROM (SELECT 'TASK' AS KIND, t."schema_name"::VARCHAR || '.' || t."name"::VARCHAR AS OBJECT_NAME,
+               t."state"::VARCHAR AS STATE, t."owner"::VARCHAR AS OWNER_ROLE, t."warehouse"::VARCHAR AS WAREHOUSE,
+               IFF(REGEXP_REPLACE(COALESCE(t."predecessors"::VARCHAR, '[]'), '[[:space:]]', '') = '[]', 'root',
+                   'child') AS NOTE
+          FROM TABLE(RESULT_SCAN($qid_rt)) AS t
+        UNION ALL
+        SELECT 'ALERT', a."schema_name"::VARCHAR || '.' || a."name"::VARCHAR, a."state"::VARCHAR, a."owner"::VARCHAR,
+               a."warehouse"::VARCHAR, ''
+          FROM TABLE(RESULT_SCAN($qid_ra)) AS a
+        UNION ALL
+        SELECT 'DYNAMIC TABLE', d."schema_name"::VARCHAR || '.' || d."name"::VARCHAR,
+               GET(OBJECT_CONSTRUCT(*), 'scheduling_state')::VARCHAR, d."owner"::VARCHAR,
+               GET(OBJECT_CONSTRUCT(*), 'warehouse')::VARCHAR, 'a resume starts a full refresh'
+          FROM TABLE(RESULT_SCAN($qid_rd)) AS d
+        UNION ALL
+        SELECT 'PIPE', p."schema_name"::VARCHAR || '.' || p."name"::VARCHAR, 'see SYSTEM$PIPE_STATUS',
+               p."owner"::VARCHAR, NULL,
+               IFF(CONTAINS(REGEXP_SUBSTR(UPPER(p."definition"::VARCHAR),
+                                          'COPY[[:space:]]+INTO[[:space:]]+([^[:space:](]+)', 1, 1, 'e', 1), '.'),
+                   'QUALIFIED COPY TARGET: never resume, recreate', 'bare target')
+          FROM TABLE(RESULT_SCAN($qid_rp)) AS p) AS x
+ ORDER BY 1, 2;
 
--- 7b  The audit row: the runway's DEPLOY_LOG now holds PRD's history; this row marks where the runway began.
-INSERT INTO FLYWAY.DEPLOY_LOG (DEPLOY_ID, EVENT, ENV, GIT_SHA, BUILD_URL, APPROVER, FLYWAY_USER, EVENT_TS, DETAIL)
-SELECT 'REFRESH-' || $target_runway || '-' || TO_CHAR(CURRENT_TIMESTAMP(), 'YYYYMMDDHH24MISS'),
-       'REFRESHED',
-       $target_runway,
-       NULL,
-       'bootstrap/30_refresh_runway.sql',
-       CURRENT_USER(),
-       CURRENT_USER(),
-       CURRENT_TIMESTAMP(),
-       'zero-copy clone of ALFA_EDW_PRD; earlier rows are PRD''s deploy history; previous runway parked as '
-       || $parked_db || ' (if it existed)';
+-- 7b  The audit row: the runway's DEPLOY_LOG now holds PRD's history; this row marks where the runway began. Written
+--     only after the same target re-check as every part that changes something.
+EXECUTE IMMEDIATE $$
+DECLARE
+    rw VARCHAR;
+    mgm_ok BOOLEAN;
+    tgt VARCHAR;
+    trole VARCHAR;
+    parked VARCHAR;
+    bad_target EXCEPTION (-20371,
+        'PART 7: target must be SAN, SEA, PHX or MGM (allow_mgm) and match PART 0 names: re-run PART 0. Nothing done.');
+BEGIN
+    SELECT $target_runway, $allow_mgm, $target_db, $target_role, $parked_db INTO :rw, :mgm_ok, :tgt, :trole, :parked;
+    IF (NOT COALESCE(rw IN ('SAN', 'SEA', 'PHX') OR (rw = 'MGM' AND COALESCE(mgm_ok, FALSE)), FALSE)
+        OR tgt IS DISTINCT FROM ('ALFA_EDW_' || rw) OR trole IS DISTINCT FROM ('EDW_' || rw || '_DEPLOYER')
+        OR parked IS DISTINCT FROM (tgt || '_PRE_REFRESH') OR CURRENT_DATABASE() IS DISTINCT FROM tgt) THEN
+        RAISE bad_target;
+    END IF;
+    INSERT INTO FLYWAY.DEPLOY_LOG (DEPLOY_ID, EVENT, ENV, GIT_SHA, BUILD_URL, APPROVER, FLYWAY_USER, EVENT_TS, DETAIL)
+    SELECT 'REFRESH-' || :rw || '-' || TO_CHAR(CURRENT_TIMESTAMP(), 'YYYYMMDDHH24MISS'),
+           'REFRESHED',
+           :rw,
+           NULL,
+           'bootstrap/30_refresh_runway.sql',
+           CURRENT_USER(),
+           CURRENT_USER(),
+           CURRENT_TIMESTAMP(),
+           'zero-copy clone of ALFA_EDW_PRD; earlier rows are PRD''s deploy history; previous runway parked as '
+           || :parked || ' (if it existed)';
+    RETURN 'PART 7b: REFRESHED row written to ' || tgt || '.FLYWAY.DEPLOY_LOG';
+END;
+$$;
 
 -- 7c  Verification (read-only). Every line starts with PASS / FAIL / CHECK / INFO.
 EXECUTE IMMEDIATE $$
@@ -785,6 +1068,11 @@ DECLARE
     c3 INTEGER;
     prd_ver VARCHAR;
     tgt_ver VARCHAR;
+    db_comment VARCHAR;
+    taken_at TIMESTAMP_TZ;
+    kinds ARRAY DEFAULT ARRAY_CONSTRUCT('OBJECTS', 'PIPES', 'STREAMS', 'ALERTS', 'DYNAMIC TABLES', 'STAGES',
+                                        'SEQUENCES', 'FILE FORMATS');
+    kind VARCHAR;
     report VARCHAR DEFAULT '';
 BEGIN
     SELECT $target_db, $target_role INTO :tgt, :trole;
@@ -833,6 +1121,41 @@ BEGIN
             report := report || 'FAIL   SHOW TASKS: ' || SQLERRM || CHR(10);
     END;
 
+    -- owner sweep: every other object kind (an object left with EDW_PRD_DEPLOYER or another role breaks the next
+    -- deploy's CREATE OR REPLACE / ALTER, and a type PART 4's list misses shows up here)
+    FOR i IN 1 TO ARRAY_SIZE(kinds) DO
+        kind := GET(kinds, i - 1)::VARCHAR;
+        BEGIN
+            EXECUTE IMMEDIATE 'SHOW ' || :kind || ' IN DATABASE ' || :tgt;
+            SELECT COUNT_IF(t."owner" IS DISTINCT FROM :trole),
+                   LISTAGG(IFF(t."owner" IS DISTINCT FROM :trole,
+                               t."schema_name" || '.' || t."name" || ' (' || COALESCE(t."owner", '?') || ')', NULL),
+                           ', ')
+              INTO :c1, :v
+              FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t
+             WHERE t."schema_name" <> 'INFORMATION_SCHEMA';
+            report := report || IFF(c1 = 0, 'PASS', 'FAIL') || '   ' || LOWER(kind) || ': ' || c1 || ' not owned by '
+                || trole || IFF(c1 = 0, '', ': ' || LEFT(v, 1500)) || CHR(10);
+        EXCEPTION
+            WHEN OTHER THEN
+                report := report || 'CHECK  SHOW ' || kind || ' failed: ' || SQLERRM || CHR(10);
+        END;
+    END FOR;
+    BEGIN
+        EXECUTE IMMEDIATE 'SELECT COUNT(*), LISTAGG(x.N, '', '') FROM (SELECT f.FUNCTION_SCHEMA || ''.'' '
+            || '|| f.FUNCTION_NAME || '' ('' || f.FUNCTION_OWNER || '')'' AS N FROM ' || :tgt
+            || '.INFORMATION_SCHEMA.FUNCTIONS AS f WHERE f.FUNCTION_OWNER IS DISTINCT FROM ''' || :trole || ''''
+            || ' UNION ALL SELECT p.PROCEDURE_SCHEMA || ''.'' || p.PROCEDURE_NAME || '' ('' || p.PROCEDURE_OWNER'
+            || ' || '')'' FROM ' || :tgt || '.INFORMATION_SCHEMA.PROCEDURES AS p'
+            || ' WHERE p.PROCEDURE_OWNER IS DISTINCT FROM ''' || :trole || ''') AS x';
+        SELECT $1, $2 INTO :c1, :v FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+        report := report || IFF(c1 = 0, 'PASS', 'FAIL') || '   functions / procedures: ' || c1 || ' not owned by '
+            || trole || IFF(c1 = 0, '', ': ' || LEFT(v, 1500)) || CHR(10);
+    EXCEPTION
+        WHEN OTHER THEN
+            report := report || 'CHECK  function / procedure owner check failed: ' || SQLERRM || CHR(10);
+    END;
+
     -- table / view counts per type: the clone against PRD (hybrid and external tables are expected to differ)
     BEGIN
         EXECUTE IMMEDIATE 'SELECT LISTAGG(x.TABLE_TYPE || '' PRD '' || x.P || '' / runway '' || x.R, ''; '')'
@@ -850,16 +1173,28 @@ BEGIN
             report := report || 'FAIL   object count comparison: ' || SQLERRM || CHR(10);
     END;
 
-    -- the Flyway history came along: the runway's latest applied version equals PRD's
+    -- The Flyway history came along: the runway's latest applied version equals PRD's AT THE CLONE TIME (PART 3
+    -- wrote "taken <timestamp>" into the database comment; PRD may have deployed since the lock was released).
     BEGIN
+        EXECUTE IMMEDIATE 'SHOW DATABASES LIKE ''' || :tgt || '''';
+        SELECT MAX(IFF(t."name" = :tgt, t."comment", NULL)) INTO :db_comment
+          FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) AS t;
+        taken_at := TRY_TO_TIMESTAMP_TZ(REGEXP_SUBSTR(db_comment,
+                        'taken ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})', 1, 1, 'e', 1),
+                        'YYYY-MM-DD HH24:MI:SS TZHTZM');
         SELECT MAX_BY(h."version", h."installed_rank") INTO :prd_ver
           FROM ALFA_EDW_PRD.FLYWAY."flyway_schema_history" AS h
-         WHERE h."success" AND h."version" IS NOT NULL;
+         WHERE h."success" AND h."version" IS NOT NULL
+           AND (:taken_at IS NULL OR h."installed_on" <= :taken_at);
         EXECUTE IMMEDIATE 'SELECT MAX_BY(h."version", h."installed_rank") FROM ' || :tgt
             || '.FLYWAY."flyway_schema_history" AS h WHERE h."success" AND h."version" IS NOT NULL';
         SELECT $1 INTO :tgt_ver FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
-        report := report || IFF(prd_ver IS NOT DISTINCT FROM tgt_ver, 'PASS', 'FAIL') || '   Flyway history: runway at '
-            || COALESCE(tgt_ver, '(none)') || ', PRD at ' || COALESCE(prd_ver, '(none)') || CHR(10);
+        report := report || IFF(prd_ver IS NOT DISTINCT FROM tgt_ver, 'PASS', IFF(taken_at IS NULL, 'CHECK', 'FAIL'))
+            || '   Flyway history: runway at ' || COALESCE(tgt_ver, '(none)') || ', PRD at '
+            || COALESCE(prd_ver, '(none)')
+            || IFF(taken_at IS NULL, ' NOW (clone time not found in the database comment: a PRD deploy since the '
+                                     || 'clone also explains a difference)',
+                   ' at the clone time ' || TO_VARCHAR(taken_at)) || CHR(10);
     EXCEPTION
         WHEN OTHER THEN
             report := report || 'FAIL   Flyway history comparison: ' || SQLERRM || CHR(10);
@@ -888,16 +1223,26 @@ SELECT s.INDEX AS LINE_NO, s.VALUE AS CHECK_RESULT
 -- 2. The first deploy may report the cloned objects as drift (their LAST_DDL is the clone time, LAST_DDL_BY the admin
 --    who cloned; verify on first run): review the list once and acknowledge it (ACK_DRIFT).
 -- 3. PART 1 HIGH lines: fix 3-part ALFA_EDW_PRD references in the repository (a migration / repeatable change), not by
---    hand in the runway; until then afterMigrate__80_cross_env_guard fails the runway's deploys on purpose.
+--    hand in the runway; until then afterMigrate__50_cross_env_guard fails the runway's deploys on purpose.
 -- 4. Pipes with a qualified COPY target: never resume them in the runway (they would load PRD); recreate them with a
 --    bare table name. A recreated pipe has no load history: do not ALTER PIPE ... REFRESH against a stage PRD shares.
--- 5. External tables, hybrid tables and pipes on internal stages: absent in the runway although the history says
---    they exist; re-create them by hand from their migration as EDW_<ID>_DEPLOYER (or accept their absence).
--- 6. Resuming (MGM, or a lease that needs schedules): as EDW_<ID>_DEPLOYER, root by root, after items 3-4:
+-- 5. Named internal stages (and their files), pipes on internal stages, external tables and hybrid tables: absent in
+--    the runway (internal stages only with include_internal_stages = FALSE) although the history says they exist;
+--    re-create them by hand from their migration as EDW_<ID>_DEPLOYER (or accept their absence). COPY / PUT and
+--    file formats that name a missing internal stage fail until then.
+-- 6. Resuming (MGM, or a lease that needs schedules): as EDW_<ID>_DEPLOYER, after items 3-4. First point every object
+--    7a flags (WH_NOTE) at the runway's ETL warehouse -- it still names PRD's, which the runway's role cannot use and
+--    must not bill -- then resume, root by root:
+--      ALTER TASK <SCHEMA>.<ROOT_TASK> SUSPEND;                          -- only if started; then for each task
+--      ALTER TASK <SCHEMA>.<TASK> SET WAREHOUSE = WH_EDW_ETL_<ID>;       -- of the graph that 7a flags
+--      ALTER DYNAMIC TABLE <SCHEMA>.<NAME> SET WAREHOUSE = WH_EDW_ETL_<ID>;
+--      ALTER ALERT <SCHEMA>.<NAME> SET WAREHOUSE = WH_EDW_ETL_<ID>;
 --      SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('<ALFA_EDW_ID>.<SCHEMA>.<ROOT_TASK>');
---      ALTER DYNAMIC TABLE <SCHEMA>.<NAME> RESUME;     -- expect a full refresh on the runway's warehouse
+--      ALTER DYNAMIC TABLE <SCHEMA>.<NAME> RESUME;     -- expect a full refresh on WH_EDW_ETL_<ID>
 --      ALTER ALERT <SCHEMA>.<NAME> RESUME;
---    Started tasks count against the account-wide limit on resumed tasks, shared by all six runways.
+--    A repeatable that names ${etl_wh} sets its own objects' warehouse at the next deploy (item 1); objects created
+--    by V migrations keep PRD's until changed here. Started tasks count against the account-wide limit on resumed
+--    tasks, shared by all six runways.
 -- 7. Optional, to limit Time Travel storage on a test runway (SYSADMIN):
 --      ALTER DATABASE IDENTIFIER($target_db) SET DATA_RETENTION_TIME_IN_DAYS = 1;
 -- 8. Drop the parked copy once the runway works and the lease holder confirms nothing in it is needed (SYSADMIN).
