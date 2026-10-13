@@ -99,7 +99,7 @@ before each deploy. MGM and PRD accept bundles built from `main` only.
 | Change ticket for PRD                                 | `CHANGE_TICKET` parameter required                 | partly |
 | Out-of-band DDL since the last deploy                 | `fw.py drift-sql` / `drift-eval`, warn or fail     | yes    |
 | Enterprise licence really active                      | licence stage (`flyway version` edition)           | yes    |
-| No reference to another runway's database             | callback `afterMigrate__80_cross_env_guard`        | yes    |
+| No reference to another runway's database             | callback `afterMigrate__50_cross_env_guard`        | yes    |
 | Task graphs restored (or kept off) after a deploy     | callbacks `beforeMigrate__20`, `afterMigrate__60`  | yes    |
 | Deploy audit trail                                    | `FLYWAY.DEPLOY_LOG`, `deploy-<ID>` status, Jenkins | yes    |
 | Service logins only from the Jenkins egress range     | network policy (B1)                                | yes    |
@@ -292,17 +292,22 @@ workstation (OpenSSL) and Snowsight (`bootstrap/10_account_objects.sql`, per-run
    grep -v -- '-----' "$U.pub" | tr -d '\n'; echo                                     # one-line public key
    ```
 
-2. In bootstrap/10 set `runway = 'DEV'` (then SAN, SEA, PHX, MGM, PRD), paste the one-line public key (no
-   BEGIN/END lines) and run the per-runway section. It creates `WH_EDW_DEPLOY_<ID>`, `EDW_<ID>_DEPLOYER` (granted to
-   SYSADMIN) and `SVC_EDW_FLYWAY_<ID>` (`TYPE = SERVICE`, `DEFAULT_ROLE`, `DEFAULT_SECONDARY_ROLES = ()`, network and
-   authentication policy). For MGM and PRD it also grants CREATE DATABASE to the deploy role so the job can create
-   the rehearsal clone; the script explains that trade-off.
-3. Check that the deploy role holds `EXECUTE TASK` on the account (a task runs only if its owner role has it; add
-   `EXECUTE MANAGED TASK` for serverless tasks). If bootstrap/10 does not grant it, grant it there: it is an
-   account-level grant and never belongs in a migration (FG007). Likewise, before the first layer-85 alert is
-   merged, run bootstrap/10's `GRANT EXECUTE ALERT ON ACCOUNT TO ROLE EDW_<ID>_DEPLOYER` for every runway (MGM and
-   PRD at least): resuming an alert needs it, and only MGM and PRD resume, so a missing grant first fails a real MGM
-   deploy after its approval (CONVENTIONS 5.12).
+2. In bootstrap/10 PART 0 set `runway = 'DEV'` (then SAN, SEA, PHX, MGM, PRD) and `access_roles` (B3 step e), paste
+   the one-line public key (no BEGIN/END lines) and run PART 0 + 2 + 3 + 4b + 5. It creates `WH_EDW_DEPLOY_<ID>`,
+   `EDW_<ID>_DEPLOYER` (granted to SYSADMIN), `SVC_EDW_FLYWAY_<ID>` (`TYPE = SERVICE`, `DEFAULT_ROLE`,
+   `DEFAULT_SECONDARY_ROLES = ()`, network and authentication policy) and the runway's access roles (PART 2e). For
+   MGM and PRD it also grants CREATE DATABASE to the deploy role so the job can create the rehearsal clone; the
+   script explains that trade-off.
+3. Account-level task and alert privileges come from bootstrap/10 PART 2c (ACCOUNTADMIN); they are account grants
+   and never belong in a migration (FG007):
+   * `EXECUTE TASK` on every runway: a task runs, and resumes, only if its owner role has it.
+   * `EXECUTE ALERT` on **MGM and PRD, automatically**. They are the runways whose deploys resume alerts
+     (`tasks_enabled = "true"`), and without it the first MGM deploy of a layer-85 file would fail at the resume,
+     after its approval (CONVENTIONS 5.12). DEV, SAN, SEA and PHX need it only if they resume alerts (a project that
+     switches tasks on, or adopting a database with running alerts, D2): then run the
+     `GRANT EXECUTE ALERT ON ACCOUNT TO ROLE IDENTIFIER($deploy_role);` line from PART 2c's comment for that runway.
+   * Serverless tasks or alerts (no WAREHOUSE) also need `EXECUTE MANAGED TASK` / `EXECUTE MANAGED ALERT`, also in
+     that comment.
 4. Store the `.p8` file and its passphrase in the enterprise vault (manual and break-glass sessions check them out
    there, B7), give them to the Jenkins admin for B4 through your secret-transfer channel, then delete the local
    copies (`shred -u "$U.p8"`).
@@ -314,10 +319,16 @@ openssl rsa -pubin -in "$U.pub" -outform DER | openssl dgst -sha256 -binary | op
 ```
 
 ```sql
-DESC USER SVC_EDW_FLYWAY_DEV;            -- RSA_PUBLIC_KEY_FP = 'SHA256:' + the value above; TYPE = SERVICE
+DESC USER SVC_EDW_FLYWAY_DEV;    -- RSA_PUBLIC_KEY_FP (or _2_FP) = 'SHA256:' + the value above; TYPE = SERVICE
 SHOW GRANTS OF ROLE EDW_DEV_DEPLOYER;    -- exactly SYSADMIN (role) and SVC_EDW_FLYWAY_DEV (user)
-SHOW GRANTS TO ROLE EDW_DEV_DEPLOYER;    -- warehouse USAGE, EXECUTE TASK, (MGM/PRD) CREATE DATABASE
+SHOW GRANTS TO ROLE EDW_DEV_DEPLOYER;    -- warehouse USAGE, EXECUTE TASK; MGM/PRD: CREATE DATABASE, EXECUTE ALERT
 ```
+
+bootstrap/10 PART 5 runs these checks for the runway in PART 0 and prints one PASS / FAIL / CHECK / INFO line each.
+It accepts the key in either slot (`RSA_PUBLIC_KEY_FP` or `RSA_PUBLIC_KEY_2_FP`: after a rotation the live key may be
+in slot 2) and fails a key shared by two service users; it wants `EXECUTE ALERT` on MGM and PRD (INFO elsewhere);
+it lists the databases the deploy role owns (none, or on MGM/PRD only `ALFA_EDW_RH_<ID>` while a deploy job
+rehearses: otherwise RUNBOOKS R12); and it checks that every access role named in `access_roles` exists.
 
 **What can go wrong:** pasting the BEGIN/END lines, or a PKCS#1 key (`BEGIN RSA PRIVATE KEY`), fails the login; the
 JDBC driver needs `-Dnet.snowflake.jdbc.useBundledBouncyCastleForPrivateKeyDecryption=true` in `JAVA_ARGS` to read an
@@ -329,16 +340,33 @@ see.
 
 **Who:** Snowflake admin. **Where:** Snowsight, `bootstrap/20_runway_database.sql` with `runway = '<ID>'`.
 
-**Do:** run the sections that (a) check the database exists and is owned by SYSADMIN, (b) grant USAGE and CREATE
-SCHEMA on it to `EDW_<ID>_DEPLOYER`, (c) create the `FLYWAY` schema owned by the deploy role with
-`FLYWAY.DEPLOY_LOG` and `FLYWAY.DEPLOY_TASK_STATE`, and (d) give the auditor USAGE on the database and the `FLYWAY`
-schema. **Do not** run the brownfield ownership transfer yet (that is D2) or the post-baseline auditor grant (D5).
+**Do:** run PART 0, 1, 2 and 6. They (a) check the database exists and is owned by SYSADMIN, (b) grant USAGE and
+CREATE SCHEMA on it to `EDW_<ID>_DEPLOYER`, (c) create the `FLYWAY` schema (managed access) owned by the deploy role
+with `FLYWAY.DEPLOY_LOG` and `FLYWAY.DEPLOY_TASK_STATE`, (d) give the auditor USAGE on the database and the `FLYWAY`
+schema, and (e) give the runway's access roles USAGE on the database; PART 6 prints a PASS / FAIL report. **Do
+not** run the brownfield ownership transfer yet (PART 3, that is D2) or the post-baseline auditor grant (PART 5, D5).
 
-Then (e) create the runway's **access roles** with bootstrap/10's access-role section: `EDW_<ID>_<SCHEMA>_READ`
-(and `EDW_<ID>_<SCHEMA>_WRITE` where a schema uses one) for every schema that has, or will get, a layer-90 grants
-file. The grants files grant to these roles through `${role_prefix}`, a migration never creates a role (FG007), and
-a missing role fails that runway's grants file at deploy time (CONVENTIONS 5.13). Repeat (e) for every runway
-whenever a new schema gets a grants file, before that PR merges.
+(e) The **access roles** are `EDW_<ID>_<SCHEMA>_READ` (and `EDW_<ID>_<SCHEMA>_WRITE` where a schema uses one), for
+every schema that has, or will get, a layer-90 grants file. One list in bootstrap/10 PART 0 names them for all
+runways:
+
+```sql
+SET access_roles = 'SALES_READ,FINANCE_READ';    -- <SCHEMA>_READ / <SCHEMA>_WRITE entries, comma-separated
+```
+
+bootstrap/10 PART 2e (part of B2's per-runway run, or PART 0 + 2e on its own) has USERADMIN create
+`EDW_<ID>_<entry>` for each entry and SECURITYADMIN grant each role to SYSADMIN. bootstrap/20 PART 1 then grants
+USAGE on the runway database to every existing `EDW_<ID>_*_READ` / `_WRITE` role; that is a database-level grant,
+so it never sits in a grants file (FG007). The grants files grant to these roles through `${role_prefix}`, a
+migration never creates a role (FG007), and a missing role fails that runway's grants file at deploy time
+(CONVENTIONS 5.13). When a new schema gets a grants file, add its entries to `access_roles` and run bootstrap/10
+PART 0 + 2e, then bootstrap/20 PART 0 + 1, for every runway, before that PR merges.
+
+**Kit upgrade on an existing runway.** Before the first deploy of a new kit version (callbacks, bootstrap) to a
+runway that already has its `FLYWAY` schema, re-run bootstrap/20 PART 0 + 2 + 6 there, on every runway. PART 2 is
+idempotent and adds the kit-table columns the new callbacks write; this version adds
+`FLYWAY.DEPLOY_TASK_STATE.ROOT_FQN`. Without it every deploy to that runway stops in `beforeMigrate__20_task_snapshot`
+with error -20121, before anything is applied. PART 6's "kit table columns" line shows whether the tables are current.
 
 The grant model rests on **managed-access schemas**: every EDW schema is created `WITH MANAGED ACCESS` (new ones by
 their V migration, adopted ones by bootstrap/20 in D2), so the deploy role, as schema owner, can define the
@@ -348,11 +376,15 @@ never grants.
 **Verify:**
 
 ```sql
-SHOW GRANTS ON DATABASE ALFA_EDW_DEV;            -- OWNERSHIP: SYSADMIN; USAGE + CREATE SCHEMA: EDW_DEV_DEPLOYER
-SHOW SCHEMAS LIKE 'FLYWAY' IN DATABASE ALFA_EDW_DEV;   -- owner EDW_DEV_DEPLOYER
+SHOW GRANTS ON DATABASE ALFA_EDW_DEV;            -- OWNERSHIP: SYSADMIN; USAGE + CREATE SCHEMA: EDW_DEV_DEPLOYER;
+                                                 -- USAGE: EDW_FLYWAY_AUDITOR and the access roles of (e)
+SHOW SCHEMAS LIKE 'FLYWAY' IN DATABASE ALFA_EDW_DEV;   -- owner EDW_DEV_DEPLOYER, options MANAGED ACCESS
 SHOW TABLES IN SCHEMA ALFA_EDW_DEV.FLYWAY;       -- DEPLOY_LOG, DEPLOY_TASK_STATE
 SHOW ROLES LIKE 'EDW_DEV_%';                     -- EDW_DEV_DEPLOYER plus the access roles of (e)
 ```
+
+and bootstrap/20 PART 6 shows PASS or INFO lines, except its schema and task lines: they stay CHECK / FAIL until
+PART 3 (D2) has handed every existing schema, PUBLIC included, to the deploy role and made it managed access.
 
 **What can go wrong:** `flyway.toml` sets `createSchemas = false`, so Flyway never creates `FLYWAY` itself; if it is
 missing, `baseline` and `migrate` fail. The two kit tables make `FLYWAY` non-empty, which is deliberate: Flyway
@@ -610,6 +642,15 @@ Then decide `runways.toml` `baseline_version` (D3) and set `[kit]` versions if y
 `flyway_version` and `flyway_image` together). If you keep the kit in a subfolder instead of the root, change the
 Script Paths in `jenkins/jobs.groovy` and the working directories in both Jenkinsfiles.
 
+**Upgrading an existing copy of the kit** (a later kit version into a repository that already deploys): bring in
+the kit's own files (`callbacks/`, `bootstrap/`, `scripts/`, `jenkins/`, `docs/`) and keep your migrations,
+repeatables and `runways.toml` / `flyway.toml` values. `callbacks/` must then hold exactly the new kit's files: a
+callback the new version renamed must not survive under its old name, or Flyway runs both (this version runs the
+cross-environment guard as `afterMigrate__50_cross_env_guard.sql`, before the task restore). Before the first deploy
+of the new version to each runway, re-run bootstrap/20 PART 0 + 2 + 6 there (B3, kit upgrade): without the new
+`FLYWAY.DEPLOY_TASK_STATE.ROOT_FQN` column every deploy stops in `beforeMigrate__20` with error -20121, with nothing
+applied.
+
 **Verify:** `fw.py guard` prints `0 error(s)`; open a PR for the branch (it becomes the first PR build in C4).
 
 **What can go wrong:** leaving the samples in place deploys a SALES and a FINANCE schema to every runway; `cp`
@@ -752,42 +793,82 @@ database while its ownership moves and it is baselined.
 
 ### D2. Transfer ownership to the deploy role (dry run, then apply)
 
-**Who:** Snowflake admin. **Where:** Snowsight, `bootstrap/20_runway_database.sql`, brownfield section.
+**Who:** Snowflake admin (SYSADMIN). **Where:** Snowsight, `bootstrap/20_runway_database.sql` PART 3 (brownfield
+adoption).
 
 **Do:**
 
-1. Set `runway` and leave the dry-run variable on. Run the section: it prints, without executing, the schema-wide
-   `GRANT OWNERSHIP ... COPY CURRENT GRANTS` statements for every schema and object type.
-2. Review the output with the D1 inventory (every schema, every object type, nothing for `FLYWAY` that is already
-   right).
-3. In the freeze window, set the dry-run variable off and run it again.
-4. Objects now owned by the deploy role also **execute** as the deploy role: owner's-rights procedures, tasks, pipes
+1. Run PART 0 + 1 + 2 first (B3): the apply records the started tasks in `FLYWAY.DEPLOY_TASK_STATE`, which PART 2
+   creates and upgrades. In PART 0 keep `dry_run = TRUE` and settle two switches:
+   * `keep_previous_owner_access` (default TRUE). A role that owned schemas or objects loses its implicit owner rights
+     at the transfer: COPY CURRENT GRANTS keeps the grants to OTHER roles, not the owner's own. TRUE plans working
+     grants for each previous owner, per schema: USAGE on the schema; SELECT, INSERT, UPDATE, DELETE, TRUNCATE on all
+     tables; SELECT on all views and streams; USAGE on all sequences, file formats, functions and procedures.
+     Stages, dynamic and external tables and task operation (OPERATE / MONITOR) are not covered: grant those by hand
+     from the dry-run list. FALSE plans none.
+   * `include_governance_objects` (default FALSE). Masking and row access policies and tags stay with their current
+     owner (normally a governance role: separation of duties), and migrations must then not replace them. TRUE moves
+     them to the deploy role too, only where no governance role owns them on purpose. Secrets are never moved: their
+     owner grants USAGE on them to the deploy role where a procedure or integration of the runway needs them.
+2. Run PART 3 (the dry run executes nothing). Before the plan, the report lists every started task and every started
+   alert (fully quoted), every pipe that moves with its execution state now, each previous owner role with the
+   schemas it owned, and WARNING / NOTE lines (future OWNERSHIP grants to another role, serverless tasks, alerts). The
+   plan, in order: USAGE on every warehouse a task, dynamic table or alert names (they then run as the deploy role);
+   then per schema (FLYWAY and PUBLIC included) the moving pipes paused, `GRANT OWNERSHIP ON SCHEMA` and
+   `ON ALL <type> IN SCHEMA ... COPY CURRENT GRANTS` (alerts and tasks only in schemas that still hold one the deploy
+   role does not own), each pipe moved on its own (Snowflake refuses bulk ownership grants on pipes and moves a pipe
+   only while it is paused) and force-resumed with `SYSTEM$PIPE_FORCE_RESUME` if it was RUNNING, the previous owners'
+   working grants, and `ALTER SCHEMA ... ENABLE MANAGED ACCESS`. Everything moves schema-wide, never task by task.
+3. Review it with the D1 inventory (every schema, every object type) and clear the warnings first: revoke or re-point
+   FUTURE OWNERSHIP grants to another role (or Flyway-created objects get the wrong owner); where the database holds
+   alerts, grant the deploy role `EXECUTE ALERT` (B2 step 3; `EXECUTE MANAGED ALERT` for serverless ones), and
+   `EXECUTE MANAGED TASK` for serverless tasks.
+4. In the freeze window, `SET dry_run = FALSE;` and run PART 3 again. It refuses to start, changing nothing, when PART
+   0's names disagree, `SHOW TASKS` failed (the started tasks would be unknown), or the database holds alerts and the
+   deploy role lacks `EXECUTE ALERT` (or `EXECUTE MANAGED ALERT` for serverless ones). It then records every started
+   task in `FLYWAY.DEPLOY_TASK_STATE` as `DEPLOY_ID = 'ADOPT-<timestamp>'` (printed in the report) **before the first
+   transfer**, and applies nothing if it cannot. It runs the plan one statement at a time (a failure is reported and
+   the rest continue), then resumes every task that was started before and is not started now (children, then
+   finalizers, then roots) and every alert that was started before. A transfer of a schema's tasks **always**
+   suspends all of them, even to the role that already owns them, so this resume is part of the apply, not an
+   option; it is also why PART 3 moves tasks only where one is not owned yet, which keeps a re-run safe.
+5. Read every `-- FAILED` line. On `ALL <type>`: an object of that type is owned by a role outside SYSADMIN's
+   hierarchy; have SECURITYADMIN grant that role to SYSADMIN and run PART 3 again (never for a governance,
+   policy-admin or secrets-owning role: keep those objects with their owner). On `ENABLE MANAGED ACCESS`: SECURITYADMIN
+   runs that line (verify on DEV first whether SYSADMIN may). A previous owner that is a DATABASE role gets FAILED
+   working grants: grant them by hand `TO DATABASE ROLE`. The optional ACCOUNT_USAGE query after the block
+   (ACCOUNTADMIN, about two hours behind) lists owners SYSADMIN cannot see.
+6. Objects now owned by the deploy role also **execute** as the deploy role: owner's-rights procedures, tasks, pipes
    and secure views. Grant `EDW_<ID>_DEPLOYER` whatever they read or use outside the database (landing databases,
    storage or API integrations, other warehouses) before re-enabling the ETL.
-5. bootstrap/20 also switches every adopted schema to **managed access** (`ALTER SCHEMA <S> ENABLE MANAGED ACCESS`),
-   so the deploy role, as schema owner, can define the layer-90 future grants (B3). Existing grants stay; from now on
-   only the schema owner grants on objects in the schema, so access requests go through the schema's grants file.
+7. Managed access (step 2's last statement per schema) lets the deploy role, as schema owner, define the layer-90
+   future grants (B3). Existing grants stay; from now on only the schema owner grants on objects in the schema, so
+   access requests go through the schema's grants file.
 
 Do DEV first as the rehearsal of the procedure, then PRD. MGM, SAN, SEA and PHX either repeat this step in place or
 are re-cloned from PRD in D6 (bootstrap/30 hands a clone over to the runway's role).
 
-**Verify:**
+**Verify:** bootstrap/20 PART 6 reports every schema owned by `EDW_<ID>_DEPLOYER` and MANAGED ACCESS, and every task
+owned by it; by hand:
 
 ```sql
 SHOW SCHEMAS IN DATABASE ALFA_EDW_PRD;
 SELECT "name", "owner", "options" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
-WHERE "name" NOT IN ('INFORMATION_SCHEMA', 'FLYWAY')
+WHERE "name" <> 'INFORMATION_SCHEMA'
   AND ("owner" <> 'EDW_PRD_DEPLOYER' OR COALESCE("options", '') NOT LIKE '%MANAGED ACCESS%');
 -- expect no rows; then re-run the D1 owner inventory: one owner, EDW_PRD_DEPLOYER
 SHOW TASKS IN DATABASE ALFA_EDW_PRD;
 SELECT "schema_name", "name", "owner", "state" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) ORDER BY 1, 2;
+-- every task the dry run listed as started is started again
 ```
 
-**What can go wrong:** ownership moved task by task severs task-graph links (the script transfers schema-wide, which
-keeps them); compare task states with the pre-change list and resume roots that were running
-(`SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('ALFA_EDW_PRD.<SCHEMA>.<ROOT_TASK>');` as the deploy role) and verify on
-first run whether your Snowflake release suspends tasks on ownership transfer; missing EXECUTE TASK on the deploy role
-stops every task.
+**What can go wrong:** the report starts "APPLIED with the RESUME PHASE FAILED", or a resume line says FAILED: the
+transfer is done but tasks or alerts stayed suspended; resume them by hand from the report or the `ADOPT-` rows
+(RUNBOOKS R9) once the cause is fixed (`EXECUTE TASK`, `EXECUTE ALERT`, warehouse USAGE on the deploy role);
+"NOT APPLIED: the started tasks could not be recorded": run PART 2, then PART 3 again; an ETL role that needs more
+than the working grants (stages, task OPERATE) fails until granted; a pipe whose state read UNKNOWN stays paused
+(resume it deliberately); ownership moved task by task would sever task-graph links, which is why PART 3 never does
+it: never "fix" one task with `GRANT OWNERSHIP`.
 
 ### D3. Choose and record the baseline version
 
@@ -892,15 +973,16 @@ table is case-sensitive: always quote `"flyway_schema_history"` and its lower-ca
 
 * **Refresh by clone (recommended for MGM and the test runways):** reserve the target's lock and, for the clone
   part (bootstrap/30 PART 3), `ALFA_EDW_PRD` as well, so a PRD deploy cannot run while PRD is being cloned and
-  leave the clone half-applied. Then run `bootstrap/30_refresh_runway.sql` with the
-  target runway. It runs its pre-checks (dangling policy references, hybrid and external tables, internal-stage
-  pipes, `ALFA_EDW_PRD.` references inside PRD code), clones PRD as `EDW_PRD_DEPLOYER` (it owns the tasks, pipes and
-  streams, which a clone only includes for their owner), hands every schema to `EDW_<ID>_DEPLOYER`, re-applies
-  database-level grants and lists the suspended tasks, alerts, dynamic tables and pipes. The clone carries PRD's
-  `FLYWAY` schema, so the runway is already baselined at PRD's state. MGM is accepted only when the script's
-  explicit MGM switch is set. The first deploy afterwards reports **every cloned object as drift** (LAST_DDL is the
-  clone time, LAST_DDL_BY the admin who cloned): review the list once and, where the runway's `drift_gate` is
-  `fail`, re-run that deploy with `ACK_DRIFT = true`, citing the refresh ticket (RUNBOOKS R8).
+  leave the clone half-applied. Then run `bootstrap/30_refresh_runway.sql` with the target runway (RUNBOOKS R8 walks
+  through its parts). It runs its pre-checks (dangling policy references, hybrid and external tables, internal-stage
+  pipes, `ALFA_EDW_PRD.` references inside PRD code), parks the current runway as `ALFA_EDW_<ID>_PRE_REFRESH` with
+  its schedules paused, clones PRD as `EDW_PRD_DEPLOYER` (it owns the tasks, pipes and streams, which a clone only
+  includes for their owner), hands every schema to `EDW_<ID>_DEPLOYER`, re-applies database-level grants and lists
+  the suspended tasks, alerts, dynamic tables and pipes. The clone carries PRD's `FLYWAY` schema, so the runway is
+  already baselined at PRD's state. MGM is accepted only when the script's explicit MGM switch is set. The first
+  deploy afterwards reports **every cloned object as drift** (LAST_DDL is the clone time, LAST_DDL_BY the admin who
+  cloned): review the list once and, where the runway's `drift_gate` is `fail`, re-run that deploy with
+  `ACK_DRIFT = true`, citing the refresh ticket (RUNBOOKS R8).
 * **Reconcile in place (DEV, or a database you cannot clone over):** compare it with PRD, turn real differences
   into migrations or drop them, then baseline it exactly as D5. Run as SYSADMIN:
 
@@ -1168,8 +1250,9 @@ refresh between projects.
    Travel point, migrates MGM, restores task graphs (`tasks_enabled = true`), archives `flyway info` and posts
    `deploy-MGM`.
 
-**Verify:** DEPLOY_LOG SUCCEEDED with `MGM-<build>`; `SHOW TASKS IN DATABASE ALFA_EDW_MGM` shows the roots that were
-started before the deploy started again; release smoke tests pass on MGM.
+**Verify:** DEPLOY_LOG SUCCEEDED with `MGM-<build>` (a TASKS_RESUMED row lists the graphs the restore had to fix);
+`SHOW TASKS IN DATABASE ALFA_EDW_MGM` shows every task that was started before the deploy, root or member, started
+again; release smoke tests pass on MGM.
 
 **What can go wrong:** promote-check FAIL (the candidate never completed on a test runway); verify-bundle refuses a
 branch bundle; the rehearsal fails: fix forward on main and build a new candidate; drift reported (`warn` prints it;
@@ -1196,9 +1279,10 @@ reconcile before PRD, RUNBOOKS R5); a rehearsal clone left behind after an abort
    the pre-flight pending list show what PRD itself will run.
 5. **The job continues:** records the Time Travel point (UTC timestamp in the console and the DEPLOY_LOG STARTED
    row), migrates PRD, restores task graphs, archives `flyway info`, posts `deploy-PRD`.
-6. **Post-checks (DBA):** DEPLOY_LOG SUCCEEDED row; task roots back in their previous state; release smoke tests;
-   every changed view still compiles (`SELECT * FROM <SCHEMA>.<VIEW> LIMIT 0;`); write the Time Travel point into the
-   ticket and close it.
+6. **Post-checks (DBA):** DEPLOY_LOG SUCCEEDED row; task graphs back in their previous state (every root and member
+   that was started before; one an operator had suspended stays suspended); release smoke tests; every changed view
+   still compiles (`SELECT * FROM <SCHEMA>.<VIEW> LIMIT 0;`); write the Time Travel point into the ticket and close
+   it.
 
 **Verify:**
 
@@ -1208,14 +1292,17 @@ FROM ALFA_EDW_PRD.FLYWAY."flyway_schema_history"
 ORDER BY "installed_rank" DESC
 LIMIT 20;                                          -- this release's rows, all success = TRUE
 SHOW TASKS IN DATABASE ALFA_EDW_PRD;
-SELECT "schema_name", "name", "state" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
-WHERE "predecessors" = '[]' ORDER BY 1, 2;          -- root tasks and their state
+SELECT t."schema_name", t."name", t."state" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) t
+WHERE t."predecessors" = '[]'
+  AND PARSE_JSON(t."task_relations"):"FinalizedRootTask" IS NULL   -- a finalizer has no predecessors either
+ORDER BY 1, 2;                                     -- root tasks and their state
 ```
 
 **What can go wrong:** no ticket or a self-approval: the job stops; drift gate `fail` with drift: reconcile (R5) or
 re-run with `ACK_DRIFT = true` after the approver accepts it in the ticket; a migration fails part-way: **do not
-re-run blindly** (Snowflake committed part of it), follow RUNBOOKS R1; exit code 35: RUNBOOKS R7; the lock is held
-by another run: the job waits (RUNBOOKS R6 if it is stuck).
+re-run blindly** (Snowflake committed part of it), follow RUNBOOKS R1; the cross-environment guard fails the deploy
+after the migrations committed (RUNBOOKS R10) or the task restore cannot bring a graph back (FAILED row, RUNBOOKS R9);
+exit code 35: RUNBOOKS R7; the lock is held by another run: the job waits (RUNBOOKS R6 if it is stuck).
 
 ### F5. Hotfix path
 
@@ -1280,6 +1367,24 @@ a changed repeatable left out of `-cherryPick`; running without reserved locks w
 Undo cannot reverse a partially failed migration and cannot restore data; repeatables cannot be undone at all, only
 re-applied from an older revision. The deploy jobs have no undo action: on a test runway the lease lead runs
 `flyway undo` by hand (B7); on MGM/PRD it is a break-glass run. Fix-forward is the default (A1, decision 8).
+
+**Time Travel recovery** (`bootstrap/40_point_in_time_recovery.sql`, RUNBOOKS R3) runs as the runway's deploy role;
+on MGM/PRD that is a break-glass session (B7) with the lock `ALFA_EDW_<ID>` reserved. A top-to-bottom run changes
+nothing: every destructive statement is commented out, and the blocks that stop or restart schedules (Q0, Q9) or
+re-grant (B4) refuse to run unless `confirm_template = '<A|B>:<deploy_id>'`. In PART 0 set `runway` and `deploy_id`
+(the deploy to undo: it must start with `<runway>-`, or be `manual`); PART 2 finds the point (one second before
+that deploy's STARTED row) and PART 3 compares row counts. Then run one template, statement by statement:
+
+* one table: Q0 -> A1 (clone at the point) -> A2 (compare) -> A3 (swap) -> Q9;
+* a whole schema (never `FLYWAY`): Q0 -> B1 (clone) -> B2 (compare) -> B2b (what a schema clone lacks) -> B3 (swap)
+  -> B4 (the schema's own grants) -> Q9.
+
+Q0 records the schema's writers (started root tasks and alerts, running dynamic tables, pipes) in
+`FLYWAY.DEPLOY_TASK_STATE` as `RESTORE-<deploy_id>` and stops them; Q9 restarts exactly those. **A swap discards
+every write made after the recovery point**, legitimate ETL rows included: they leave with the `_RESTORE_` evidence
+copy, and the data owner decides which of them are re-inserted (A2 lists them) or whether the ETL re-runs for that
+window. A dropped or replaced table is template C (UNDROP); a replaced view, function or procedure is template D
+(the previous version from git).
 
 ---
 
@@ -1376,9 +1481,12 @@ python3 scripts/fw.py drift-eval --runway MGM --rows rows.json      # exit 1 = t
 ### H1. First deploy to a runway
 
 - [ ] B2: `DESC USER SVC_EDW_FLYWAY_<ID>` fingerprint matches the key stored in `sf-flyway-<ID>`.
-- [ ] B2: `EXECUTE TASK` granted; `EXECUTE ALERT` too if the repository has (or will soon have) layer-85 alerts.
-- [ ] B3: `FLYWAY` schema with `DEPLOY_LOG` and `DEPLOY_TASK_STATE`, owned by `EDW_<ID>_DEPLOYER`.
-- [ ] B3: the access roles `EDW_<ID>_<SCHEMA>_READ` (and `_WRITE`) exist for every schema with a grants file.
+- [ ] B2: `EXECUTE TASK` granted; on MGM and PRD `EXECUTE ALERT` too (bootstrap/10 PART 2c grants it), elsewhere
+      only if the runway resumes alerts; bootstrap/10 PART 5 shows no FAIL line.
+- [ ] B3: `FLYWAY` schema with `DEPLOY_LOG` and `DEPLOY_TASK_STATE`, owned by `EDW_<ID>_DEPLOYER`; bootstrap/20
+      PART 6 "kit table columns" PASS (`ROOT_FQN` present; after a kit upgrade, PART 0 + 2 + 6 re-run).
+- [ ] B3: the access roles `EDW_<ID>_<SCHEMA>_READ` (and `_WRITE`) exist for every schema with a grants file
+      (bootstrap/10 PART 2e) and have USAGE on the database (bootstrap/20 PART 1).
 - [ ] D2: every schema owned by `EDW_<ID>_DEPLOYER` and managed access.
 - [ ] A2/C2: the deploy job runs on a deploy agent (console: node name), and that node takes no `EDW/ci` builds.
 - [ ] D5/D6: Baseline row present; auditor can `SELECT` the history table.
@@ -1389,7 +1497,7 @@ python3 scripts/fw.py drift-eval --runway MGM --rows rows.json      # exit 1 = t
 - [ ] First real deploy: DEPLOY_LOG STARTED and SUCCEEDED rows carry `DEPLOY_ID = '<ID>-<build>'`, not `manual`
       (this proves the deploy metadata placeholders reach Flyway).
 - [ ] `deploy-<ID>` status visible on the commit in Bitbucket.
-- [ ] Task roots in the expected state; drift output clean or explained.
+- [ ] Task graphs (roots and members) in the expected state; drift output clean or explained.
 
 ### H2. Release (MGM, then PRD)
 

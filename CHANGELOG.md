@@ -1,5 +1,51 @@
 # Changelog
 
+## 4.614.0 - Flyway Enterprise CI/CD kit for the ALFA EDW: DEV -> SAN/SEA/PHX -> MGM -> PRD (2026-10-13)
+
+The owner asked for a CI/CD pipeline and process that migrates every Snowflake object type (tables, views, tasks,
+functions, procedures) with Redgate Flyway, from DEV through up to three test runways to preproduction and production,
+with a step-by-step guide, the user accounts, the known Flyway shortcomings and the rules, scripts and processes that
+cover them. The target is the EDW, not OVERWATCH: six airport-coded databases (ALFA_EDW_DEV, ALFA_EDW_SAN,
+ALFA_EDW_SEA, ALFA_EDW_PHX, ALFA_EDW_MGM, ALFA_EDW_PRD) with 50+ schemas each, Bitbucket Cloud + Jenkins, Flyway
+Enterprise. The kit is `flyway-edw/`, built to be copied into the EDW repository. Nothing in the app or in
+`snowflake/` changes and no migration ships; the version moves only because every round ends with one.
+
+- **Start here.** `flyway-edw/README.md`, then `flyway-edw/docs/GUIDE.md`: decisions and prerequisites, accounts and
+  access (service users, roles, key pairs, network and authentication policies, Jenkins folders and credentials,
+  Bitbucket protections), Jenkins setup, adoption of the six existing databases, the developer workflow, and the
+  DEV -> SAN/SEA/PHX -> MGM -> PRD deploy procedures with hotfix and rollback. `docs/SHORTCOMINGS.md` lists every
+  known Flyway shortcoming that matters here (S01-S33), each with source evidence, the rule, script or process that
+  covers it, and the risk that remains. `docs/CONVENTIONS.md` is the authoring rulebook per object type;
+  `docs/RUNBOOKS.md` holds the incident procedures (R0-R12).
+- **One artifact for six databases.** Code never names its database (schema-qualified names only), so one bundle is
+  valid everywhere and a zero-copy clone of PRD is a working runway. Environment differences are Flyway placeholders.
+  Versions are UTC timestamps, so 50+ schema teams on many branches do not collide; test runways tolerate other
+  projects' migrations, MGM and PRD stay strict.
+- **Build once, promote the same bytes.** Jenkins builds a deterministic bundle with a SHA-256 manifest. Every deploy
+  re-verifies it; a main bundle must also be byte-identical to a commit on main (a bundle altered on a shared CI agent
+  is refused). MGM and PRD accept only main builds that already ran cleanly on a predecessor runway (read-only auditor
+  login), run on dedicated deploy agents, serialize on a per-database lock (Flyway takes no lock on Snowflake),
+  rehearse on a zero-copy clone, and need an approval inside the locked stage (PRD: four-eyes and a change ticket).
+- **Guard rules FG001-FG021** (`python3 scripts/fw.py guard`) catch what Flyway does not, before a PR merges:
+  edited applied migrations, duplicate and future versions, hard-coded environment databases, unqualified names
+  (Flyway runs `USE SCHEMA FLYWAY` before every migration), USE / ALTER SESSION leaks, destructive and account-level
+  DDL (also inside EXECUTE IMMEDIATE), missing COPY GRANTS, non-idempotent repeatables and their order, tasks left
+  suspended, an emulation of Flyway's Snowflake parser (statements it would report as incomplete), qualified pipe
+  targets, placeholders Flyway could not resolve, secrets, unsafe flyway.toml / runways.toml, unfinished scaffolds.
+- **Verified against Flyway and reviewed adversarially.** Every engine claim was checked in the Flyway 13.10 source
+  and docs (for example: no migration lock and no transactions on Snowflake, an environment's placeholders table
+  replaces the root one, versioned checksums ignore placeholders while repeatable ones include them, FLYWAY_*
+  environment variables are read as settings, comparison features are Enterprise preview on Snowflake). Two review
+  rounds (Jenkins, Flyway semantics, tooling, docs; then the Snowflake SQL) produced 42 confirmed findings; all are
+  fixed and the tooling ones are locked by failing fixtures.
+- **Locks.** `tests/test_flyway_edw_kit.py`: every guard rule trips on a failing fixture and the shipped samples pass;
+  bundle determinism, tamper and git-provenance checks; promotion-gate states; drift policy; the rehearsal clone can
+  never target a real runway; callback order; Jenkinsfiles never interpolate into shell and keep the kit contract;
+  docs cite only real rules and commands. `mypy.ini` checks `flyway-edw/scripts`.
+- **Before first use** (GUIDE Part B-D): the Snowflake objects in `bootstrap/` are run by a Snowflake admin in
+  Snowsight; nothing here has run against Snowflake or Jenkins yet, and the GUIDE marks each "verify on first run"
+  item. Flyway Enterprise drift/changes checks stay advisory until the Part G spike passes.
+
 ## 4.613.0 - Deploys no longer page Teams with a Streamlit runtime admin grant (2026-10-12)
 
 The owner, 2026-10-12: "Whenever I deploy the app, this keeps popping up in Teams. I want to turn this off." This

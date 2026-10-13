@@ -158,7 +158,11 @@ SELECT o.ORDER_STATUS, COUNT(*) AS ORDER_COUNT FROM ${edw_db}.SALES.ORDERS o GRO
 ### Cross-database references
 
 - **Another EDW runway.** Never reference one. FG009 rejects any `ALFA_EDW_` literal, `ALFA_EDW_${env}` included, and
-  the `afterMigrate__80_cross_env_guard` callback fails the deploy when any stored definition names another runway.
+  the `afterMigrate__50_cross_env_guard` callback fails the deploy when a stored definition in the runway (a view,
+  function or procedure body, a task body or WHEN condition, a dynamic table's query, an alert's condition or action)
+  uses another runway's database as a qualifier. Only `ALFA_EDW_<X>.` counts, quoted or not, followed by a dot: a
+  column such as `ALFA_EDW_LOAD_TS` is no qualifier. Comments are ignored; string literals are still scanned, because
+  dynamic SQL builds names from them (`'ALFA_EDW_PRD.SALES.T'` in a procedure fails the deploy).
 - **A database with the same name everywhere** (for example `SNOWFLAKE`, or a share mounted under one name). Write it
   directly: `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`.
 - **A non-EDW database whose name differs per runway** (for example a reference database `REF_DEV` / `REF_PRD`). Add a
@@ -642,9 +646,17 @@ ALTER TASK SALES.TASK_REFRESH_ORDER_SUMMARY RESUME;         -- FG014: resumes on
   procedure then swaps under the running graph without any suspend, and the task file changes only when the schedule
   or graph shape changes.
 - **Never `EXECUTE AS USER`.** It brings in the user's default secondary roles and breaks per-runway isolation.
-- **Deploys protect running graphs.** The callbacks `beforeMigrate__20_task_snapshot` and
-  `afterMigrate__60_task_restore` re-enable roots that were running before a deploy. They run only after a
-  **successful** migrate. After a failure, follow RUNBOOKS R9.
+- **Deploys protect running graphs, member by member.** `beforeMigrate__20_task_snapshot` records every member of
+  each graph whose root is started before the deploy (the root, its dependents and its finalizer), each with its own
+  state. On MGM and PRD (`tasks_enabled = "true"`) `afterMigrate__60_task_restore` then resumes each member that is
+  not started now and was started before or is new (not in the snapshot, e.g. a task this release added), with the
+  root suspended first and resumed last. A member an operator had suspended stays suspended, and so does a graph
+  whose root was suspended (it is not recorded). The callbacks resume members one by one with `ALTER TASK ... RESUME`
+  and never use `SYSTEM$TASK_DEPENDENTS_ENABLE`. The restore runs only after a **successful** migrate and after the
+  cross-environment guard passed. After a failure, follow RUNBOOKS R9.
+- **A migration that only suspends a running graph is undone by the restore.** Retire a graph with `DROP TASK` (and
+  remove its file, section 5.15). Note that this file's own `SYSTEM$TASK_DEPENDENTS_ENABLE` resumes every dependent
+  when the file re-runs, a member an operator suspended included.
 - **Started tasks share one account-wide cap** of 10,000 across all six runways, which is one more reason the test
   runways keep tasks off.
 
@@ -687,10 +699,11 @@ DROP ALERT IF EXISTS SALES.ALERT_OLD;   -- same trap: ALTER/DROP ALERT IF EXISTS
 - Alerts are created suspended, so resume them behind the same `${tasks_enabled}` gate as tasks. FG014 covers tasks
   only, so this one is **review**.
 - **Resuming needs EXECUTE ALERT.** The alert's owner, the deploy role, must hold `EXECUTE ALERT` on the account.
-  Before the first layer-85 file is merged, a Snowflake admin runs bootstrap/10's
-  `GRANT EXECUTE ALERT ON ACCOUNT TO ROLE EDW_<ID>_DEPLOYER` for every runway, MGM and PRD at least (GUIDE B2).
-  Only MGM and PRD resume alerts, and their rehearsals keep them off, so without the grant the first MGM deploy
-  fails at the resume, after its approval.
+  bootstrap/10 PART 2c grants it automatically on MGM and PRD, the runways whose deploys resume alerts (their
+  rehearsals keep alerts off, so a missing grant would first fail a real MGM deploy at the resume, after its
+  approval; PART 5 reports it as FAIL there). DEV, SAN, SEA and PHX get it only if they resume alerts (a project
+  that switches tasks on, or an adopted database with running alerts): the GRANT is in PART 2c's comment (GUIDE B2).
+  Serverless alerts also need `EXECUTE MANAGED ALERT`.
 - A replaced alert loses its explicit grants. Schema-level future grants (section 5.13) restore them.
 
 ### 5.13 Grants (layer 90)
@@ -699,10 +712,12 @@ There is one grants file per schema: `R__90_<SCHEMA>__grants.sql`. Grants go to 
 `${role_prefix}`: `EDW_<ID>_<SCHEMA>_READ`, plus `EDW_<ID>_<SCHEMA>_WRITE` where a schema needs one.
 
 **The access roles must exist before the grants deploy.** Roles are account objects, so no migration creates them
-(FG007). A Snowflake admin creates them, for every runway, with bootstrap/10's access-role section before the first
-deploy of a grants file that names them (GUIDE B3). A missing role fails the grants file on that runway, and its
-Failed history row then blocks every later deploy there until RUNBOOKS R1 is done. The same holds for a new schema
-added later: its roles come first.
+(FG007). A Snowflake admin creates them for every runway before the first deploy of a grants file that names them
+(GUIDE B3): the entries go into bootstrap/10 PART 0's `SET access_roles = '<SCHEMA>_READ,...'` (for the sample,
+`'SALES_READ,FINANCE_READ'`), PART 2e has USERADMIN create `EDW_<ID>_<entry>` and SECURITYADMIN grant each role to
+SYSADMIN, and bootstrap/20 PART 1 then grants them USAGE on the runway database (a database-level grant, so never in
+this file). A missing role fails the grants file on that runway, and its Failed history row then blocks every later
+deploy there until RUNBOOKS R1 is done. The same holds for a new schema added later: its roles come first.
 
 ```sql
 -- repeatable/SALES/R__90_SALES__grants.sql
@@ -908,14 +923,16 @@ the rest are judgment.
 - [ ] One logical change per V script; DML that must be atomic is one statement or one explicit transaction (5.3).
 - [ ] No V/U file that is already on `main` was edited, renamed or deleted.*
 - [ ] Every `CREATE OR REPLACE` that supports COPY GRANTS has it.*
-- [ ] New schema: `WITH MANAGED ACCESS`, and its access roles exist on every runway before its grants deploy.
+- [ ] New schema: `WITH MANAGED ACCESS`, and its access roles exist on every runway before its grants deploy
+      (bootstrap/10 PART 2e, then bootstrap/20 PART 1).
 - [ ] No `SELECT *` in views.
 - [ ] Repeatable layer is right; anything this file uses sorts before it.*
 - [ ] Renamed or deleted repeatable: a retired object is dropped by a V script (section 5.15).
 - [ ] Signature change: old overload dropped in a V script; every caller touched in the same PR.
 - [ ] Task files: root suspended first, `CREATE OR ALTER TASK`, `${tasks_enabled}` gate,
       `SYSTEM$TASK_DEPENDENTS_ENABLE`.*
-- [ ] Alerts are written inside `EXECUTE IMMEDIATE $$ ... $$`;* EXECUTE ALERT is granted on the runways (5.12).
+- [ ] Alerts are written inside `EXECUTE IMMEDIATE $$ ... $$`;* EXECUTE ALERT is held wherever alerts resume (MGM and
+      PRD get it from bootstrap/10 PART 2c; 5.12).
 - [ ] Alerts, pipes and dynamic tables are gated or paused where `${tasks_enabled}` is `false`.
 - [ ] Pipe COPY INTO targets are bare table names.*
 - [ ] No `${deploy_id}`, `${git_sha}`, `${build_url}`, `${approver}`, `${flyway:timestamp}`, `${flyway:database}` or

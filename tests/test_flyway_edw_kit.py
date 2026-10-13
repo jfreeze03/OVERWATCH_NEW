@@ -67,6 +67,24 @@ V = "migrations/SALES/V2026.10.13.0900__sales_x.sql"
 
 # --------------------------------------------------------------------------- the shipped kit
 
+def test_release_entry_describes_the_kit():
+    from tests._source import changelog_entry
+
+    entry = changelog_entry("4.614.0")
+    assert entry.startswith("## 4.614.0 - Flyway Enterprise CI/CD kit for the ALFA EDW")
+    for needle in ("flyway-edw/", "docs/GUIDE.md", "SHORTCOMINGS.md", "FG001-FG021", "no migration ships"):
+        assert needle in entry, needle
+
+
+def test_callbacks_run_in_the_safe_order():
+    """Flyway runs one event's callbacks in name order: the cross-environment guard must stop a deploy BEFORE the task
+    restore resumes a production graph that reads another runway (review round 2, SQL-08)."""
+    after = sorted(p.name for p in (KIT / "callbacks").glob("afterMigrate__*.sql"))
+    guard = next(n for n in after if "cross_env_guard" in n)
+    restore = next(n for n in after if "task_restore" in n)
+    assert guard < restore < after[-1] and after[-1].startswith("afterMigrate__99")
+
+
 def test_runway_ids_are_the_airport_codes_in_order():
     kit = manifest_mod.load_kit(KIT)
     assert list(kit.runways) == ["DEV", "SAN", "SEA", "PHX", "MGM", "PRD"]
