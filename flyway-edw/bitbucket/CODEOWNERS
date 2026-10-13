@@ -1,0 +1,48 @@
+# Code owners for the EDW Flyway repository (Bitbucket Cloud).
+#
+# PLACE THIS FILE AT .bitbucket/CODEOWNERS in the EDW repository (the root of the copied kit). It is kept under
+# bitbucket/ in the kit only so that it is reviewed together with the branch restrictions.
+#
+# Format: one rule per line, `<path pattern> <owner> [<owner> ...]`; `#` starts a comment. Patterns follow
+# .gitignore rules (a trailing / means "everything below"; a pattern with a / in the middle is relative to the repo
+# root). Owners are Bitbucket groups written @<workspace>/<group-slug> (or individual users). Replace `alfa` with the
+# real workspace slug and create the groups under Workspace settings > User groups before the first pull request.
+# Rules are ordered general -> specific: the later, more specific line is the one that should decide a file, as in
+# GitHub's CODEOWNERS (verify the precedence on the first pull request that touches migrations/SALES/).
+# Reviewer selection can be narrowed per group, e.g. `@alfa/edw-dba:random(1)` -- verify the selector syntax first.
+#
+# ENFORCEMENT CAVEAT: Bitbucket Cloud uses this file to SUGGEST / add code owners as reviewers; on its own it does
+# not stop a merge. Blocking on owner approval needs a merge check, and enforced merge checks need Bitbucket Premium
+# (unverified, confirm on the workspace's plan). The API has a `require_review_group_approvals_to_merge` restriction
+# kind whose exact semantics are undocumented; the alternative is a Marketplace code-owners app. What IS enforced
+# without it: two approvals, one default-reviewer approval and a green Jenkins build
+# (bitbucket/branch-restrictions.json, applied by bitbucket/apply_branch_restrictions.sh).
+
+# ---------------------------------------------------------------- catch-all: DBA review for anything unowned
+*                                   @alfa/edw-dba
+
+# ---------------------------------------------------------------- database code: schema owners + DBA
+# One pair of lines per schema folder. Keep @alfa/edw-dba on every SQL rule: a later, more specific rule replaces
+# the catch-all instead of adding to it.
+migrations/                         @alfa/edw-dba
+repeatable/                         @alfa/edw-dba
+migrations/SALES/                   @alfa/edw-sales @alfa/edw-dba
+repeatable/SALES/                   @alfa/edw-sales @alfa/edw-dba
+migrations/FINANCE/                 @alfa/edw-finance @alfa/edw-dba
+repeatable/FINANCE/                 @alfa/edw-finance @alfa/edw-dba
+
+# ---------------------------------------------------------------- platform: runs on every deploy to every runway
+# Callbacks and the Flyway / runway configuration change the behaviour of every deploy; the CI/CD code holds the
+# approval, lock and promotion gates; bootstrap/ holds the Snowflake account objects and grants.
+callbacks/                          @alfa/edw-platform
+flyway.toml                         @alfa/edw-platform
+runways.toml                        @alfa/edw-platform
+sqlfluff.cfg                        @alfa/edw-platform
+rules/                              @alfa/edw-platform
+scripts/                            @alfa/edw-platform
+jenkins/                            @alfa/edw-platform
+bootstrap/                          @alfa/edw-platform @alfa/edw-dba
+bitbucket/                          @alfa/edw-platform
+.bitbucket/                         @alfa/edw-platform
+docs/                               @alfa/edw-platform
+README.md                           @alfa/edw-platform

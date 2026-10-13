@@ -6,7 +6,7 @@
     "'groups_env' names an environment variable holding comma-separated Bitbucket group slugs; the script turns",
     "it into the API's 'groups' list. Only 'push' and 'restrict_merges' accept users/groups, and an EMPTY list",
     "denies everybody (api.bitbucket.org/swagger.json, POST .../branch-restrictions).",
-    "Kinds and value semantics: FACTS I4-01 / I4-02 (swagger branchrestriction.kind enum, fetched 2026-10-13).",
+    "Kinds and value semantics: the branchrestriction schema in api.bitbucket.org/swagger.json (read 2026-10-13).",
     "Plan caveats (verify on the workspace): enforce_merge_checks ('Prevent a merge with unresolved merge",
     "checks') is believed to need Bitbucket Premium; on Free/Standard the merge checks are advisory and the hard",
     "gate is Jenkins (MGM/PRD deploy jobs only take bundles built from main).",

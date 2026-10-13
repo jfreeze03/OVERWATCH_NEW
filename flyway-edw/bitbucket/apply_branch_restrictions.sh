@@ -38,11 +38,12 @@
 # Never run it with `bash -x`: tracing would print the token.
 # Exit codes: 0 everything in place, 1 at least one API call failed, 2 usage or configuration error.
 #
-# Facts (FACTS I4-01..I4-04): kinds and value semantics are from the branchrestriction schema in
-# api.bitbucket.org/swagger.json; kind + glob pattern is unique per repository, so the kind identifies the
-# restriction to update. Whether enforce_merge_checks needs Premium, and whether an empty push list also blocks
-# "Merge via pull request", are unverified: run --dry-run, apply to a scratch repository first, verify in the UI
-# (Repository settings > Branch restrictions) on first run.
+# Source: the branchrestriction schema and endpoint descriptions in api.bitbucket.org/swagger.json (read
+# 2026-10-13): the kinds, which take a value, that only push / restrict_merges take users and groups, and that
+# kind + glob pattern is unique per repository (so the kind identifies the restriction to update).
+# Unverified, so check on first run: whether enforce_merge_checks needs Premium, and whether an empty push list also
+# blocks "Merge via pull request". Run --dry-run, apply to a scratch repository first, then confirm in the UI
+# (Repository settings > Branch restrictions).
 
 set -euo pipefail
 

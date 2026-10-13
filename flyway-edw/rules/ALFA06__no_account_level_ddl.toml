@@ -3,8 +3,8 @@
 # Why: warehouses, roles, users, databases, integrations, network / authentication / password / session policies,
 # network rules, resource monitors, shares, replication / failover groups, connections, compute pools and the account
 # itself are shared by all six runways. A migration replays once per runway (and again in the MGM / PRD rehearsals),
-# each time with that runway's placeholders, and the runway deployer roles lack these privileges by design. Such
-# objects belong in bootstrap/, run deliberately by a Snowflake admin. Grants ON ACCOUNT / DATABASE / WAREHOUSE /
+# each time with that runway's placeholders, and a runway's deployer role is not meant to administer the account.
+# Such objects belong in bootstrap/, run deliberately by a Snowflake admin. Grants ON ACCOUNT / DATABASE / WAREHOUSE /
 # INTEGRATION / USER, GRANT ROLE ... TO USER and GRANT OWNERSHIP are reported for the same reason; schema-level
 # grants (repeatable layer 90) and DATABASE ROLE statements are not.
 #
