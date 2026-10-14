@@ -4,11 +4,11 @@
 # Floor raised 1.45 -> 1.52 with the use_container_width -> width='stretch' migration:
 # the width='stretch'/'content' string values do not exist before ~1.52, and SiS
 # (environment.yml) runs streamlit=1.52.2, so 1.52 is the real minimum now.
-streamlit~=1.52
+streamlit~=1.62
 pandas~=2.2
 # altair floor raised 5.4 -> 5.5: streamlit 1.52.2 declares
 # `altair!=5.4.0,!=5.4.1,<7,>=4.0`, blacklisting the whole 5.4 line (no 5.4.2
-# exists), so ~=5.4 could not resolve alongside the streamlit~=1.52 floor. 5.5.0
+# exists), so ~=5.4 could not resolve alongside the streamlit~=1.62 floor. 5.5.0
 # is the lowest altair co-installable with it.
 altair~=5.5
 snowflake-snowpark-python~=1.53
